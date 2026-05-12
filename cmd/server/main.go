@@ -9,19 +9,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
 	"github.com/rs/zerolog"
 )
 
 const shutdownTimeout = 60 * time.Second
 
 func main() {
+	cfg := config.Load()
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 
 	server := &http.Server{
-		Addr:    tools.EnvOrDefault("ADDR", ":3000"),
-		Handler: httpapi.NewRouter(logger),
+		Addr:    cfg.Server.Addr,
+		Handler: httpapi.NewRouter(logger, cfg),
 	}
 
 	errCh := make(chan error, 1)

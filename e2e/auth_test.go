@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
@@ -13,7 +14,7 @@ import (
 
 func TestCacheServiceRequiresBearerToken(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
-	router := httpapi.NewRouter(zerolog.Nop())
+	router := httpapi.NewRouter(zerolog.Nop(), config.Load())
 
 	req := httptest.NewRequest(
 		http.MethodPost,
@@ -30,7 +31,7 @@ func TestCacheServiceRequiresBearerToken(t *testing.T) {
 
 func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
-	router := httpapi.NewRouter(zerolog.Nop())
+	router := httpapi.NewRouter(zerolog.Nop(), config.Load())
 	token := actionsToken(t)
 
 	req := httptest.NewRequest(
@@ -48,7 +49,7 @@ func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testin
 }
 
 func TestUploadRouteDoesNotUseJWTAuth(t *testing.T) {
-	router := httpapi.NewRouter(zerolog.Nop())
+	router := httpapi.NewRouter(zerolog.Nop(), config.Load())
 	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
 	rec := httptest.NewRecorder()
 

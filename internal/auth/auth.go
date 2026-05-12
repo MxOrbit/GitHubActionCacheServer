@@ -9,13 +9,7 @@ import (
 	"sync"
 
 	"github.com/MicahParks/keyfunc/v3"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
 	"github.com/golang-jwt/jwt/v5"
-)
-
-const (
-	defaultIssuer  = "https://token.actions.githubusercontent.com"
-	defaultJWKSURL = "https://token.actions.githubusercontent.com/.well-known/jwks"
 )
 
 var (
@@ -60,27 +54,10 @@ type claims struct {
 	jwt.RegisteredClaims
 }
 
-func NewFromEnv() *Verifier {
-	return NewVerifier(Options{
-		Issuer:         defaultIssuer,
-		JWKSURL:        defaultJWKSURL,
-		SkipValidation: tools.ParseBool(tools.EnvOrDefault("SKIP_TOKEN_VALIDATION", "false")),
-	})
-}
-
 func NewVerifier(options Options) *Verifier {
-	issuer := options.Issuer
-	if issuer == "" {
-		issuer = defaultIssuer
-	}
-	jwksURL := options.JWKSURL
-	if jwksURL == "" {
-		jwksURL = defaultJWKSURL
-	}
-
 	return &Verifier{
-		issuer:         issuer,
-		jwksURL:        jwksURL,
+		issuer:         options.Issuer,
+		jwksURL:        options.JWKSURL,
 		skipValidation: options.SkipValidation,
 	}
 }

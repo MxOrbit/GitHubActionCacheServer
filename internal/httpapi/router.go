@@ -5,13 +5,14 @@ import (
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/handler"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
 
-func NewRouter(logger zerolog.Logger) http.Handler {
+func NewRouter(logger zerolog.Logger, cfg config.Config) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
@@ -22,7 +23,11 @@ func NewRouter(logger zerolog.Logger) http.Handler {
 
 	cacheService := router.Group(
 		"/twirp/github.actions.results.api.v1.CacheService",
-		middleware.RequireCacheScope(auth.NewFromEnv()),
+		middleware.RequireCacheScope(auth.NewVerifier(auth.Options{
+			Issuer:         cfg.Auth.TokenIssuer,
+			JWKSURL:        cfg.Auth.TokenJWKSURL,
+			SkipValidation: cfg.Auth.SkipTokenValidation,
+		})),
 	)
 	cacheService.POST("/CreateCacheEntry", handler.CreateCacheEntry)
 	cacheService.POST("/GetCacheEntryDownloadURL", handler.GetCacheEntryDownloadURL)

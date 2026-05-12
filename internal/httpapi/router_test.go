@@ -5,12 +5,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
 func TestHealthRoutes(t *testing.T) {
-	router := NewRouter(zerolog.Nop())
+	router := NewRouter(zerolog.Nop(), config.Load())
 
 	tests := []struct {
 		name string
@@ -35,7 +36,7 @@ func TestHealthRoutes(t *testing.T) {
 }
 
 func TestPlaceholderRoutes(t *testing.T) {
-	router := NewRouter(zerolog.Nop())
+	router := NewRouter(zerolog.Nop(), config.Load())
 	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
 	rec := httptest.NewRecorder()
 
