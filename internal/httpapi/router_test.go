@@ -36,11 +36,7 @@ func TestHealthRoutes(t *testing.T) {
 
 func TestPlaceholderRoutes(t *testing.T) {
 	router := NewRouter(zerolog.Nop())
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry",
-		nil,
-	)
+	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)

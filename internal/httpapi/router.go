@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/handler"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
@@ -18,7 +20,10 @@ func NewRouter(logger zerolog.Logger) http.Handler {
 	router.GET("/", handler.Root)
 	router.GET("/health", handler.Health)
 
-	cacheService := router.Group("/twirp/github.actions.results.api.v1.CacheService")
+	cacheService := router.Group(
+		"/twirp/github.actions.results.api.v1.CacheService",
+		middleware.RequireCacheScope(auth.NewFromEnv()),
+	)
 	cacheService.POST("/CreateCacheEntry", handler.CreateCacheEntry)
 	cacheService.POST("/GetCacheEntryDownloadURL", handler.GetCacheEntryDownloadURL)
 	cacheService.POST("/FinalizeCacheEntryUpload", handler.FinalizeCacheEntryUpload)

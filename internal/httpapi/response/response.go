@@ -198,12 +198,16 @@ func AzureCreated(requestID string) EmptyResponse {
 	}
 }
 
-func NotImplemented() JSONResponse[ErrorPayload] {
+func Error(status int, message string) JSONResponse[ErrorPayload] {
 	return jsonResponse[ErrorPayload]{
-		status: http.StatusNotImplemented,
+		status: status,
 		ok:     false,
 		payload: ErrorPayload{
-			Error: "not implemented",
+			Error: message,
 		},
 	}
+}
+
+func NotImplemented() JSONResponse[ErrorPayload] {
+	return Error(http.StatusNotImplemented, "not implemented")
 }
