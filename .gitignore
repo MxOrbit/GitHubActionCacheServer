@@ -1,0 +1,21 @@
+# IDEs / editors
+.idea/
+.vscode/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+# AI tools
+.aider*
+.claude/
+.codex/
+.continue/
+.cursor/
+.gemini/
+.windsurf/
+.codeium/
