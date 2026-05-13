@@ -13,9 +13,10 @@ const (
 )
 
 type Config struct {
-	Server ServerConfig
-	Auth   AuthConfig
-	DB     DBConfig
+	Server  ServerConfig
+	Auth    AuthConfig
+	DB      DBConfig
+	Storage StorageConfig
 }
 
 type ServerConfig struct {
@@ -47,6 +48,18 @@ type DBConfig struct {
 	MySQLPassword string
 }
 
+type StorageConfig struct {
+	Driver string
+
+	FilesystemPath string
+
+	S3Bucket         string
+	S3Region         string
+	S3EndpointURL    string
+	S3ForcePathStyle bool
+	S3KeyPrefix      string
+}
+
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
@@ -74,6 +87,15 @@ func Load() Config {
 			MySQLPort:     envOrDefault("DB_MYSQL_PORT", "3306"),
 			MySQLUser:     envOrDefault("DB_MYSQL_USER", ""),
 			MySQLPassword: envOrDefault("DB_MYSQL_PASSWORD", ""),
+		},
+		Storage: StorageConfig{
+			Driver:           envOrDefault("STORAGE_DRIVER", "filesystem"),
+			FilesystemPath:   envOrDefault("STORAGE_FILESYSTEM_PATH", ".data/storage/filesystem"),
+			S3Bucket:         envOrDefault("STORAGE_S3_BUCKET", ""),
+			S3Region:         envOrDefault("AWS_REGION", "us-east-1"),
+			S3EndpointURL:    envOrDefault("AWS_ENDPOINT_URL", ""),
+			S3ForcePathStyle: tools.ParseBool(envOrDefault("STORAGE_S3_FORCE_PATH_STYLE", "true")),
+			S3KeyPrefix:      envOrDefault("STORAGE_S3_KEY_PREFIX", "gh-actions-cache"),
 		},
 	}
 }
