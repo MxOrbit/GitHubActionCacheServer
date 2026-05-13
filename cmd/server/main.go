@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/rs/zerolog"
 )
@@ -19,6 +20,16 @@ const shutdownTimeout = 60 * time.Second
 func main() {
 	cfg := config.Load()
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+
+	dbClient, err := db.OpenAndMigrate(context.Background(), cfg.DB)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("database initialization failed")
+	}
+	defer func() {
+		if err := dbClient.Close(); err != nil {
+			logger.Error().Err(err).Msg("database close failed")
+		}
+	}()
 
 	server := &http.Server{
 		Addr:    cfg.Server.Addr,
@@ -37,22 +48,22 @@ func main() {
 	select {
 	case <-ctx.Done():
 		logger.Info().Dur("timeout", shutdownTimeout).Msg("shutdown signal received")
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
+	case serveErr := <-errCh:
+		if errors.Is(serveErr, http.ErrServerClosed) {
 			return
 		}
-		logger.Fatal().Err(err).Msg("server failed")
+		logger.Fatal().Err(serveErr).Msg("server failed")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Fatal().Err(err).Msg("graceful shutdown failed")
+	if shutdownErr := server.Shutdown(shutdownCtx); shutdownErr != nil {
+		logger.Fatal().Err(shutdownErr).Msg("graceful shutdown failed")
 	}
 
-	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Fatal().Err(err).Msg("server stopped with error")
+	if serveErr := <-errCh; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		logger.Fatal().Err(serveErr).Msg("server stopped with error")
 	}
 
 	logger.Info().Msg("server stopped")
