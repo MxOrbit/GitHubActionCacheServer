@@ -20,7 +20,8 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Addr string
+	Addr       string
+	APIBaseURL string
 }
 
 type AuthConfig struct {
@@ -63,7 +64,8 @@ type StorageConfig struct {
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
-			Addr: envOrDefault("ADDR", DefaultAddr),
+			Addr:       envOrDefault("ADDR", DefaultAddr),
+			APIBaseURL: envOrDefault("API_BASE_URL", ""),
 		},
 		Auth: AuthConfig{
 			TokenIssuer:         envOrDefault("GITHUB_ACTIONS_TOKEN_ISSUER", DefaultTokenIssuer),
