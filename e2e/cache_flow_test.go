@@ -1,0 +1,273 @@
+package e2e
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+	"time"
+
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	createCacheEntryPath      = "/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry"
+	finalizeCacheEntryPath    = "/twirp/github.actions.results.api.v1.CacheService/FinalizeCacheEntryUpload"
+	getCacheEntryDownloadPath = "/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL"
+	defaultCacheEntryVersion  = "version-1"
+	uploadRequestIDHeaderName = "x-ms-request-id"
+)
+
+type createCacheResponse struct {
+	OK              bool   `json:"ok"`
+	SignedUploadURL string `json:"signed_upload_url"`
+}
+
+type finalizeCacheResponse struct {
+	OK      bool   `json:"ok"`
+	EntryID string `json:"entry_id"`
+}
+
+type matchCacheResponse struct {
+	OK                bool   `json:"ok"`
+	SignedDownloadURL string `json:"signed_download_url"`
+	MatchedKey        string `json:"matched_key"`
+}
+
+func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	createBody := cacheBody("linux-build-cache")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+	uploadRec := uploadWholeCache(t, router, uploadURL, "cache-content")
+	require.NotEmpty(t, uploadRec.Header().Get(uploadRequestIDHeaderName))
+
+	finalizeResponse := finalizeCacheEntry(t, router, token, createBody)
+	require.NotEmpty(t, finalizeResponse.EntryID)
+
+	matchResponse := matchCacheEntry(t, router, token, map[string]any{
+		"key":          "linux-build-cache",
+		"restore_keys": []string{"linux-"},
+		"version":      defaultCacheEntryVersion,
+	})
+	require.Equal(t, "linux-build-cache", matchResponse.MatchedKey)
+
+	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
+	require.NotEmpty(t, downloadURL.Query().Get("expires"))
+	require.NotEmpty(t, downloadURL.Query().Get("signature"))
+
+	unsignedDownloadReq := httptest.NewRequest(http.MethodGet, downloadURL.Path, nil)
+	unsignedDownloadRec := httptest.NewRecorder()
+	router.ServeHTTP(unsignedDownloadRec, unsignedDownloadReq)
+	require.Equal(t, http.StatusUnauthorized, unsignedDownloadRec.Code)
+
+	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
+}
+
+func TestBlockUploadRetryIsIdempotent(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	createBody := cacheBody("retry-cache")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+	for _, body := range []string{"first attempt", "retry attempt"} {
+		uploadWholeCache(t, router, uploadURL, body)
+	}
+
+	finalizeCacheEntry(t, router, token, createBody)
+	matchResponse := matchCacheEntry(t, router, token, map[string]any{
+		"key":     "retry-cache",
+		"version": defaultCacheEntryVersion,
+	})
+
+	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
+	require.Equal(t, "retry attempt", downloadCache(t, router, downloadURL))
+}
+
+func TestOpaqueAzureBlockIDsUseBlockListOrder(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	createBody := cacheBody("opaque-block-cache")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+
+	firstBlockID := "b3BhcXVlLWJsb2NrLWZpcnN0"
+	secondBlockID := "b3BhcXVlLWJsb2NrLXNlY29uZA=="
+	for _, block := range []struct {
+		id   string
+		body string
+	}{
+		{id: secondBlockID, body: "world"},
+		{id: firstBlockID, body: "hello "},
+	} {
+		uploadReq := httptest.NewRequest(
+			http.MethodPut,
+			uploadURL.RequestURI()+"?comp=block&blockid="+url.QueryEscape(block.id),
+			bytes.NewBufferString(block.body),
+		)
+		uploadRec := httptest.NewRecorder()
+		router.ServeHTTP(uploadRec, uploadReq)
+		require.Equal(t, http.StatusCreated, uploadRec.Code)
+	}
+
+	blockList := `<BlockList><Latest>` + firstBlockID + `</Latest><Latest>` + secondBlockID + `</Latest></BlockList>`
+	commitReq := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI()+"?comp=blocklist", bytes.NewBufferString(blockList))
+	commitRec := httptest.NewRecorder()
+	router.ServeHTTP(commitRec, commitReq)
+	require.Equal(t, http.StatusCreated, commitRec.Code)
+
+	commitRetryReq := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI()+"?comp=blocklist", bytes.NewBufferString(blockList))
+	commitRetryRec := httptest.NewRecorder()
+	router.ServeHTTP(commitRetryRec, commitRetryReq)
+	require.Equal(t, http.StatusCreated, commitRetryRec.Code)
+
+	finalizeCacheEntry(t, router, token, createBody)
+	matchResponse := matchCacheEntry(t, router, token, map[string]any{
+		"key":     "opaque-block-cache",
+		"version": defaultCacheEntryVersion,
+	})
+
+	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
+	require.Equal(t, "hello world", downloadCache(t, router, downloadURL))
+}
+
+func TestBlankRestoreKeysAreIgnored(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	createBody := cacheBody("unrelated-cache")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+	uploadWholeCache(t, router, uploadURL, "unrelated")
+	finalizeCacheEntry(t, router, token, createBody)
+
+	matchRec := postJSON(t, router, getCacheEntryDownloadPath, token, map[string]any{
+		"key":          "missing-cache",
+		"restore_keys": []string{""},
+		"version":      defaultCacheEntryVersion,
+	})
+	require.Equal(t, http.StatusOK, matchRec.Code)
+	require.JSONEq(t, `{"ok":false}`, matchRec.Body.String())
+}
+
+func TestAbandonedUploadDoesNotBlockNewSave(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	app := newTestApp(t)
+	token := actionsToken(t)
+
+	body := cacheBody("abandoned-cache")
+	firstCreate := postJSON(t, app.router, createCacheEntryPath, token, body)
+	require.Equal(t, http.StatusOK, firstCreate.Code)
+
+	_, err := app.db.Upload.Update().
+		Where(upload.Key("abandoned-cache")).
+		SetCreatedAt(time.Now().Add(-25 * time.Hour).UnixMilli()).
+		Save(context.Background())
+	require.NoError(t, err)
+
+	createResponse := createCacheEntryResponse(t, app.router, token, body)
+	require.True(t, createResponse.OK)
+	require.NotEmpty(t, createResponse.SignedUploadURL)
+}
+
+func cacheBody(key string) map[string]string {
+	return map[string]string{
+		"key":     key,
+		"version": defaultCacheEntryVersion,
+	}
+}
+
+func createCacheEntry(t *testing.T, router http.Handler, token string, body any) *url.URL {
+	t.Helper()
+
+	response := createCacheEntryResponse(t, router, token, body)
+	require.True(t, response.OK)
+	require.NotEmpty(t, response.SignedUploadURL)
+	return parseSignedURL(t, response.SignedUploadURL)
+}
+
+func createCacheEntryResponse(t *testing.T, router http.Handler, token string, body any) createCacheResponse {
+	t.Helper()
+
+	rec := postJSON(t, router, createCacheEntryPath, token, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var response createCacheResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	return response
+}
+
+func finalizeCacheEntry(t *testing.T, router http.Handler, token string, body any) finalizeCacheResponse {
+	t.Helper()
+
+	rec := postJSON(t, router, finalizeCacheEntryPath, token, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var response finalizeCacheResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.True(t, response.OK)
+	return response
+}
+
+func matchCacheEntry(t *testing.T, router http.Handler, token string, body any) matchCacheResponse {
+	t.Helper()
+
+	rec := postJSON(t, router, getCacheEntryDownloadPath, token, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var response matchCacheResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.True(t, response.OK)
+	require.NotEmpty(t, response.SignedDownloadURL)
+	return response
+}
+
+func parseSignedURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+
+	signedURL, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	return signedURL
+}
+
+func uploadWholeCache(t *testing.T, router http.Handler, uploadURL *url.URL, body string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI(), bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	return rec
+}
+
+func downloadCache(t *testing.T, router http.Handler, downloadURL *url.URL) string {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, downloadURL.RequestURI(), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	return rec.Body.String()
+}
+
+func postJSON(t *testing.T, router http.Handler, path string, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+
+	payload, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}

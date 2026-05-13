@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
 func TestHealthRoutes(t *testing.T) {
-	router := NewRouter(zerolog.Nop(), config.Load())
+	router := newTestRouter(t)
 
 	tests := []struct {
 		name string
@@ -35,13 +36,23 @@ func TestHealthRoutes(t *testing.T) {
 	}
 }
 
-func TestPlaceholderRoutes(t *testing.T) {
-	router := NewRouter(zerolog.Nop(), config.Load())
+func TestUploadRouteIsRegistered(t *testing.T) {
+	router := newTestRouter(t)
 	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"not implemented"}`, rec.Body.String())
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, rec.Body.String())
+}
+
+func newTestRouter(t *testing.T) http.Handler {
+	t.Helper()
+
+	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	return NewRouter(zerolog.Nop(), config.Load(), Dependencies{
+		DB:      client,
+		Storage: storageAdapter,
+	})
 }

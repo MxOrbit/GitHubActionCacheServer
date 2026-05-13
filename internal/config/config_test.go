@@ -22,6 +22,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL", "")
 	t.Setenv("STORAGE_S3_FORCE_PATH_STYLE", "")
 	t.Setenv("STORAGE_S3_KEY_PREFIX", "")
+	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "")
+	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "")
 
 	cfg := Load()
 
@@ -37,6 +39,8 @@ func TestLoadDefaults(t *testing.T) {
 	require.Equal(t, "us-east-1", cfg.Storage.S3Region)
 	require.True(t, cfg.Storage.S3ForcePathStyle)
 	require.Equal(t, "gh-actions-cache", cfg.Storage.S3KeyPrefix)
+	require.False(t, cfg.Cache.EnableDirectDownloads)
+	require.Empty(t, cfg.Cache.DownloadURLSigningSecret)
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -53,6 +57,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL", "https://s3.example")
 	t.Setenv("STORAGE_S3_FORCE_PATH_STYLE", "false")
 	t.Setenv("STORAGE_S3_KEY_PREFIX", "custom-prefix")
+	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "true")
+	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "secret")
 
 	cfg := Load()
 
@@ -69,4 +75,6 @@ func TestLoadFromEnv(t *testing.T) {
 	require.Equal(t, "https://s3.example", cfg.Storage.S3EndpointURL)
 	require.False(t, cfg.Storage.S3ForcePathStyle)
 	require.Equal(t, "custom-prefix", cfg.Storage.S3KeyPrefix)
+	require.True(t, cfg.Cache.EnableDirectDownloads)
+	require.Equal(t, "secret", cfg.Cache.DownloadURLSigningSecret)
 }

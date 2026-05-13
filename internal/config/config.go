@@ -17,6 +17,7 @@ type Config struct {
 	Auth    AuthConfig
 	DB      DBConfig
 	Storage StorageConfig
+	Cache   CacheConfig
 }
 
 type ServerConfig struct {
@@ -61,6 +62,11 @@ type StorageConfig struct {
 	S3KeyPrefix      string
 }
 
+type CacheConfig struct {
+	EnableDirectDownloads    bool
+	DownloadURLSigningSecret string
+}
+
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
@@ -98,6 +104,10 @@ func Load() Config {
 			S3EndpointURL:    envOrDefault("AWS_ENDPOINT_URL", ""),
 			S3ForcePathStyle: tools.ParseBool(envOrDefault("STORAGE_S3_FORCE_PATH_STYLE", "true")),
 			S3KeyPrefix:      envOrDefault("STORAGE_S3_KEY_PREFIX", "gh-actions-cache"),
+		},
+		Cache: CacheConfig{
+			EnableDirectDownloads:    tools.ParseBool(envOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
+			DownloadURLSigningSecret: envOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
 		},
 	}
 }

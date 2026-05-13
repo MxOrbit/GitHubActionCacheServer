@@ -12,6 +12,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/rs/zerolog"
 )
 
@@ -31,9 +32,17 @@ func main() {
 		}
 	}()
 
+	storageAdapter, err := storage.NewAdapter(context.Background(), cfg.Storage)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("storage initialization failed")
+	}
+
 	server := &http.Server{
-		Addr:    cfg.Server.Addr,
-		Handler: httpapi.NewRouter(logger, cfg),
+		Addr: cfg.Server.Addr,
+		Handler: httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
+			DB:      dbClient,
+			Storage: storageAdapter,
+		}),
 	}
 
 	errCh := make(chan error, 1)

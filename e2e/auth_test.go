@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -14,7 +16,7 @@ import (
 
 func TestCacheServiceRequiresBearerToken(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
-	router := httpapi.NewRouter(zerolog.Nop(), config.Load())
+	router := newTestRouter(t)
 
 	req := httptest.NewRequest(
 		http.MethodPost,
@@ -31,7 +33,7 @@ func TestCacheServiceRequiresBearerToken(t *testing.T) {
 
 func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
-	router := httpapi.NewRouter(zerolog.Nop(), config.Load())
+	router := newTestRouter(t)
 	token := actionsToken(t)
 
 	req := httptest.NewRequest(
@@ -44,19 +46,19 @@ func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testin
 
 	router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"not implemented"}`, rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"invalid body"}`, rec.Body.String())
 }
 
 func TestUploadRouteDoesNotUseJWTAuth(t *testing.T) {
-	router := httpapi.NewRouter(zerolog.Nop(), config.Load())
+	router := newTestRouter(t)
 	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"not implemented"}`, rec.Body.String())
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, rec.Body.String())
 }
 
 func actionsToken(t *testing.T) string {
@@ -69,4 +71,29 @@ func actionsToken(t *testing.T) string {
 
 	require.NoError(t, err)
 	return token
+}
+
+func newTestRouter(t *testing.T) http.Handler {
+	t.Helper()
+	return newTestApp(t).router
+}
+
+type testApp struct {
+	router http.Handler
+	db     *ent.Client
+}
+
+func newTestApp(t *testing.T) testApp {
+	t.Helper()
+
+	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	router := httpapi.NewRouter(zerolog.Nop(), config.Load(), httpapi.Dependencies{
+		DB:      client,
+		Storage: storageAdapter,
+	})
+
+	return testApp{
+		router: router,
+		db:     client,
+	}
 }

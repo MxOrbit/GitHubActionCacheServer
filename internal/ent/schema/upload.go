@@ -38,5 +38,6 @@ func (Upload) Indexes() []ent.Index {
 		index.Fields("key", "version"),
 		index.Fields("scope"),
 		index.Fields("repoId"),
+		index.Fields("key", "version", "scope", "repoId").Unique(),
 	}
 }
