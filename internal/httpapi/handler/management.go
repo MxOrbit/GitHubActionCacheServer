@@ -187,6 +187,11 @@ func (h *Handler) matchManagementCacheEntry(c *gin.Context, primaryKey string, r
 			return exactPrimary, "exact-primary", err
 		}
 
+		prefixedPrimary, err := h.findManagementCacheEntry(c, primaryKey, version, scope, repoID, true)
+		if err != nil || prefixedPrimary != nil {
+			return prefixedPrimary, "prefixed-primary", err
+		}
+
 		for _, restoreKey := range restoreKeys {
 			exactRestore, err := h.findManagementCacheEntry(c, restoreKey, version, scope, repoID, false)
 			if err != nil || exactRestore != nil {

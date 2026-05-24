@@ -300,6 +300,20 @@ func (s *Service) MatchCacheEntry(ctx context.Context, keys []string, version st
 			return exactPrimary, nil
 		}
 
+		prefixedPrimary, err := s.findCacheEntry(ctx, cacheEntryMatch{
+			key:     primaryKey,
+			version: version,
+			scope:   cacheScope,
+			repoID:  scope.RepoID,
+			prefix:  true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if prefixedPrimary != nil {
+			return prefixedPrimary, nil
+		}
+
 		for _, restoreKey := range restoreKeys {
 			exactRestore, err := s.findCacheEntry(ctx, cacheEntryMatch{
 				key:     restoreKey,

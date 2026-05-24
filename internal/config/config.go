@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	DefaultAddr         = ":3000"
-	DefaultTokenIssuer  = "https://token.actions.githubusercontent.com"
-	DefaultTokenJWKSURL = "https://token.actions.githubusercontent.com/.well-known/jwks"
+	DefaultAddr              = ":3000"
+	DefaultActionsResultsURL = "https://results-receiver.actions.githubusercontent.com"
+	DefaultTokenIssuer       = "https://token.actions.githubusercontent.com"
+	DefaultTokenJWKSURL      = "https://token.actions.githubusercontent.com/.well-known/jwks"
 )
 
 type Config struct {
@@ -21,11 +22,13 @@ type Config struct {
 	Cache      CacheConfig
 	Management ManagementConfig
 	Cleanup    CleanupConfig
+	Debug      bool
 }
 
 type ServerConfig struct {
-	Addr       string
-	APIBaseURL string
+	Addr                     string
+	APIBaseURL               string
+	DefaultActionsResultsURL string
 }
 
 type AuthConfig struct {
@@ -83,8 +86,9 @@ type CleanupConfig struct {
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
-			Addr:       tools.EnvOrDefault("ADDR", DefaultAddr),
-			APIBaseURL: tools.EnvOrDefault("API_BASE_URL", ""),
+			Addr:                     tools.EnvOrDefault("ADDR", DefaultAddr),
+			APIBaseURL:               tools.EnvOrDefault("API_BASE_URL", ""),
+			DefaultActionsResultsURL: tools.EnvOrDefault("DEFAULT_ACTIONS_RESULTS_URL", DefaultActionsResultsURL),
 		},
 		Auth: AuthConfig{
 			TokenIssuer:         tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_ISSUER", DefaultTokenIssuer),
@@ -130,6 +134,7 @@ func Load() Config {
 			Disabled:           tools.ParseBool(tools.EnvOrDefault("DISABLE_CLEANUP_JOBS", "false")),
 			CacheOlderThanDays: tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
 		},
+		Debug: tools.ParseBool(tools.EnvOrDefault("DEBUG", "false")),
 	}
 }
 

@@ -22,7 +22,11 @@ const shutdownTimeout = 60 * time.Second
 
 func main() {
 	cfg := config.Load()
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	logLevel := zerolog.InfoLevel
+	if cfg.Debug {
+		logLevel = zerolog.DebugLevel
+	}
+	logger := zerolog.New(os.Stdout).Level(logLevel).With().Timestamp().Logger()
 
 	dbClient, err := db.OpenAndMigrate(context.Background(), cfg.DB)
 	if err != nil {

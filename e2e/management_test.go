@@ -73,6 +73,41 @@ func TestManagementCacheEntries(t *testing.T) {
 	require.Equal(t, "prefixed-restore", matchResponse.Type)
 	require.Equal(t, "entry-id", matchResponse.Match.ID)
 
+	prefixedPrimaryLocation := app.db.StorageLocation.Create().
+		SetID("prefixed-primary-location").
+		SetFolderName("prefixed-primary-folder").
+		SetPartCount(1).
+		SaveX(context.Background())
+	app.db.CacheEntry.Create().
+		SetID("prefixed-primary-entry").
+		SetKey("primary-cache-new").
+		SetVersion("version-1").
+		SetScope("refs/heads/main").
+		SetRepoId("123").
+		SetUpdatedAt(time.Now().Add(time.Second).UnixMilli()).
+		SetLocation(prefixedPrimaryLocation).
+		SaveX(context.Background())
+	exactRestoreLocation := app.db.StorageLocation.Create().
+		SetID("exact-restore-location").
+		SetFolderName("exact-restore-folder").
+		SetPartCount(1).
+		SaveX(context.Background())
+	app.db.CacheEntry.Create().
+		SetID("exact-restore-entry").
+		SetKey("restore-cache").
+		SetVersion("version-1").
+		SetScope("refs/heads/main").
+		SetRepoId("123").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(exactRestoreLocation).
+		SaveX(context.Background())
+
+	matchRec = managementRequest(app.router, http.MethodGet, "/management-api/cache-entries/match?primaryKey=primary-cache&restoreKeys=restore-cache&scopes=refs/heads/main&repoId=123&version=version-1", "secret")
+	require.Equal(t, http.StatusOK, matchRec.Code)
+	require.NoError(t, json.Unmarshal(matchRec.Body.Bytes(), &matchResponse))
+	require.Equal(t, "prefixed-primary", matchResponse.Type)
+	require.Equal(t, "prefixed-primary-entry", matchResponse.Match.ID)
+
 	deleteRec := managementRequest(app.router, http.MethodDelete, "/management-api/cache-entries/entry-id", "secret")
 	require.Equal(t, http.StatusNoContent, deleteRec.Code)
 

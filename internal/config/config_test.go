@@ -10,6 +10,7 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ADDR", "")
 	t.Setenv("API_BASE_URL", "")
+	t.Setenv("DEFAULT_ACTIONS_RESULTS_URL", "")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_ISSUER", "")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_JWKS_URL", "")
 	t.Setenv("SKIP_TOKEN_VALIDATION", "")
@@ -29,11 +30,13 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("MANAGEMENT_API_KEY", "")
 	t.Setenv("DISABLE_CLEANUP_JOBS", "")
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "")
+	t.Setenv("DEBUG", "")
 
 	cfg := Load()
 
 	require.Equal(t, DefaultAddr, cfg.Server.Addr)
 	require.Empty(t, cfg.Server.APIBaseURL)
+	require.Equal(t, DefaultActionsResultsURL, cfg.Server.DefaultActionsResultsURL)
 	require.Equal(t, DefaultTokenIssuer, cfg.Auth.TokenIssuer)
 	require.Equal(t, DefaultTokenJWKSURL, cfg.Auth.TokenJWKSURL)
 	require.False(t, cfg.Auth.SkipTokenValidation)
@@ -50,11 +53,13 @@ func TestLoadDefaults(t *testing.T) {
 	require.Empty(t, cfg.Management.APIKey)
 	require.False(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 90, cfg.Cleanup.CacheOlderThanDays)
+	require.False(t, cfg.Debug)
 }
 
 func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ADDR", ":8080")
 	t.Setenv("API_BASE_URL", "https://cache.example")
+	t.Setenv("DEFAULT_ACTIONS_RESULTS_URL", "https://results.example")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_ISSUER", "https://issuer.example")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_JWKS_URL", "https://issuer.example/.well-known/jwks")
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
@@ -72,11 +77,13 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("MANAGEMENT_API_KEY", "management-secret")
 	t.Setenv("DISABLE_CLEANUP_JOBS", "true")
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "30")
+	t.Setenv("DEBUG", "true")
 
 	cfg := Load()
 
 	require.Equal(t, ":8080", cfg.Server.Addr)
 	require.Equal(t, "https://cache.example", cfg.Server.APIBaseURL)
+	require.Equal(t, "https://results.example", cfg.Server.DefaultActionsResultsURL)
 	require.Equal(t, "https://issuer.example", cfg.Auth.TokenIssuer)
 	require.Equal(t, "https://issuer.example/.well-known/jwks", cfg.Auth.TokenJWKSURL)
 	require.True(t, cfg.Auth.SkipTokenValidation)
@@ -94,4 +101,5 @@ func TestLoadFromEnv(t *testing.T) {
 	require.Equal(t, "management-secret", cfg.Management.APIKey)
 	require.True(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 30, cfg.Cleanup.CacheOlderThanDays)
+	require.True(t, cfg.Debug)
 }

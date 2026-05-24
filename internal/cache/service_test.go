@@ -48,32 +48,40 @@ func TestUploadPartFailureDoesNotPoisonFinalize(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestPrimaryKeyRequiresExactMatch(t *testing.T) {
+func TestMatchCacheEntryUsesOriginalOrder(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
-	location := client.StorageLocation.Create().
-		SetID("location-id").
-		SetFolderName("folder").
-		SetPartCount(1).
-		SaveX(ctx)
-	client.CacheEntry.Create().
-		SetID("entry-id").
-		SetKey("linux-cache-old").
-		SetVersion("version").
-		SetScope("refs/heads/main").
-		SetRepoId("123").
-		SetUpdatedAt(time.Now().UnixMilli()).
-		SetLocation(location).
-		SaveX(ctx)
 
-	match, err := service.MatchCacheEntry(ctx, []string{"linux-cache"}, "version", writableScope())
+	createMatchedCacheEntry(ctx, client, "exact-primary", "linux-cache")
+	createMatchedCacheEntry(ctx, client, "prefixed-primary", "linux-cache-old")
+	createMatchedCacheEntry(ctx, client, "exact-restore", "restore-cache")
+	createMatchedCacheEntry(ctx, client, "prefixed-restore", "restore-cache-old")
+
+	match, err := service.MatchCacheEntry(ctx, []string{"linux-cache", "restore-cache"}, "version", writableScope())
 	require.NoError(t, err)
-	require.Nil(t, match)
+	require.NotNil(t, match)
+	require.Equal(t, "linux-cache", match.Key)
 
-	match, err = service.MatchCacheEntry(ctx, []string{"missing-primary", "linux-cache"}, "version", writableScope())
+	client.CacheEntry.DeleteOneID("exact-primary").ExecX(ctx)
+
+	match, err = service.MatchCacheEntry(ctx, []string{"linux-cache", "restore-cache"}, "version", writableScope())
 	require.NoError(t, err)
 	require.NotNil(t, match)
 	require.Equal(t, "linux-cache-old", match.Key)
+
+	client.CacheEntry.DeleteOneID("prefixed-primary").ExecX(ctx)
+
+	match, err = service.MatchCacheEntry(ctx, []string{"linux-cache", "restore-cache"}, "version", writableScope())
+	require.NoError(t, err)
+	require.NotNil(t, match)
+	require.Equal(t, "restore-cache", match.Key)
+
+	client.CacheEntry.DeleteOneID("exact-restore").ExecX(ctx)
+
+	match, err = service.MatchCacheEntry(ctx, []string{"linux-cache", "restore-cache"}, "version", writableScope())
+	require.NoError(t, err)
+	require.NotNil(t, match)
+	require.Equal(t, "restore-cache-old", match.Key)
 }
 
 func TestCreateUploadReservationIsAtomic(t *testing.T) {
@@ -468,6 +476,23 @@ func writableScope() auth.CacheScope {
 			{Scope: "refs/heads/main", Permission: 3},
 		},
 	}
+}
+
+func createMatchedCacheEntry(ctx context.Context, client *ent.Client, id string, key string) *ent.CacheEntry {
+	location := client.StorageLocation.Create().
+		SetID(id + "-location").
+		SetFolderName(id + "-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	return client.CacheEntry.Create().
+		SetID(id).
+		SetKey(key).
+		SetVersion("version").
+		SetScope("refs/heads/main").
+		SetRepoId("123").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(ctx)
 }
 
 func createCacheEntryForDownload(ctx context.Context, client *ent.Client, entryID string, folderName string) *ent.StorageLocation {
