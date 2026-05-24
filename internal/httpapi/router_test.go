@@ -55,6 +55,105 @@ func TestUploadRouteIsRegistered(t *testing.T) {
 	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, rec.Body.String())
 }
 
+func TestFallbackProxyForwardsUnknownPath(t *testing.T) {
+	type proxiedRequest struct {
+		Method      string
+		Host        string
+		Path        string
+		RawQuery    string
+		Custom      string
+		ContentType string
+		Body        string
+	}
+
+	proxied := make(chan proxiedRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+
+		proxied <- proxiedRequest{
+			Method:      r.Method,
+			Host:        r.Host,
+			Path:        r.URL.Path,
+			RawQuery:    r.URL.RawQuery,
+			Custom:      r.Header.Get("X-Custom"),
+			ContentType: r.Header.Get("Content-Type"),
+			Body:        string(body),
+		}
+
+		w.Header().Set("X-Upstream", "ok")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer upstream.Close()
+
+	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	cfg := config.Load()
+	cfg.Server.DefaultActionsResultsURL = upstream.URL + "/api"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
+		DB:      client,
+		Storage: storageAdapter,
+	})
+	cacheServer := httptest.NewServer(router)
+	defer cacheServer.Close()
+
+	req, err := http.NewRequest(http.MethodPatch, cacheServer.URL+"/results/workflow?attempt=1&name=cache", strings.NewReader("payload"))
+	require.NoError(t, err)
+	req.Header.Set("X-Custom", "custom-value")
+	req.Header.Set("Content-Type", "text/plain")
+	res, err := cacheServer.Client().Do(req)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	responseBody, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusAccepted, res.StatusCode)
+	require.Equal(t, "ok", res.Header.Get("X-Upstream"))
+	require.Equal(t, "proxied", string(responseBody))
+
+	got := <-proxied
+	require.Equal(t, http.MethodPatch, got.Method)
+	require.Equal(t, strings.TrimPrefix(upstream.URL, "http://"), got.Host)
+	require.Equal(t, "/api/results/workflow", got.Path)
+	require.Equal(t, "attempt=1&name=cache", got.RawQuery)
+	require.Equal(t, "custom-value", got.Custom)
+	require.Equal(t, "text/plain", got.ContentType)
+	require.Equal(t, "payload", got.Body)
+}
+
+func TestFallbackProxyDoesNotHandleManagementMisses(t *testing.T) {
+	proxied := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	cfg := config.Load()
+	cfg.Server.DefaultActionsResultsURL = upstream.URL
+	cfg.Management.APIKey = "secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
+		DB:      client,
+		Storage: storageAdapter,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/management-api/_docs", nil)
+	req.Header.Set("x-api-key", "secret")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"management endpoint not found"}`, rec.Body.String())
+
+	select {
+	case <-proxied:
+		t.Fatal("management miss was proxied")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestDownloadSurfacesImmediateMergeUploadFailure(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))

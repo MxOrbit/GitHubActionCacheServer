@@ -77,6 +77,8 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 		storageLocations.DELETE("/:id", handlers.DeleteStorageLocation)
 	}
 
+	router.NoRoute(noRoute(logger, cfg))
+
 	return router
 }
 
