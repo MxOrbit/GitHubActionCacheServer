@@ -1,11 +1,22 @@
 package storage
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/stretchr/testify/require"
 )
 
 func TestS3AdapterImplementsDirectDownload(t *testing.T) {
@@ -35,6 +46,120 @@ func TestS3ClearUsesDelimitedPrefix(t *testing.T) {
 	}
 }
 
+func TestNewS3AdapterProbesConfiguredPrefix(t *testing.T) {
+	fakeS3 := newFakeS3Server(t, fakeS3Options{})
+	defer fakeS3.Close()
+
+	_, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+	require.Equal(t, 0, fakeS3.headBucketCount())
+	require.Equal(t, 1, fakeS3.listObjectsCount())
+	require.Equal(t, "gh-actions-cache/", fakeS3.listObjectsPrefix())
+	require.Equal(t, "1", fakeS3.listObjectsMaxKeys())
+}
+
+func TestNewS3AdapterFailsWhenPrefixProbeCannotAccessBucket(t *testing.T) {
+	fakeS3 := newFakeS3Server(t, fakeS3Options{listObjectsStatus: http.StatusNotFound})
+	defer fakeS3.Close()
+
+	_, err := newTestS3Adapter(t, fakeS3.URL)
+	require.Error(t, err)
+	require.Equal(t, 0, fakeS3.headBucketCount())
+	require.Equal(t, 1, fakeS3.listObjectsCount())
+}
+
+func TestS3AdapterUploadStreamUsesMultipartForLargeObjects(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	body := bytes.NewReader(make([]byte, defaultS3UploadPartSize+1))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/object", body))
+
+	require.False(t, fakeS3.putObjectCalled())
+	require.True(t, fakeS3.createMultipartCalled())
+	require.Equal(t, []int{1, 2}, fakeS3.uploadedPartNumbers())
+	require.Equal(t, []int{defaultS3UploadPartSize, 1}, fakeS3.uploadedPartSizes())
+	require.True(t, fakeS3.completeMultipartCalled())
+	require.False(t, fakeS3.abortMultipartCalled())
+}
+
+func TestS3AdapterUploadStreamAbortsFailedMultipartUpload(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{failPartNumber: 2})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	body := bytes.NewReader(make([]byte, defaultS3UploadPartSize+1))
+	err = adapter.UploadStream(ctx, "folder/object", body)
+	require.Error(t, err)
+
+	require.True(t, fakeS3.createMultipartCalled())
+	require.True(t, fakeS3.abortMultipartCalled())
+	require.False(t, fakeS3.completeMultipartCalled())
+}
+
+func TestS3AdapterUploadStreamAbortsCanceledMultipartUploadWithFreshContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{
+		onUploadPart: func(partNumber int) {
+			if partNumber == 1 {
+				cancel()
+			}
+		},
+	})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	body := bytes.NewReader(make([]byte, defaultS3UploadPartSize+1))
+	err = adapter.UploadStream(ctx, "folder/object", body)
+	require.Error(t, err)
+
+	require.True(t, fakeS3.createMultipartCalled())
+	require.True(t, fakeS3.abortMultipartCalled())
+	require.False(t, fakeS3.completeMultipartCalled())
+}
+
+func TestS3AdapterCreateDownloadStreamTreatsMissingObjectAsNotFound(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{
+		getObjectStatus:    http.StatusNotFound,
+		getObjectErrorCode: "NoSuchKey",
+	})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	stream, err := adapter.CreateDownloadStream(ctx, "folder/object")
+	require.Nil(t, stream)
+	require.Error(t, err)
+	var notFound ObjectNotFoundError
+	require.True(t, errors.As(err, &notFound))
+}
+
+func TestS3AdapterCreateDownloadStreamDoesNotTreatMissingBucketAsObjectNotFound(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{
+		getObjectStatus:    http.StatusNotFound,
+		getObjectErrorCode: "NoSuchBucket",
+	})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	stream, err := adapter.CreateDownloadStream(ctx, "folder/object")
+	require.Nil(t, stream)
+	require.Error(t, err)
+	var notFound ObjectNotFoundError
+	require.False(t, errors.As(err, &notFound))
+	require.Contains(t, err.Error(), "get s3 object")
+}
+
 func TestS3DeleteErrorsError(t *testing.T) {
 	err := s3DeleteErrorsError([]types.Error{
 		{
@@ -52,6 +177,222 @@ func TestS3DeleteErrorsError(t *testing.T) {
 			t.Fatalf("expected error to contain %q, got %q", want, err.Error())
 		}
 	}
+}
+
+type fakeS3Options struct {
+	headBucketStatus   int
+	listObjectsStatus  int
+	getObjectStatus    int
+	getObjectErrorCode string
+	failPartNumber     int
+	onUploadPart       func(int)
+}
+
+type fakeS3Server struct {
+	*httptest.Server
+	headBucketStatus   int
+	listObjectsStatus  int
+	getObjectStatus    int
+	getObjectErrorCode string
+	failPartNumber     int
+	onUploadPart       func(int)
+
+	mu             sync.Mutex
+	headBucket     int
+	listObjects    int
+	listPrefix     string
+	listMaxKeys    string
+	putObject      bool
+	createUpload   bool
+	uploadParts    []int
+	uploadPartSize []int
+	completeUpload bool
+	abortUpload    bool
+}
+
+func newFakeS3Server(t *testing.T, options fakeS3Options) *fakeS3Server {
+	t.Helper()
+
+	if options.headBucketStatus == 0 {
+		options.headBucketStatus = http.StatusOK
+	}
+	if options.listObjectsStatus == 0 {
+		options.listObjectsStatus = http.StatusOK
+	}
+	if options.getObjectStatus == 0 {
+		options.getObjectStatus = http.StatusOK
+	}
+	fakeS3 := &fakeS3Server{
+		headBucketStatus:   options.headBucketStatus,
+		listObjectsStatus:  options.listObjectsStatus,
+		getObjectStatus:    options.getObjectStatus,
+		getObjectErrorCode: options.getObjectErrorCode,
+		failPartNumber:     options.failPartNumber,
+		onUploadPart:       options.onUploadPart,
+	}
+	fakeS3.Server = httptest.NewServer(http.HandlerFunc(fakeS3.handle))
+	return fakeS3
+}
+
+func (s *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodHead && r.URL.Path == "/cache-bucket":
+		s.mu.Lock()
+		s.headBucket++
+		s.mu.Unlock()
+		w.WriteHeader(s.headBucketStatus)
+	case r.Method == http.MethodGet && r.URL.Path == "/cache-bucket" && r.URL.Query().Get("list-type") == "2":
+		s.mu.Lock()
+		s.listObjects++
+		s.listPrefix = r.URL.Query().Get("prefix")
+		s.listMaxKeys = r.URL.Query().Get("max-keys")
+		status := s.listObjectsStatus
+		s.mu.Unlock()
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			_, _ = fmt.Fprint(w, `<Error><Code>NoSuchBucket</Code><Message>bucket not found</Message></Error>`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = fmt.Fprint(w, `<ListBucketResult><Name>cache-bucket</Name><Prefix>gh-actions-cache/</Prefix><KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/cache-bucket/"):
+		if s.getObjectStatus != http.StatusOK {
+			code := s.getObjectErrorCode
+			if code == "" {
+				code = "NoSuchKey"
+			}
+			w.WriteHeader(s.getObjectStatus)
+			_, _ = fmt.Fprintf(w, `<Error><Code>%s</Code><Message>get failed</Message></Error>`, code)
+			return
+		}
+		_, _ = fmt.Fprint(w, "object")
+	case r.Method == http.MethodPut && r.URL.Query().Get("partNumber") == "":
+		_, _ = io.Copy(io.Discard, r.Body)
+		s.mu.Lock()
+		s.putObject = true
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodPost && hasQueryKey(r, "uploads"):
+		s.mu.Lock()
+		s.createUpload = true
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = fmt.Fprint(w, `<CreateMultipartUploadResult><Bucket>cache-bucket</Bucket><Key>gh-actions-cache/folder/object</Key><UploadId>upload-id</UploadId></CreateMultipartUploadResult>`)
+	case r.Method == http.MethodPut && r.URL.Query().Get("uploadId") == "upload-id":
+		partNumber, _ := strconv.Atoi(r.URL.Query().Get("partNumber"))
+		size, _ := io.Copy(io.Discard, r.Body)
+		s.mu.Lock()
+		s.uploadParts = append(s.uploadParts, partNumber)
+		s.uploadPartSize = append(s.uploadPartSize, int(size))
+		onUploadPart := s.onUploadPart
+		s.mu.Unlock()
+		if onUploadPart != nil {
+			onUploadPart(partNumber)
+		}
+		if partNumber == s.failPartNumber {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `<Error><Code>InternalError</Code><Message>part failed</Message></Error>`)
+			return
+		}
+		w.Header().Set("ETag", fmt.Sprintf(`"part-%d"`, partNumber))
+		w.WriteHeader(http.StatusOK)
+	case r.Method == http.MethodPost && r.URL.Query().Get("uploadId") == "upload-id":
+		_, _ = io.Copy(io.Discard, r.Body)
+		s.mu.Lock()
+		s.completeUpload = true
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = fmt.Fprint(w, `<CompleteMultipartUploadResult><Location>http://example/folder/object</Location><Bucket>cache-bucket</Bucket><Key>gh-actions-cache/folder/object</Key><ETag>"complete"</ETag></CompleteMultipartUploadResult>`)
+	case r.Method == http.MethodDelete && r.URL.Query().Get("uploadId") == "upload-id":
+		s.mu.Lock()
+		s.abortUpload = true
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprintf(w, "unexpected request: %s %s", r.Method, r.URL.String())
+	}
+}
+
+func (s *fakeS3Server) headBucketCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.headBucket
+}
+
+func (s *fakeS3Server) listObjectsCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listObjects
+}
+
+func (s *fakeS3Server) listObjectsPrefix() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listPrefix
+}
+
+func (s *fakeS3Server) listObjectsMaxKeys() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listMaxKeys
+}
+
+func (s *fakeS3Server) putObjectCalled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.putObject
+}
+
+func (s *fakeS3Server) createMultipartCalled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createUpload
+}
+
+func (s *fakeS3Server) uploadedPartNumbers() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.uploadParts...)
+}
+
+func (s *fakeS3Server) uploadedPartSizes() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.uploadPartSize...)
+}
+
+func (s *fakeS3Server) completeMultipartCalled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.completeUpload
+}
+
+func (s *fakeS3Server) abortMultipartCalled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abortUpload
+}
+
+func hasQueryKey(r *http.Request, key string) bool {
+	_, ok := r.URL.Query()[key]
+	return ok
+}
+
+func newTestS3Adapter(t *testing.T, endpoint string) (*S3Adapter, error) {
+	t.Helper()
+
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	return NewS3Adapter(context.Background(), config.StorageConfig{
+		S3Bucket:         "cache-bucket",
+		S3Region:         "us-east-1",
+		S3EndpointURL:    endpoint,
+		S3ForcePathStyle: true,
+		S3KeyPrefix:      defaultS3KeyPrefix,
+	})
 }
 
 func TestIsDirectS3FolderObject(t *testing.T) {

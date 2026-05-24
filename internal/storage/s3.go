@@ -11,16 +11,23 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 )
 
-const defaultS3KeyPrefix = "gh-actions-cache"
+const (
+	defaultS3KeyPrefix         = "gh-actions-cache"
+	defaultS3UploadPartSize    = 5 * 1024 * 1024
+	defaultS3UploadConcurrency = 1
+	s3MultipartAbortTimeout    = 30 * time.Second
+)
 
 type S3Adapter struct {
 	client    *s3.Client
 	presign   *s3.PresignClient
+	transfer  *transfermanager.Client
 	bucket    string
 	keyPrefix string
 }
@@ -45,22 +52,62 @@ func NewS3Adapter(ctx context.Context, cfg config.StorageConfig) (*S3Adapter, er
 		}
 	})
 
+	keyPrefix := s3KeyPrefix(cfg.S3KeyPrefix)
+	if _, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(cfg.S3Bucket),
+		Prefix:  aws.String(keyPrefix + "/"),
+		MaxKeys: aws.Int32(1),
+	}); err != nil {
+		if isS3BucketNotFound(err) {
+			return nil, fmt.Errorf("bucket %q does not exist", cfg.S3Bucket)
+		}
+		return nil, fmt.Errorf("probe s3 bucket prefix: %w", err)
+	}
+
 	return &S3Adapter{
 		client:    client,
 		presign:   s3.NewPresignClient(client),
+		transfer:  newS3TransferManager(client),
 		bucket:    cfg.S3Bucket,
-		keyPrefix: s3KeyPrefix(cfg.S3KeyPrefix),
+		keyPrefix: keyPrefix,
 	}, nil
 }
 
 func (a *S3Adapter) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {
-	_, err := a.client.PutObject(ctx, &s3.PutObjectInput{
+	transfer := a.transfer
+	if transfer == nil {
+		transfer = newS3TransferManager(a.client)
+	}
+	_, err := transfer.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(a.bucket),
 		Key:    aws.String(a.key(objectName)),
 		Body:   stream,
 	})
 	if err != nil {
-		return fmt.Errorf("put s3 object: %w", err)
+		if abortErr := a.abortFailedMultipartUpload(objectName, err); abortErr != nil {
+			return fmt.Errorf("upload s3 object: %w; %v", err, abortErr)
+		}
+		return fmt.Errorf("upload s3 object: %w", err)
+	}
+	return nil
+}
+
+func (a *S3Adapter) abortFailedMultipartUpload(objectName string, uploadErr error) error {
+	var multiErr transfermanager.MultipartUploadError
+	if !errors.As(uploadErr, &multiErr) || multiErr.UploadID() == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s3MultipartAbortTimeout)
+	defer cancel()
+
+	_, err := a.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(a.bucket),
+		Key:      aws.String(a.key(objectName)),
+		UploadId: aws.String(multiErr.UploadID()),
+	})
+	if err != nil && !isS3NotFound(err) {
+		return fmt.Errorf("abort s3 multipart upload: %w", err)
 	}
 	return nil
 }
@@ -173,6 +220,14 @@ func (a *S3Adapter) clearPrefix() string {
 	return strings.TrimRight(a.keyPrefix, "/") + "/"
 }
 
+func newS3TransferManager(client transfermanager.S3APIClient) *transfermanager.Client {
+	return transfermanager.New(client, func(options *transfermanager.Options) {
+		options.PartSizeBytes = defaultS3UploadPartSize
+		options.MultipartUploadThreshold = defaultS3UploadPartSize
+		options.Concurrency = defaultS3UploadConcurrency
+	})
+}
+
 func s3KeyPrefix(prefix string) string {
 	if strings.TrimSpace(prefix) == "" {
 		return defaultS3KeyPrefix
@@ -220,14 +275,22 @@ func isDirectS3FolderObject(prefix, key string) bool {
 }
 
 func isS3NotFound(err error) bool {
+	return isS3ErrorCode(err, "NoSuchKey", "NoSuchUpload", "NotFound")
+}
+
+func isS3BucketNotFound(err error) bool {
+	return isS3ErrorCode(err, "NoSuchBucket", "NotFound")
+}
+
+func isS3ErrorCode(err error, codes ...string) bool {
 	var apiErr smithy.APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	switch apiErr.ErrorCode() {
-	case "NoSuchKey", "NotFound":
-		return true
-	default:
-		return false
+	for _, code := range codes {
+		if apiErr.ErrorCode() == code {
+			return true
+		}
 	}
+	return false
 }
