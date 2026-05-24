@@ -101,6 +101,22 @@ func TestFilesystemAdapterRemovesPartialFileAfterFailedUpload(t *testing.T) {
 	require.ErrorIs(t, err, ErrObjectNotFound)
 }
 
+func TestFilesystemAdapterRemovesTempFileAfterCanceledUpload(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	err = adapter.UploadStream(ctx, "folder/object", cancelAfterFirstRead{cancel: cancel})
+	require.ErrorIs(t, err, context.Canceled)
+
+	entries, err := os.ReadDir(filepath.Join(adapter.root, "folder"))
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	_, err = adapter.CreateDownloadStream(context.Background(), "folder/object")
+	require.ErrorIs(t, err, ErrObjectNotFound)
+}
+
 func TestFilesystemAdapterCountSkipsTemporaryUploads(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())
@@ -138,4 +154,18 @@ type failingReader struct{}
 func (r failingReader) Read(p []byte) (int, error) {
 	copy(p, "partial")
 	return len("partial"), fmt.Errorf("read failed")
+}
+
+type cancelAfterFirstRead struct {
+	cancel context.CancelFunc
+	done   bool
+}
+
+func (r cancelAfterFirstRead) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	copy(p, "partial")
+	r.cancel()
+	return len("partial"), nil
 }

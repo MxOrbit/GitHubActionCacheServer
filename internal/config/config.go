@@ -1,6 +1,11 @@
 package config
 
-import "github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
+import (
+	"runtime"
+	"strconv"
+
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
+)
 
 const (
 	DefaultAddr         = ":3000"
@@ -63,6 +68,7 @@ type StorageConfig struct {
 type CacheConfig struct {
 	EnableDirectDownloads    bool
 	DownloadURLSigningSecret string
+	MergeConcurrency         int
 }
 
 type ManagementConfig struct {
@@ -115,6 +121,7 @@ func Load() Config {
 		Cache: CacheConfig{
 			EnableDirectDownloads:    tools.ParseBool(tools.EnvOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
 			DownloadURLSigningSecret: tools.EnvOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
+			MergeConcurrency:         positiveIntEnv("CACHE_MERGE_CONCURRENCY", defaultMergeConcurrency()),
 		},
 		Management: ManagementConfig{
 			APIKey: tools.EnvOrDefault("MANAGEMENT_API_KEY", ""),
@@ -124,4 +131,19 @@ func Load() Config {
 			CacheOlderThanDays: tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
 		},
 	}
+}
+
+func defaultMergeConcurrency() int {
+	if cpus := runtime.NumCPU(); cpus > 0 {
+		return cpus
+	}
+	return 1
+}
+
+func positiveIntEnv(key string, fallback int) int {
+	value := tools.ParseInt(tools.EnvOrDefault(key, strconv.Itoa(fallback)), fallback)
+	if value < 1 {
+		return fallback
+	}
+	return value
 }

@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cleanup"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
@@ -37,6 +38,12 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("storage initialization failed")
 	}
+	cacheService := cache.NewService(cache.Options{
+		DB:                    dbClient,
+		Storage:               storageAdapter,
+		EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
+		MergeConcurrency:      cfg.Cache.MergeConcurrency,
+	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
@@ -51,6 +58,7 @@ func main() {
 		Handler: httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
 			DB:      dbClient,
 			Storage: storageAdapter,
+			Cache:   cacheService,
 		}),
 	}
 
@@ -74,12 +82,28 @@ func main() {
 	}
 
 	cleanupCancel()
+	cacheService.StopAcceptingMerges()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if shutdownErr := server.Shutdown(shutdownCtx); shutdownErr != nil {
+	shutdownErrCh := make(chan error, 1)
+	go func() {
+		shutdownErrCh <- server.Shutdown(shutdownCtx)
+	}()
+
+	mergeErrCh := make(chan error, 1)
+	go func() {
+		mergeErrCh <- cacheService.WaitForMerges(shutdownCtx)
+	}()
+
+	shutdownErr := <-shutdownErrCh
+	mergeErr := <-mergeErrCh
+	if shutdownErr != nil {
 		logger.Fatal().Err(shutdownErr).Msg("graceful shutdown failed")
+	}
+	if mergeErr != nil {
+		logger.Fatal().Err(mergeErr).Msg("waiting for in-flight merges failed")
 	}
 
 	if serveErr := <-errCh; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {

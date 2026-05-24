@@ -31,7 +31,7 @@ func NewFilesystemAdapter(root string) (*FilesystemAdapter, error) {
 	return &FilesystemAdapter{root: abs}, nil
 }
 
-func (a *FilesystemAdapter) UploadStream(_ context.Context, objectName string, stream io.Reader) error {
+func (a *FilesystemAdapter) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {
 	path, err := a.safePath(objectName)
 	if err != nil {
 		return err
@@ -52,7 +52,7 @@ func (a *FilesystemAdapter) UploadStream(_ context.Context, objectName string, s
 		}
 	}()
 
-	if _, err := io.Copy(file, stream); err != nil {
+	if _, err := io.Copy(file, contextReader{ctx: ctx, reader: stream}); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write object: %w", err)
 	}
@@ -64,6 +64,18 @@ func (a *FilesystemAdapter) UploadStream(_ context.Context, objectName string, s
 	}
 	removeTemp = false
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func (a *FilesystemAdapter) CreateDownloadStream(_ context.Context, objectName string) (io.ReadCloser, error) {

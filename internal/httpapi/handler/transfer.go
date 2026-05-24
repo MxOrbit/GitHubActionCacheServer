@@ -87,8 +87,14 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 	}
 	defer stream.Close()
 
-	c.Status(http.StatusOK)
-	_, _ = io.Copy(c.Writer, stream)
+	written, err := io.Copy(c.Writer, stream)
+	if err != nil && written == 0 && !c.Writer.Written() {
+		if errors.Is(err, cache.ErrCacheNotFound) {
+			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
+			return
+		}
+		writeCacheError(c, err)
+	}
 }
 
 func isValidBase64BlockID(blockIDBase64 string) bool {

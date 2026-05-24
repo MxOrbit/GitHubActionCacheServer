@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -26,6 +28,7 @@ import (
 const (
 	directDownloadTTL       = 10 * time.Minute
 	abandonedUploadLifetime = 24 * time.Hour
+	mergeCleanupTimeout     = 10 * time.Second
 )
 
 var (
@@ -43,12 +46,19 @@ type Service struct {
 	db                    *ent.Client
 	storage               storage.Adapter
 	enableDirectDownloads bool
+	mergeCtx              context.Context
+	mergeCancel           context.CancelFunc
+	mergeSlots            chan struct{}
+	mergeWG               sync.WaitGroup
+	mergeMu               sync.Mutex
+	acceptingMerges       bool
 }
 
 type Options struct {
 	DB                    *ent.Client
 	Storage               storage.Adapter
 	EnableDirectDownloads bool
+	MergeConcurrency      int
 }
 
 type CreateUploadResult struct {
@@ -61,10 +71,50 @@ type MatchResult struct {
 }
 
 func NewService(options Options) *Service {
+	mergeConcurrency := options.MergeConcurrency
+	if mergeConcurrency < 1 {
+		mergeConcurrency = runtime.NumCPU()
+	}
+	if mergeConcurrency < 1 {
+		mergeConcurrency = 1
+	}
+	mergeCtx, mergeCancel := context.WithCancel(context.Background())
+
 	return &Service{
 		db:                    options.DB,
 		storage:               options.Storage,
 		enableDirectDownloads: options.EnableDirectDownloads,
+		mergeCtx:              mergeCtx,
+		mergeCancel:           mergeCancel,
+		mergeSlots:            make(chan struct{}, mergeConcurrency),
+		acceptingMerges:       true,
+	}
+}
+
+func (s *Service) StopAcceptingMerges() {
+	s.mergeMu.Lock()
+	defer s.mergeMu.Unlock()
+
+	s.acceptingMerges = false
+}
+
+func (s *Service) WaitForMerges(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.mergeWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		s.mergeCancel()
+		select {
+		case <-done:
+		case <-time.After(mergeCleanupTimeout):
+		}
+		return ctx.Err()
 	}
 }
 
@@ -313,14 +363,14 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadClo
 	if err := s.ensurePartsExist(ctx, location); err != nil {
 		return nil, err
 	}
-	if err := s.mergeLocation(ctx, location); err != nil {
+	stream, err := s.startMergeDownload(ctx, location)
+	if err != nil {
 		if errors.Is(err, errMergeAlreadyStarted) {
 			return s.openCurrentLocation(ctx, location.ID)
 		}
 		return nil, err
 	}
-
-	return s.storage.CreateDownloadStream(ctx, mergedObjectName(location.FolderName))
+	return stream, nil
 }
 
 func WriteScope(scope auth.CacheScope) (string, bool) {
@@ -632,20 +682,9 @@ func (s *Service) ensureCommittedPartsAreContiguous(ctx context.Context, folderN
 }
 
 func (s *Service) mergeLocation(ctx context.Context, location *ent.StorageLocation) error {
-	mergeStartedAt := time.Now().UnixMilli()
-	affected, err := s.db.StorageLocation.Update().
-		Where(
-			storagelocation.ID(location.ID),
-			storagelocation.MergeStartedAtIsNil(),
-			storagelocation.MergedAtIsNil(),
-		).
-		SetMergeStartedAt(mergeStartedAt).
-		Save(ctx)
+	mergeStartedAt, err := s.markMergeStarted(ctx, location.ID)
 	if err != nil {
-		return fmt.Errorf("mark merge started: %w", err)
-	}
-	if affected == 0 {
-		return errMergeAlreadyStarted
+		return err
 	}
 
 	reader := newPartsReadCloser(ctx, s.storage, location.FolderName, location.PartCount)
@@ -658,9 +697,111 @@ func (s *Service) mergeLocation(ctx context.Context, location *ent.StorageLocati
 		return err
 	}
 
-	affected, err = s.db.StorageLocation.Update().
+	return s.markMergeFinished(ctx, location.ID, mergeStartedAt)
+}
+
+func (s *Service) startMergeDownload(ctx context.Context, location *ent.StorageLocation) (io.ReadCloser, error) {
+	if !s.reserveMerge() {
+		return s.openParts(ctx, location)
+	}
+
+	mergeStartedAt, err := s.markMergeStarted(ctx, location.ID)
+	if err != nil {
+		s.finishReservedMerge()
+		return nil, err
+	}
+
+	responseReader, responseWriter := io.Pipe()
+
+	go s.mergeLocationInBackground(location, mergeStartedAt, responseWriter)
+
+	return responseReader, nil
+}
+
+func (s *Service) mergeLocationInBackground(location *ent.StorageLocation, mergeStartedAt int64, responseWriter *io.PipeWriter) {
+	defer s.finishReservedMerge()
+
+	reader := newPartsReadCloser(s.mergeCtx, s.storage, location.FolderName, location.PartCount)
+	defer reader.Close()
+
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-s.mergeCtx.Done():
+			_ = responseWriter.CloseWithError(s.mergeCtx.Err())
+		case <-done:
+		}
+	}()
+
+	tee := io.TeeReader(reader, responseWriter)
+	if err := s.storage.UploadStream(s.mergeCtx, mergedObjectName(location.FolderName), tee); err != nil {
+		close(done)
+		_ = responseWriter.CloseWithError(err)
+		s.rollbackMergeStart(location.ID, mergeStartedAt)
+		return
+	}
+	close(done)
+
+	_ = responseWriter.Close()
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
+	defer cancel()
+	if err := s.markMergeFinished(cleanupCtx, location.ID, mergeStartedAt); err != nil {
+		s.rollbackMergeStart(location.ID, mergeStartedAt)
+	}
+}
+
+func (s *Service) reserveMerge() bool {
+	s.mergeMu.Lock()
+	defer s.mergeMu.Unlock()
+
+	if !s.acceptingMerges {
+		return false
+	}
+
+	select {
+	case s.mergeSlots <- struct{}{}:
+	default:
+		return false
+	}
+	s.mergeWG.Add(1)
+	return true
+}
+
+func (s *Service) finishReservedMerge() {
+	<-s.mergeSlots
+	s.mergeWG.Done()
+}
+
+func (s *Service) rollbackMergeStart(locationID string, mergeStartedAt int64) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
+	defer cancel()
+	_ = s.clearOwnMergeStart(cleanupCtx, locationID, mergeStartedAt)
+}
+
+func (s *Service) markMergeStarted(ctx context.Context, locationID string) (int64, error) {
+	mergeStartedAt := time.Now().UnixMilli()
+	affected, err := s.db.StorageLocation.Update().
 		Where(
-			storagelocation.ID(location.ID),
+			storagelocation.ID(locationID),
+			storagelocation.MergeStartedAtIsNil(),
+			storagelocation.MergedAtIsNil(),
+		).
+		SetMergeStartedAt(mergeStartedAt).
+		Save(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("mark merge started: %w", err)
+	}
+	if affected == 0 {
+		return 0, errMergeAlreadyStarted
+	}
+	return mergeStartedAt, nil
+}
+
+func (s *Service) markMergeFinished(ctx context.Context, locationID string, mergeStartedAt int64) error {
+	affected, err := s.db.StorageLocation.Update().
+		Where(
+			storagelocation.ID(locationID),
 			storagelocation.MergeStartedAt(mergeStartedAt),
 			storagelocation.MergedAtIsNil(),
 		).

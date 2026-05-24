@@ -18,6 +18,7 @@ import (
 type Dependencies struct {
 	DB      *ent.Client
 	Storage storage.Adapter
+	Cache   *cache.Service
 }
 
 func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http.Handler {
@@ -26,13 +27,19 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 	router := gin.New()
 	router.Use(requestLogger(logger), gin.Recovery())
 
-	handlers := handler.New(handler.Options{
-		Config: cfg,
-		Cache: cache.NewService(cache.Options{
+	cacheSvc := deps.Cache
+	if cacheSvc == nil {
+		cacheSvc = cache.NewService(cache.Options{
 			DB:                    deps.DB,
 			Storage:               deps.Storage,
 			EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
-		}),
+			MergeConcurrency:      cfg.Cache.MergeConcurrency,
+		})
+	}
+
+	handlers := handler.New(handler.Options{
+		Config:  cfg,
+		Cache:   cacheSvc,
 		DB:      deps.DB,
 		Storage: deps.Storage,
 	})
