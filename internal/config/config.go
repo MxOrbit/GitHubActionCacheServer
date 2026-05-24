@@ -1,10 +1,6 @@
 package config
 
-import (
-	"os"
-
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
-)
+import "github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
 
 const (
 	DefaultAddr         = ":3000"
@@ -19,6 +15,7 @@ type Config struct {
 	Storage    StorageConfig
 	Cache      CacheConfig
 	Management ManagementConfig
+	Cleanup    CleanupConfig
 }
 
 type ServerConfig struct {
@@ -72,57 +69,59 @@ type ManagementConfig struct {
 	APIKey string
 }
 
+type CleanupConfig struct {
+	Disabled           bool
+	CacheOlderThanDays int
+}
+
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
-			Addr:       envOrDefault("ADDR", DefaultAddr),
-			APIBaseURL: envOrDefault("API_BASE_URL", ""),
+			Addr:       tools.EnvOrDefault("ADDR", DefaultAddr),
+			APIBaseURL: tools.EnvOrDefault("API_BASE_URL", ""),
 		},
 		Auth: AuthConfig{
-			TokenIssuer:         envOrDefault("GITHUB_ACTIONS_TOKEN_ISSUER", DefaultTokenIssuer),
-			TokenJWKSURL:        envOrDefault("GITHUB_ACTIONS_TOKEN_JWKS_URL", DefaultTokenJWKSURL),
-			SkipTokenValidation: tools.ParseBool(envOrDefault("SKIP_TOKEN_VALIDATION", "false")),
+			TokenIssuer:         tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_ISSUER", DefaultTokenIssuer),
+			TokenJWKSURL:        tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_JWKS_URL", DefaultTokenJWKSURL),
+			SkipTokenValidation: tools.ParseBool(tools.EnvOrDefault("SKIP_TOKEN_VALIDATION", "false")),
 		},
 		DB: DBConfig{
-			Driver: envOrDefault("DB_DRIVER", "sqlite"),
+			Driver: tools.EnvOrDefault("DB_DRIVER", "sqlite"),
 
-			SQLitePath: envOrDefault("DB_SQLITE_PATH", ".data/sqlite.db"),
+			SQLitePath: tools.EnvOrDefault("DB_SQLITE_PATH", ".data/sqlite.db"),
 
-			PostgresURL:      envOrDefault("DB_POSTGRES_URL", ""),
-			PostgresDatabase: envOrDefault("DB_POSTGRES_DATABASE", ""),
-			PostgresHost:     envOrDefault("DB_POSTGRES_HOST", ""),
-			PostgresPort:     envOrDefault("DB_POSTGRES_PORT", "5432"),
-			PostgresUser:     envOrDefault("DB_POSTGRES_USER", ""),
-			PostgresPassword: envOrDefault("DB_POSTGRES_PASSWORD", ""),
+			PostgresURL:      tools.EnvOrDefault("DB_POSTGRES_URL", ""),
+			PostgresDatabase: tools.EnvOrDefault("DB_POSTGRES_DATABASE", ""),
+			PostgresHost:     tools.EnvOrDefault("DB_POSTGRES_HOST", ""),
+			PostgresPort:     tools.EnvOrDefault("DB_POSTGRES_PORT", "5432"),
+			PostgresUser:     tools.EnvOrDefault("DB_POSTGRES_USER", ""),
+			PostgresPassword: tools.EnvOrDefault("DB_POSTGRES_PASSWORD", ""),
 
-			MySQLDatabase: envOrDefault("DB_MYSQL_DATABASE", ""),
-			MySQLHost:     envOrDefault("DB_MYSQL_HOST", ""),
-			MySQLPort:     envOrDefault("DB_MYSQL_PORT", "3306"),
-			MySQLUser:     envOrDefault("DB_MYSQL_USER", ""),
-			MySQLPassword: envOrDefault("DB_MYSQL_PASSWORD", ""),
+			MySQLDatabase: tools.EnvOrDefault("DB_MYSQL_DATABASE", ""),
+			MySQLHost:     tools.EnvOrDefault("DB_MYSQL_HOST", ""),
+			MySQLPort:     tools.EnvOrDefault("DB_MYSQL_PORT", "3306"),
+			MySQLUser:     tools.EnvOrDefault("DB_MYSQL_USER", ""),
+			MySQLPassword: tools.EnvOrDefault("DB_MYSQL_PASSWORD", ""),
 		},
 		Storage: StorageConfig{
-			Driver:           envOrDefault("STORAGE_DRIVER", "filesystem"),
-			FilesystemPath:   envOrDefault("STORAGE_FILESYSTEM_PATH", ".data/storage/filesystem"),
-			S3Bucket:         envOrDefault("STORAGE_S3_BUCKET", ""),
-			S3Region:         envOrDefault("AWS_REGION", "us-east-1"),
-			S3EndpointURL:    envOrDefault("AWS_ENDPOINT_URL", ""),
-			S3ForcePathStyle: tools.ParseBool(envOrDefault("STORAGE_S3_FORCE_PATH_STYLE", "true")),
-			S3KeyPrefix:      envOrDefault("STORAGE_S3_KEY_PREFIX", "gh-actions-cache"),
+			Driver:           tools.EnvOrDefault("STORAGE_DRIVER", "filesystem"),
+			FilesystemPath:   tools.EnvOrDefault("STORAGE_FILESYSTEM_PATH", ".data/storage/filesystem"),
+			S3Bucket:         tools.EnvOrDefault("STORAGE_S3_BUCKET", ""),
+			S3Region:         tools.EnvOrDefault("AWS_REGION", "us-east-1"),
+			S3EndpointURL:    tools.EnvOrDefault("AWS_ENDPOINT_URL", ""),
+			S3ForcePathStyle: tools.ParseBool(tools.EnvOrDefault("STORAGE_S3_FORCE_PATH_STYLE", "true")),
+			S3KeyPrefix:      tools.EnvOrDefault("STORAGE_S3_KEY_PREFIX", "gh-actions-cache"),
 		},
 		Cache: CacheConfig{
-			EnableDirectDownloads:    tools.ParseBool(envOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
-			DownloadURLSigningSecret: envOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
+			EnableDirectDownloads:    tools.ParseBool(tools.EnvOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
+			DownloadURLSigningSecret: tools.EnvOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
 		},
 		Management: ManagementConfig{
-			APIKey: envOrDefault("MANAGEMENT_API_KEY", ""),
+			APIKey: tools.EnvOrDefault("MANAGEMENT_API_KEY", ""),
+		},
+		Cleanup: CleanupConfig{
+			Disabled:           tools.ParseBool(tools.EnvOrDefault("DISABLE_CLEANUP_JOBS", "false")),
+			CacheOlderThanDays: tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
 		},
 	}
-}
-
-func envOrDefault(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }

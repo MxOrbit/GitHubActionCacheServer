@@ -25,6 +25,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "")
 	t.Setenv("MANAGEMENT_API_KEY", "")
+	t.Setenv("DISABLE_CLEANUP_JOBS", "")
+	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "")
 
 	cfg := Load()
 
@@ -43,6 +45,8 @@ func TestLoadDefaults(t *testing.T) {
 	require.False(t, cfg.Cache.EnableDirectDownloads)
 	require.Empty(t, cfg.Cache.DownloadURLSigningSecret)
 	require.Empty(t, cfg.Management.APIKey)
+	require.False(t, cfg.Cleanup.Disabled)
+	require.Equal(t, 90, cfg.Cleanup.CacheOlderThanDays)
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -62,6 +66,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "true")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "secret")
 	t.Setenv("MANAGEMENT_API_KEY", "management-secret")
+	t.Setenv("DISABLE_CLEANUP_JOBS", "true")
+	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "30")
 
 	cfg := Load()
 
@@ -81,4 +87,6 @@ func TestLoadFromEnv(t *testing.T) {
 	require.True(t, cfg.Cache.EnableDirectDownloads)
 	require.Equal(t, "secret", cfg.Cache.DownloadURLSigningSecret)
 	require.Equal(t, "management-secret", cfg.Management.APIKey)
+	require.True(t, cfg.Cleanup.Disabled)
+	require.Equal(t, 30, cfg.Cleanup.CacheOlderThanDays)
 }

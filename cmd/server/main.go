@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cleanup"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
@@ -37,6 +38,14 @@ func main() {
 		logger.Fatal().Err(err).Msg("storage initialization failed")
 	}
 
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	defer cleanupCancel()
+	cleanup.NewRunner(cleanup.NewService(cleanup.Options{
+		DB:      dbClient,
+		Storage: storageAdapter,
+		Config:  cfg.Cleanup,
+	}), logger).Start(cleanupCtx)
+
 	server := &http.Server{
 		Addr: cfg.Server.Addr,
 		Handler: httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
@@ -63,6 +72,8 @@ func main() {
 		}
 		logger.Fatal().Err(serveErr).Msg("server failed")
 	}
+
+	cleanupCancel()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
