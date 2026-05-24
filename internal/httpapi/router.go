@@ -33,6 +33,8 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 			Storage:               deps.Storage,
 			EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
 		}),
+		DB:      deps.DB,
+		Storage: deps.Storage,
 	})
 
 	router.GET("/", handler.Root)
@@ -54,18 +56,18 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 	router.PUT("/upload/:uploadId", handlers.UploadPart)
 	router.GET("/download/:cacheEntryId", handlers.DownloadCacheEntry)
 
-	management := router.Group("/management-api")
+	management := router.Group("/management-api", middleware.RequireManagementAPIKey(cfg.Management.APIKey))
 	{
 		cacheEntries := management.Group("/cache-entries")
-		cacheEntries.GET("/", handler.ListCacheEntries)
-		cacheEntries.DELETE("/", handler.DeleteCacheEntries)
-		cacheEntries.GET("/match", handler.MatchCacheEntry)
-		cacheEntries.GET("/:id", handler.GetCacheEntry)
-		cacheEntries.DELETE("/:id", handler.DeleteCacheEntry)
+		cacheEntries.GET("/", handlers.ListCacheEntries)
+		cacheEntries.DELETE("/", handlers.DeleteCacheEntries)
+		cacheEntries.GET("/match", handlers.MatchCacheEntry)
+		cacheEntries.GET("/:id", handlers.GetCacheEntry)
+		cacheEntries.DELETE("/:id", handlers.DeleteCacheEntry)
 
 		storageLocations := management.Group("/storage-locations")
-		storageLocations.GET("/:id", handler.GetStorageLocation)
-		storageLocations.DELETE("/:id", handler.DeleteStorageLocation)
+		storageLocations.GET("/:id", handlers.GetStorageLocation)
+		storageLocations.DELETE("/:id", handlers.DeleteStorageLocation)
 	}
 
 	return router

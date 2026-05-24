@@ -7,8 +7,10 @@ import (
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/downloadurl"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,18 +19,24 @@ const fallbackDownloadURLTTL = 10 * time.Minute
 type Handler struct {
 	cfg            config.Config
 	cache          *cache.Service
+	db             *ent.Client
+	storage        storage.Adapter
 	downloadSigner *downloadurl.Signer
 }
 
 type Options struct {
-	Config config.Config
-	Cache  *cache.Service
+	Config  config.Config
+	Cache   *cache.Service
+	DB      *ent.Client
+	Storage storage.Adapter
 }
 
 func New(options Options) *Handler {
 	return &Handler{
 		cfg:            options.Config,
 		cache:          options.Cache,
+		db:             options.DB,
+		storage:        options.Storage,
 		downloadSigner: downloadurl.New(options.Config.Cache.DownloadURLSigningSecret, fallbackDownloadURLTTL),
 	}
 }

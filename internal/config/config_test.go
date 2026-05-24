@@ -24,6 +24,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("STORAGE_S3_KEY_PREFIX", "")
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "")
+	t.Setenv("MANAGEMENT_API_KEY", "")
 
 	cfg := Load()
 
@@ -41,6 +42,7 @@ func TestLoadDefaults(t *testing.T) {
 	require.Equal(t, "gh-actions-cache", cfg.Storage.S3KeyPrefix)
 	require.False(t, cfg.Cache.EnableDirectDownloads)
 	require.Empty(t, cfg.Cache.DownloadURLSigningSecret)
+	require.Empty(t, cfg.Management.APIKey)
 }
 
 func TestLoadFromEnv(t *testing.T) {
@@ -59,6 +61,7 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("STORAGE_S3_KEY_PREFIX", "custom-prefix")
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "true")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "secret")
+	t.Setenv("MANAGEMENT_API_KEY", "management-secret")
 
 	cfg := Load()
 
@@ -77,4 +80,5 @@ func TestLoadFromEnv(t *testing.T) {
 	require.Equal(t, "custom-prefix", cfg.Storage.S3KeyPrefix)
 	require.True(t, cfg.Cache.EnableDirectDownloads)
 	require.Equal(t, "secret", cfg.Cache.DownloadURLSigningSecret)
+	require.Equal(t, "management-secret", cfg.Management.APIKey)
 }

@@ -13,11 +13,12 @@ const (
 )
 
 type Config struct {
-	Server  ServerConfig
-	Auth    AuthConfig
-	DB      DBConfig
-	Storage StorageConfig
-	Cache   CacheConfig
+	Server     ServerConfig
+	Auth       AuthConfig
+	DB         DBConfig
+	Storage    StorageConfig
+	Cache      CacheConfig
+	Management ManagementConfig
 }
 
 type ServerConfig struct {
@@ -67,6 +68,10 @@ type CacheConfig struct {
 	DownloadURLSigningSecret string
 }
 
+type ManagementConfig struct {
+	APIKey string
+}
+
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
@@ -108,6 +113,9 @@ func Load() Config {
 		Cache: CacheConfig{
 			EnableDirectDownloads:    tools.ParseBool(envOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
 			DownloadURLSigningSecret: envOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
+		},
+		Management: ManagementConfig{
+			APIKey: envOrDefault("MANAGEMENT_API_KEY", ""),
 		},
 	}
 }
