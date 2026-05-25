@@ -1,0 +1,87 @@
+name: Integration
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: cache_test
+          POSTGRES_USER: cache
+          POSTGRES_PASSWORD: cache
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cache -d cache_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: cache_test
+          MYSQL_USER: cache
+          MYSQL_PASSWORD: cache
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u cache --password=cache"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Unit and SQLite e2e tests
+        run: go test ./...
+
+      - name: Build Docker image
+        run: docker build -t github-actions-cache-server:test .
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:9000/minio/health/ready; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs minio
+          exit 1
+
+      - name: External service integration tests
+        env:
+          E2E_POSTGRES_URL: postgres://cache:cache@127.0.0.1:5432/cache_test?sslmode=disable
+          E2E_MYSQL_HOST: 127.0.0.1
+          E2E_MYSQL_PORT: "3306"
+          E2E_MYSQL_DATABASE: cache_test
+          E2E_MYSQL_USER: cache
+          E2E_MYSQL_PASSWORD: cache
+          E2E_S3_ENDPOINT_URL: http://127.0.0.1:9000
+          E2E_S3_BUCKET: cache-test
+          E2E_S3_CREATE_BUCKET: "true"
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: go test ./e2e -run 'TestExternal(Postgres|MySQL|S3MinIO)SaveAndRestore' -count=1
