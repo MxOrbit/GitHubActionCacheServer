@@ -63,7 +63,22 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 	router.PUT("/upload/:uploadId", handlers.UploadPart)
 	router.GET("/download/:cacheEntryId", handlers.DownloadCacheEntry)
 
-	management := router.Group("/management-api", middleware.RequireManagementAPIKey(cfg.Management.APIKey))
+	managementPublic := router.Group("/management-api", middleware.ManagementCORS())
+	{
+		managementPublic.GET("/_docs", handlers.ManagementDocs)
+		managementPublic.GET("/_docs/spec.json", handlers.ManagementOpenAPISpec)
+		managementPublic.OPTIONS("/*path", func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+	}
+
+	managementRPC := router.Group("/management-api", middleware.ManagementCORS())
+	{
+		managementRPC.POST("/_rpc", handlers.ManagementRPC)
+		managementRPC.POST("/_rpc/*procedure", handlers.ManagementRPC)
+	}
+
+	management := router.Group("/management-api", middleware.ManagementCORS(), middleware.RequireManagementAPIKey(cfg.Management.APIKey))
 	{
 		cacheEntries := management.Group("/cache-entries")
 		cacheEntries.GET("/", handlers.ListCacheEntries)

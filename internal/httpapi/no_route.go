@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
@@ -27,6 +28,11 @@ func isManagementPath(path string) bool {
 }
 
 func writeManagementNoRoute(c *gin.Context, apiKey string) {
+	middleware.SetManagementCORSHeaders(c.Writer.Header())
+	if c.Request.Method == http.MethodOptions {
+		c.Status(http.StatusNoContent)
+		return
+	}
 	if apiKey == "" {
 		response.JSON(c, response.Error(http.StatusServiceUnavailable, "management api is disabled"))
 		return
