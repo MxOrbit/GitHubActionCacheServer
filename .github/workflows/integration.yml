@@ -48,6 +48,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Generate ent code
+        run: go generate ./internal/ent
+
       - name: Unit and SQLite e2e tests
         run: go test ./...
 
