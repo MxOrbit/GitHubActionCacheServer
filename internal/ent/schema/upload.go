@@ -19,25 +19,37 @@ func (Upload) Annotations() []schema.Annotation {
 }
 
 func (Upload) Fields() []ent.Field {
+	incremental := false
+
 	return []ent.Field{
-		field.Int64("id").Immutable().Unique(),
-		field.String("key").MaxLen(512).NotEmpty(),
-		field.String("version").MaxLen(255).NotEmpty(),
-		field.String("scope").MaxLen(255).NotEmpty(),
-		field.String("repoId").MaxLen(255).NotEmpty(),
-		field.Int64("createdAt"),
-		field.Int64("lastPartUploadedAt").Optional().Nillable(),
-		field.Int("startedPartUploadCount").Default(0).NonNegative(),
-		field.Int("finishedPartUploadCount").Default(0).NonNegative(),
-		field.String("folderName").NotEmpty(),
+		field.Int64("id").
+			Immutable().
+			Unique().
+			Annotations(entsql.Annotation{Incremental: &incremental}),
+		field.String("key").MaxLen(512).NotEmpty().SchemaType(originalBoundedStringColumnType(512)),
+		field.String("version").MaxLen(255).NotEmpty().SchemaType(originalBoundedStringColumnType(255)),
+		field.String("scope").MaxLen(255).NotEmpty().SchemaType(originalBoundedStringColumnType(255)),
+		field.String("repoId").
+			MaxLen(255).
+			NotEmpty().
+			StorageKey("repoId").
+			SchemaType(originalBoundedStringColumnType(255)),
+		field.Int64("createdAt").StorageKey("createdAt"),
+		field.Int64("lastPartUploadedAt").Optional().Nillable().StorageKey("lastPartUploadedAt"),
+		field.Int("startedPartUploadCount").Default(0).NonNegative().StorageKey("startedPartUploadCount"),
+		field.Int("finishedPartUploadCount").Default(0).NonNegative().StorageKey("finishedPartUploadCount"),
+		field.String("folderName").
+			NotEmpty().
+			StorageKey("folderName").
+			SchemaType(originalTextColumnType),
 	}
 }
 
 func (Upload) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("key", "version"),
-		index.Fields("scope"),
-		index.Fields("repoId"),
+		index.Fields("key", "version").StorageKey("idx_uploads_key_version"),
+		index.Fields("scope").StorageKey("idx_uploads_scope"),
+		index.Fields("repoId").StorageKey("idx_uploads_repoId"),
 		index.Fields("key", "version", "scope", "repoId").Unique(),
 	}
 }

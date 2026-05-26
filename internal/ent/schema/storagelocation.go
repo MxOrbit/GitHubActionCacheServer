@@ -20,13 +20,21 @@ func (StorageLocation) Annotations() []schema.Annotation {
 
 func (StorageLocation) Fields() []ent.Field {
 	return []ent.Field{
-		field.String("id").Immutable().Unique(),
-		field.String("folderName").NotEmpty(),
-		field.Int("partCount").NonNegative(),
-		field.Int64("mergeStartedAt").Optional().Nillable(),
-		field.Int64("mergedAt").Optional().Nillable(),
-		field.Int64("partsDeletedAt").Optional().Nillable(),
-		field.Int64("lastDownloadedAt").Optional().Nillable(),
+		field.String("id").
+			Immutable().
+			Unique().
+			SchemaType(originalIDColumnType),
+		field.String("folderName").
+			NotEmpty().
+			StorageKey("folderName").
+			SchemaType(originalTextColumnType),
+		field.Int("partCount").
+			NonNegative().
+			StorageKey("partCount"),
+		field.Int64("mergeStartedAt").Optional().Nillable().StorageKey("mergeStartedAt"),
+		field.Int64("mergedAt").Optional().Nillable().StorageKey("mergedAt"),
+		field.Int64("partsDeletedAt").Optional().Nillable().StorageKey("partsDeletedAt"),
+		field.Int64("lastDownloadedAt").Optional().Nillable().StorageKey("lastDownloadedAt"),
 	}
 }
 
