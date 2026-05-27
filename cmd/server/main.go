@@ -21,12 +21,15 @@ import (
 const shutdownTimeout = 60 * time.Second
 
 func main() {
-	cfg := config.Load()
+	cfg, err := config.Load()
 	logLevel := zerolog.InfoLevel
 	if cfg.Debug {
 		logLevel = zerolog.DebugLevel
 	}
 	logger := zerolog.New(os.Stdout).Level(logLevel).With().Timestamp().Logger()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("configuration load failed")
+	}
 
 	dbClient, err := db.OpenAndMigrate(context.Background(), cfg.DB)
 	if err != nil {

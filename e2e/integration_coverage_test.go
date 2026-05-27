@@ -123,7 +123,8 @@ func clearExternalDB(t *testing.T, ctx context.Context, client *ent.Client) {
 func newExternalRouter(t *testing.T, client *ent.Client, storageAdapter storage.Adapter) http.Handler {
 	t.Helper()
 
-	cfg := config.Load()
+	cfg, err := config.Load()
+	require.NoError(t, err)
 	cfg.Auth.SkipTokenValidation = true
 	cfg.Cache.DownloadURLSigningSecret = "integration-test-secret"
 	cacheService := cache.NewService(cache.Options{

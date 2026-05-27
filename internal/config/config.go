@@ -1,8 +1,11 @@
 package config
 
 import (
+	"fmt"
+	"os"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
 )
@@ -12,6 +15,12 @@ const (
 	DefaultActionsResultsURL = "https://results-receiver.actions.githubusercontent.com"
 	DefaultTokenIssuer       = "https://token.actions.githubusercontent.com"
 	DefaultTokenJWKSURL      = "https://token.actions.githubusercontent.com/.well-known/jwks"
+
+	MinS3UploadPartSizeBytes       = 5 * 1024 * 1024
+	DefaultS3KeyPrefix             = "gh-actions-cache"
+	DefaultS3UploadPartSizeBytes   = MinS3UploadPartSizeBytes
+	DefaultS3UploadConcurrency     = 1
+	DefaultS3MultipartAbortTimeout = 30 * time.Second
 )
 
 type Config struct {
@@ -66,6 +75,11 @@ type StorageConfig struct {
 	S3EndpointURL    string
 	S3ForcePathStyle bool
 	S3KeyPrefix      string
+
+	S3UploadPartSizeBytes           int64
+	S3UploadPartSizeBytesConfigured bool
+	S3UploadConcurrency             int
+	S3MultipartAbortTimeout         time.Duration
 }
 
 type CacheConfig struct {
@@ -83,7 +97,12 @@ type CleanupConfig struct {
 	CacheOlderThanDays int
 }
 
-func Load() Config {
+func Load() (Config, error) {
+	s3UploadPartSizeBytes, s3UploadPartSizeBytesConfigured, err := int64Env("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", DefaultS3UploadPartSizeBytes)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Server: ServerConfig{
 			Addr:                     tools.EnvOrDefault("ADDR", DefaultAddr),
@@ -114,13 +133,17 @@ func Load() Config {
 			MySQLPassword: tools.EnvOrDefault("DB_MYSQL_PASSWORD", ""),
 		},
 		Storage: StorageConfig{
-			Driver:           tools.EnvOrDefault("STORAGE_DRIVER", "filesystem"),
-			FilesystemPath:   tools.EnvOrDefault("STORAGE_FILESYSTEM_PATH", ".data/storage/filesystem"),
-			S3Bucket:         tools.EnvOrDefault("STORAGE_S3_BUCKET", ""),
-			S3Region:         tools.EnvOrDefault("AWS_REGION", "us-east-1"),
-			S3EndpointURL:    tools.EnvOrDefault("AWS_ENDPOINT_URL", ""),
-			S3ForcePathStyle: tools.ParseBool(tools.EnvOrDefault("STORAGE_S3_FORCE_PATH_STYLE", "true")),
-			S3KeyPrefix:      tools.EnvOrDefault("STORAGE_S3_KEY_PREFIX", "gh-actions-cache"),
+			Driver:                          tools.EnvOrDefault("STORAGE_DRIVER", "filesystem"),
+			FilesystemPath:                  tools.EnvOrDefault("STORAGE_FILESYSTEM_PATH", ".data/storage/filesystem"),
+			S3Bucket:                        tools.EnvOrDefault("STORAGE_S3_BUCKET", ""),
+			S3Region:                        tools.EnvOrDefault("AWS_REGION", "us-east-1"),
+			S3EndpointURL:                   tools.EnvOrDefault("AWS_ENDPOINT_URL", ""),
+			S3ForcePathStyle:                tools.ParseBool(tools.EnvOrDefault("STORAGE_S3_FORCE_PATH_STYLE", "true")),
+			S3KeyPrefix:                     tools.EnvOrDefault("STORAGE_S3_KEY_PREFIX", DefaultS3KeyPrefix),
+			S3UploadPartSizeBytes:           s3UploadPartSizeBytes,
+			S3UploadPartSizeBytesConfigured: s3UploadPartSizeBytesConfigured,
+			S3UploadConcurrency:             positiveIntEnv("STORAGE_S3_UPLOAD_CONCURRENCY", DefaultS3UploadConcurrency),
+			S3MultipartAbortTimeout:         positiveDurationEnv("STORAGE_S3_MULTIPART_ABORT_TIMEOUT", DefaultS3MultipartAbortTimeout),
 		},
 		Cache: CacheConfig{
 			EnableDirectDownloads:    tools.ParseBool(tools.EnvOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
@@ -135,7 +158,7 @@ func Load() Config {
 			CacheOlderThanDays: tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
 		},
 		Debug: tools.ParseBool(tools.EnvOrDefault("DEBUG", "false")),
-	}
+	}, nil
 }
 
 func defaultMergeConcurrency() int {
@@ -148,6 +171,26 @@ func defaultMergeConcurrency() int {
 func positiveIntEnv(key string, fallback int) int {
 	value := tools.ParseInt(tools.EnvOrDefault(key, strconv.Itoa(fallback)), fallback)
 	if value < 1 {
+		return fallback
+	}
+	return value
+}
+
+func int64Env(key string, fallback int64) (int64, bool, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, false, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, true, fmt.Errorf("%s must be an integer number of bytes: %q", key, raw)
+	}
+	return value, true, nil
+}
+
+func positiveDurationEnv(key string, fallback time.Duration) time.Duration {
+	value, err := time.ParseDuration(tools.EnvOrDefault(key, fallback.String()))
+	if err != nil || value <= 0 {
 		return fallback
 	}
 	return value

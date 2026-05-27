@@ -102,15 +102,18 @@ Schema migrations run automatically at startup.
 
 ### Storage
 
-| Variable                      | Default                    | Description                                   |
-|-------------------------------|----------------------------|-----------------------------------------------|
-| `STORAGE_DRIVER`              | `filesystem`               | `filesystem` or `s3`.                         |
-| `STORAGE_FILESYSTEM_PATH`     | `.data/storage/filesystem` | Root directory for filesystem storage.        |
-| `STORAGE_S3_BUCKET`           | empty                      | S3 bucket name. Required for S3 storage.      |
-| `AWS_REGION`                  | `us-east-1`                | S3 region.                                    |
-| `AWS_ENDPOINT_URL`            | empty                      | Custom S3-compatible endpoint, such as MinIO. |
-| `STORAGE_S3_FORCE_PATH_STYLE` | `true`                     | Uses path-style S3 addressing.                |
-| `STORAGE_S3_KEY_PREFIX`       | `gh-actions-cache`         | Prefix for all S3 keys.                       |
+| Variable                             | Default                    | Description                                                                                                     |
+|--------------------------------------|----------------------------|-----------------------------------------------------------------------------------------------------------------|
+| `STORAGE_DRIVER`                     | `filesystem`               | `filesystem` or `s3`.                                                                                           |
+| `STORAGE_FILESYSTEM_PATH`            | `.data/storage/filesystem` | Root directory for filesystem storage.                                                                          |
+| `STORAGE_S3_BUCKET`                  | empty                      | S3 bucket name. Required for S3 storage.                                                                        |
+| `AWS_REGION`                         | `us-east-1`                | S3 region.                                                                                                      |
+| `AWS_ENDPOINT_URL`                   | empty                      | Custom S3-compatible endpoint, such as MinIO.                                                                   |
+| `STORAGE_S3_FORCE_PATH_STYLE`        | `true`                     | Uses path-style S3 addressing.                                                                                  |
+| `STORAGE_S3_KEY_PREFIX`              | `gh-actions-cache`         | Prefix for all S3 keys.                                                                                         |
+| `STORAGE_S3_UPLOAD_PART_SIZE_BYTES`  | `5242880`                  | S3 upload part size and threshold in integer bytes. Minimum `5242880` bytes (5 MiB); lower values fail startup. |
+| `STORAGE_S3_UPLOAD_CONCURRENCY`      | `1`                        | S3 transfer manager upload worker count per object.                                                             |
+| `STORAGE_S3_MULTIPART_ABORT_TIMEOUT` | `30s`                      | Timeout for aborting failed S3 multipart uploads.                                                               |
 
 S3 credentials are loaded through the AWS SDK default credential chain.
 

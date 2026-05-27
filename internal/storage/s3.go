@@ -17,24 +17,25 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-const (
-	defaultS3KeyPrefix         = "gh-actions-cache"
-	defaultS3UploadPartSize    = 5 * 1024 * 1024
-	defaultS3UploadConcurrency = 1
-	s3MultipartAbortTimeout    = 30 * time.Second
-)
-
 type S3Adapter struct {
 	client    *s3.Client
 	presign   *s3.PresignClient
 	transfer  *transfermanager.Client
 	bucket    string
 	keyPrefix string
+
+	uploadPartSizeBytes   int64
+	uploadConcurrency     int
+	multipartAbortTimeout time.Duration
 }
 
 func NewS3Adapter(ctx context.Context, cfg config.StorageConfig) (*S3Adapter, error) {
 	if cfg.S3Bucket == "" {
 		return nil, fmt.Errorf("STORAGE_S3_BUCKET is required")
+	}
+	uploadPartSizeBytes, err := normalizeS3UploadPartSizeBytes(cfg.S3UploadPartSizeBytes, cfg.S3UploadPartSizeBytesConfigured)
+	if err != nil {
+		return nil, err
 	}
 
 	loadOptions := []func(*awsconfig.LoadOptions) error{
@@ -53,6 +54,8 @@ func NewS3Adapter(ctx context.Context, cfg config.StorageConfig) (*S3Adapter, er
 	})
 
 	keyPrefix := s3KeyPrefix(cfg.S3KeyPrefix)
+	uploadConcurrency := s3UploadConcurrency(cfg.S3UploadConcurrency)
+	multipartAbortTimeout := s3MultipartAbortTimeout(cfg.S3MultipartAbortTimeout)
 	if _, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(cfg.S3Bucket),
 		Prefix:  aws.String(keyPrefix + "/"),
@@ -65,18 +68,21 @@ func NewS3Adapter(ctx context.Context, cfg config.StorageConfig) (*S3Adapter, er
 	}
 
 	return &S3Adapter{
-		client:    client,
-		presign:   s3.NewPresignClient(client),
-		transfer:  newS3TransferManager(client),
-		bucket:    cfg.S3Bucket,
-		keyPrefix: keyPrefix,
+		client:                client,
+		presign:               s3.NewPresignClient(client),
+		transfer:              newS3TransferManager(client, uploadPartSizeBytes, uploadConcurrency),
+		bucket:                cfg.S3Bucket,
+		keyPrefix:             keyPrefix,
+		uploadPartSizeBytes:   uploadPartSizeBytes,
+		uploadConcurrency:     uploadConcurrency,
+		multipartAbortTimeout: multipartAbortTimeout,
 	}, nil
 }
 
 func (a *S3Adapter) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {
 	transfer := a.transfer
 	if transfer == nil {
-		transfer = newS3TransferManager(a.client)
+		transfer = newS3TransferManager(a.client, s3UploadPartSizeBytes(a.uploadPartSizeBytes), s3UploadConcurrency(a.uploadConcurrency))
 	}
 	_, err := transfer.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(a.bucket),
@@ -98,7 +104,7 @@ func (a *S3Adapter) abortFailedMultipartUpload(objectName string, uploadErr erro
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s3MultipartAbortTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s3MultipartAbortTimeout(a.multipartAbortTimeout))
 	defer cancel()
 
 	_, err := a.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
@@ -220,19 +226,50 @@ func (a *S3Adapter) clearPrefix() string {
 	return strings.TrimRight(a.keyPrefix, "/") + "/"
 }
 
-func newS3TransferManager(client transfermanager.S3APIClient) *transfermanager.Client {
+func newS3TransferManager(client transfermanager.S3APIClient, partSizeBytes int64, concurrency int) *transfermanager.Client {
 	return transfermanager.New(client, func(options *transfermanager.Options) {
-		options.PartSizeBytes = defaultS3UploadPartSize
-		options.MultipartUploadThreshold = defaultS3UploadPartSize
-		options.Concurrency = defaultS3UploadConcurrency
+		options.PartSizeBytes = partSizeBytes
+		options.MultipartUploadThreshold = partSizeBytes
+		options.Concurrency = concurrency
 	})
 }
 
 func s3KeyPrefix(prefix string) string {
 	if strings.TrimSpace(prefix) == "" {
-		return defaultS3KeyPrefix
+		return config.DefaultS3KeyPrefix
 	}
 	return strings.Trim(prefix, "/")
+}
+
+func s3UploadPartSizeBytes(partSizeBytes int64) int64 {
+	if partSizeBytes < 1 {
+		return config.DefaultS3UploadPartSizeBytes
+	}
+	return partSizeBytes
+}
+
+func normalizeS3UploadPartSizeBytes(partSizeBytes int64, configured bool) (int64, error) {
+	if partSizeBytes == 0 && !configured {
+		return config.DefaultS3UploadPartSizeBytes, nil
+	}
+	if partSizeBytes < config.MinS3UploadPartSizeBytes {
+		return 0, fmt.Errorf("STORAGE_S3_UPLOAD_PART_SIZE_BYTES must be at least %d bytes (5 MiB), got %d", config.MinS3UploadPartSizeBytes, partSizeBytes)
+	}
+	return partSizeBytes, nil
+}
+
+func s3UploadConcurrency(concurrency int) int {
+	if concurrency < 1 {
+		return config.DefaultS3UploadConcurrency
+	}
+	return concurrency
+}
+
+func s3MultipartAbortTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return config.DefaultS3MultipartAbortTimeout
+	}
+	return timeout
 }
 
 func s3DeleteErrorsError(deleteErrors []types.Error) error {

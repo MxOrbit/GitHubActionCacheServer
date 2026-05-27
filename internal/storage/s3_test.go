@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,8 +34,38 @@ func TestS3KeyUsesCachePrefix(t *testing.T) {
 }
 
 func TestS3KeyPrefixDefault(t *testing.T) {
-	if got := s3KeyPrefix(""); got != defaultS3KeyPrefix {
+	if got := s3KeyPrefix(""); got != config.DefaultS3KeyPrefix {
 		t.Fatalf("unexpected key prefix: %s", got)
+	}
+}
+
+func TestS3UploadOptionsDefault(t *testing.T) {
+	require.Equal(t, int64(config.DefaultS3UploadPartSizeBytes), s3UploadPartSizeBytes(0))
+	require.Equal(t, config.DefaultS3UploadConcurrency, s3UploadConcurrency(0))
+	require.Equal(t, config.DefaultS3MultipartAbortTimeout, s3MultipartAbortTimeout(0))
+}
+
+func TestNewS3AdapterRejectsUploadPartSizeBelowMinimum(t *testing.T) {
+	tests := []struct {
+		partSize   int64
+		configured bool
+	}{
+		{partSize: 0, configured: true},
+		{partSize: config.MinS3UploadPartSizeBytes - 1},
+	}
+
+	for _, tt := range tests {
+		adapter, err := NewS3Adapter(context.Background(), config.StorageConfig{
+			S3Bucket:                        "cache-bucket",
+			S3Region:                        "us-east-1",
+			S3UploadPartSizeBytes:           tt.partSize,
+			S3UploadPartSizeBytesConfigured: tt.configured,
+		})
+		require.Nil(t, adapter)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "STORAGE_S3_UPLOAD_PART_SIZE_BYTES")
+		require.Contains(t, err.Error(), strconv.FormatInt(config.MinS3UploadPartSizeBytes, 10))
+		require.Contains(t, err.Error(), strconv.FormatInt(tt.partSize, 10))
 	}
 }
 
@@ -58,6 +89,17 @@ func TestNewS3AdapterProbesConfiguredPrefix(t *testing.T) {
 	require.Equal(t, "1", fakeS3.listObjectsMaxKeys())
 }
 
+func TestNewS3AdapterDefaultsOmittedUploadPartSize(t *testing.T) {
+	fakeS3 := newFakeS3Server(t, fakeS3Options{})
+	defer fakeS3.Close()
+
+	adapter, err := newTestS3AdapterWithConfig(t, config.StorageConfig{
+		S3EndpointURL: fakeS3.URL,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(config.DefaultS3UploadPartSizeBytes), adapter.uploadPartSizeBytes)
+}
+
 func TestNewS3AdapterFailsWhenPrefixProbeCannotAccessBucket(t *testing.T) {
 	fakeS3 := newFakeS3Server(t, fakeS3Options{listObjectsStatus: http.StatusNotFound})
 	defer fakeS3.Close()
@@ -75,15 +117,39 @@ func TestS3AdapterUploadStreamUsesMultipartForLargeObjects(t *testing.T) {
 	adapter, err := newTestS3Adapter(t, fakeS3.URL)
 	require.NoError(t, err)
 
-	body := bytes.NewReader(make([]byte, defaultS3UploadPartSize+1))
+	body := bytes.NewReader(make([]byte, config.DefaultS3UploadPartSizeBytes+1))
 	require.NoError(t, adapter.UploadStream(ctx, "folder/object", body))
 
 	require.False(t, fakeS3.putObjectCalled())
 	require.True(t, fakeS3.createMultipartCalled())
 	require.Equal(t, []int{1, 2}, fakeS3.uploadedPartNumbers())
-	require.Equal(t, []int{defaultS3UploadPartSize, 1}, fakeS3.uploadedPartSizes())
+	require.Equal(t, []int{config.DefaultS3UploadPartSizeBytes, 1}, fakeS3.uploadedPartSizes())
 	require.True(t, fakeS3.completeMultipartCalled())
 	require.False(t, fakeS3.abortMultipartCalled())
+}
+
+func TestS3AdapterUploadStreamUsesConfiguredUploadOptions(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{})
+	defer fakeS3.Close()
+
+	partSize := int64(config.DefaultS3UploadPartSizeBytes + 1024)
+	adapter, err := newTestS3AdapterWithConfig(t, config.StorageConfig{
+		S3EndpointURL:           fakeS3.URL,
+		S3UploadPartSizeBytes:   partSize,
+		S3UploadConcurrency:     2,
+		S3MultipartAbortTimeout: 45 * time.Second,
+	})
+	require.NoError(t, err)
+	require.Equal(t, partSize, adapter.uploadPartSizeBytes)
+	require.Equal(t, 2, adapter.uploadConcurrency)
+	require.Equal(t, 45*time.Second, adapter.multipartAbortTimeout)
+
+	body := bytes.NewReader(make([]byte, int(partSize)+1))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/object", body))
+
+	require.True(t, fakeS3.createMultipartCalled())
+	require.Equal(t, map[int]int{1: int(partSize), 2: 1}, fakeS3.uploadedPartSizesByNumber())
 }
 
 func TestS3AdapterUploadStreamAbortsFailedMultipartUpload(t *testing.T) {
@@ -93,7 +159,7 @@ func TestS3AdapterUploadStreamAbortsFailedMultipartUpload(t *testing.T) {
 	adapter, err := newTestS3Adapter(t, fakeS3.URL)
 	require.NoError(t, err)
 
-	body := bytes.NewReader(make([]byte, defaultS3UploadPartSize+1))
+	body := bytes.NewReader(make([]byte, config.DefaultS3UploadPartSizeBytes+1))
 	err = adapter.UploadStream(ctx, "folder/object", body)
 	require.Error(t, err)
 
@@ -116,7 +182,7 @@ func TestS3AdapterUploadStreamAbortsCanceledMultipartUploadWithFreshContext(t *t
 	adapter, err := newTestS3Adapter(t, fakeS3.URL)
 	require.NoError(t, err)
 
-	body := bytes.NewReader(make([]byte, defaultS3UploadPartSize+1))
+	body := bytes.NewReader(make([]byte, config.DefaultS3UploadPartSizeBytes+1))
 	err = adapter.UploadStream(ctx, "folder/object", body)
 	require.Error(t, err)
 
@@ -362,6 +428,17 @@ func (s *fakeS3Server) uploadedPartSizes() []int {
 	return append([]int(nil), s.uploadPartSize...)
 }
 
+func (s *fakeS3Server) uploadedPartSizesByNumber() map[int]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sizes := make(map[int]int, len(s.uploadParts))
+	for index, partNumber := range s.uploadParts {
+		sizes[partNumber] = s.uploadPartSize[index]
+	}
+	return sizes
+}
+
 func (s *fakeS3Server) completeMultipartCalled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -382,16 +459,35 @@ func hasQueryKey(r *http.Request, key string) bool {
 func newTestS3Adapter(t *testing.T, endpoint string) (*S3Adapter, error) {
 	t.Helper()
 
+	return newTestS3AdapterWithConfig(t, config.StorageConfig{S3EndpointURL: endpoint})
+}
+
+func newTestS3AdapterWithConfig(t *testing.T, cfg config.StorageConfig) (*S3Adapter, error) {
+	t.Helper()
+
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 
+	if cfg.S3Bucket == "" {
+		cfg.S3Bucket = "cache-bucket"
+	}
+	if cfg.S3Region == "" {
+		cfg.S3Region = "us-east-1"
+	}
+	if cfg.S3KeyPrefix == "" {
+		cfg.S3KeyPrefix = config.DefaultS3KeyPrefix
+	}
 	return NewS3Adapter(context.Background(), config.StorageConfig{
-		S3Bucket:         "cache-bucket",
-		S3Region:         "us-east-1",
-		S3EndpointURL:    endpoint,
-		S3ForcePathStyle: true,
-		S3KeyPrefix:      defaultS3KeyPrefix,
+		S3Bucket:                        cfg.S3Bucket,
+		S3Region:                        cfg.S3Region,
+		S3EndpointURL:                   cfg.S3EndpointURL,
+		S3ForcePathStyle:                true,
+		S3KeyPrefix:                     cfg.S3KeyPrefix,
+		S3UploadPartSizeBytes:           cfg.S3UploadPartSizeBytes,
+		S3UploadPartSizeBytesConfigured: cfg.S3UploadPartSizeBytesConfigured,
+		S3UploadConcurrency:             cfg.S3UploadConcurrency,
+		S3MultipartAbortTimeout:         cfg.S3MultipartAbortTimeout,
 	})
 }
 

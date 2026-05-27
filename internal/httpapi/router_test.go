@@ -89,7 +89,7 @@ func TestFallbackProxyForwardsUnknownPath(t *testing.T) {
 	defer upstream.Close()
 
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	cfg := config.Load()
+	cfg := newTestConfig(t)
 	cfg.Server.DefaultActionsResultsURL = upstream.URL + "/api"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
 		DB:      client,
@@ -131,7 +131,7 @@ func TestFallbackProxyDoesNotHandleManagementMisses(t *testing.T) {
 	defer upstream.Close()
 
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	cfg := config.Load()
+	cfg := newTestConfig(t)
 	cfg.Server.DefaultActionsResultsURL = upstream.URL
 	cfg.Management.APIKey = "secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
@@ -157,7 +157,7 @@ func TestFallbackProxyDoesNotHandleManagementMisses(t *testing.T) {
 
 func TestManagementDocsAndSpec(t *testing.T) {
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	cfg := config.Load()
+	cfg := newTestConfig(t)
 	cfg.Management.APIKey = "secret"
 	cfg.Server.APIBaseURL = "https://cache.example"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
@@ -199,7 +199,7 @@ func TestManagementDocsAndSpec(t *testing.T) {
 
 func TestManagementCORSPreflightDoesNotRequireAPIKey(t *testing.T) {
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	cfg := config.Load()
+	cfg := newTestConfig(t)
 	cfg.Management.APIKey = "secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
 		DB:      client,
@@ -220,7 +220,7 @@ func TestManagementCORSPreflightDoesNotRequireAPIKey(t *testing.T) {
 
 func TestManagementRPCFindMany(t *testing.T) {
 	ctx, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	cfg := config.Load()
+	cfg := newTestConfig(t)
 	cfg.Management.APIKey = "secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
 		DB:      client,
@@ -282,7 +282,7 @@ func TestDownloadSurfacesImmediateMergeUploadFailure(t *testing.T) {
 		SetLocation(location).
 		SaveX(ctx)
 
-	cfg := config.Load()
+	cfg := newTestConfig(t)
 	cfg.Cache.DownloadURLSigningSecret = "test-secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
 		DB:      client,
@@ -302,10 +302,18 @@ func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	return NewRouter(zerolog.Nop(), config.Load(), Dependencies{
+	return NewRouter(zerolog.Nop(), newTestConfig(t), Dependencies{
 		DB:      client,
 		Storage: storageAdapter,
 	})
+}
+
+func newTestConfig(t *testing.T) config.Config {
+	t.Helper()
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	return cfg
 }
 
 var errMergeUploadFailed = errors.New("merge upload failed")

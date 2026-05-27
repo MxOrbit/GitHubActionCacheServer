@@ -87,7 +87,9 @@ func newTestApp(t *testing.T) testApp {
 	t.Helper()
 
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	router := httpapi.NewRouter(zerolog.Nop(), config.Load(), httpapi.Dependencies{
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	router := httpapi.NewRouter(zerolog.Nop(), cfg, httpapi.Dependencies{
 		DB:      client,
 		Storage: storageAdapter,
 	})

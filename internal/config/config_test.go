@@ -3,6 +3,7 @@ package config
 import (
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +25,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL", "")
 	t.Setenv("STORAGE_S3_FORCE_PATH_STYLE", "")
 	t.Setenv("STORAGE_S3_KEY_PREFIX", "")
+	t.Setenv("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", "")
+	t.Setenv("STORAGE_S3_UPLOAD_CONCURRENCY", "")
+	t.Setenv("STORAGE_S3_MULTIPART_ABORT_TIMEOUT", "")
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "")
 	t.Setenv("CACHE_MERGE_CONCURRENCY", "")
@@ -32,7 +36,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "")
 	t.Setenv("DEBUG", "")
 
-	cfg := Load()
+	cfg, err := Load()
+	require.NoError(t, err)
 
 	require.Equal(t, DefaultAddr, cfg.Server.Addr)
 	require.Empty(t, cfg.Server.APIBaseURL)
@@ -47,6 +52,10 @@ func TestLoadDefaults(t *testing.T) {
 	require.Equal(t, "us-east-1", cfg.Storage.S3Region)
 	require.True(t, cfg.Storage.S3ForcePathStyle)
 	require.Equal(t, "gh-actions-cache", cfg.Storage.S3KeyPrefix)
+	require.Equal(t, int64(DefaultS3UploadPartSizeBytes), cfg.Storage.S3UploadPartSizeBytes)
+	require.False(t, cfg.Storage.S3UploadPartSizeBytesConfigured)
+	require.Equal(t, DefaultS3UploadConcurrency, cfg.Storage.S3UploadConcurrency)
+	require.Equal(t, DefaultS3MultipartAbortTimeout, cfg.Storage.S3MultipartAbortTimeout)
 	require.False(t, cfg.Cache.EnableDirectDownloads)
 	require.Empty(t, cfg.Cache.DownloadURLSigningSecret)
 	require.Equal(t, runtime.NumCPU(), cfg.Cache.MergeConcurrency)
@@ -71,6 +80,9 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL", "https://s3.example")
 	t.Setenv("STORAGE_S3_FORCE_PATH_STYLE", "false")
 	t.Setenv("STORAGE_S3_KEY_PREFIX", "custom-prefix")
+	t.Setenv("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", "10485760")
+	t.Setenv("STORAGE_S3_UPLOAD_CONCURRENCY", "3")
+	t.Setenv("STORAGE_S3_MULTIPART_ABORT_TIMEOUT", "45s")
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "true")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "secret")
 	t.Setenv("CACHE_MERGE_CONCURRENCY", "2")
@@ -79,7 +91,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "30")
 	t.Setenv("DEBUG", "true")
 
-	cfg := Load()
+	cfg, err := Load()
+	require.NoError(t, err)
 
 	require.Equal(t, ":8080", cfg.Server.Addr)
 	require.Equal(t, "https://cache.example", cfg.Server.APIBaseURL)
@@ -95,6 +108,10 @@ func TestLoadFromEnv(t *testing.T) {
 	require.Equal(t, "https://s3.example", cfg.Storage.S3EndpointURL)
 	require.False(t, cfg.Storage.S3ForcePathStyle)
 	require.Equal(t, "custom-prefix", cfg.Storage.S3KeyPrefix)
+	require.Equal(t, int64(10*1024*1024), cfg.Storage.S3UploadPartSizeBytes)
+	require.True(t, cfg.Storage.S3UploadPartSizeBytesConfigured)
+	require.Equal(t, 3, cfg.Storage.S3UploadConcurrency)
+	require.Equal(t, 45*time.Second, cfg.Storage.S3MultipartAbortTimeout)
 	require.True(t, cfg.Cache.EnableDirectDownloads)
 	require.Equal(t, "secret", cfg.Cache.DownloadURLSigningSecret)
 	require.Equal(t, 2, cfg.Cache.MergeConcurrency)
@@ -102,4 +119,31 @@ func TestLoadFromEnv(t *testing.T) {
 	require.True(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 30, cfg.Cleanup.CacheOlderThanDays)
 	require.True(t, cfg.Debug)
+}
+
+func TestLoadPreservesS3UploadPartSizeBelowMinimumForValidation(t *testing.T) {
+	t.Setenv("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", "1048576")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.Equal(t, int64(1048576), cfg.Storage.S3UploadPartSizeBytes)
+	require.True(t, cfg.Storage.S3UploadPartSizeBytesConfigured)
+}
+
+func TestLoadRejectsMalformedS3UploadPartSize(t *testing.T) {
+	tests := []string{"10MiB", "abc", "9223372036854775808"}
+
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", value)
+
+			cfg, err := Load()
+
+			require.Zero(t, cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "STORAGE_S3_UPLOAD_PART_SIZE_BYTES")
+			require.Contains(t, err.Error(), value)
+		})
+	}
 }
