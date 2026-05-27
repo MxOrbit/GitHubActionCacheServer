@@ -189,32 +189,23 @@ func TestMergeLocationKeepsPartsForConcurrentReaders(t *testing.T) {
 }
 
 func TestDownloadStreamsPartsWhileMergeRunsInBackground(t *testing.T) {
-	ctx, client, filesystem := newTestServiceDeps(t)
-	adapter := newBlockingMergeStorage(filesystem)
-	service := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1})
-	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("hello")))
-	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	fixture := startBlockingMergeDownload(t, "hello")
 
-	stream, err := service.Download(ctx, "entry-id")
-	require.NoError(t, err)
-	defer stream.Close()
-	adapter.waitStarted(t)
-
-	current := client.StorageLocation.GetX(ctx, location.ID)
+	current := fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
 	require.NotNil(t, current.MergeStartedAt)
 	require.Nil(t, current.MergedAt)
 
 	body := make([]byte, len("hello"))
-	_, err = io.ReadFull(stream, body)
+	_, err := io.ReadFull(fixture.stream, body)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(body))
 
-	adapter.releaseOne()
-	rest, err := io.ReadAll(stream)
+	fixture.adapter.releaseOne()
+	rest, err := io.ReadAll(fixture.stream)
 	require.NoError(t, err)
 	require.Empty(t, rest)
 	require.Eventually(t, func() bool {
-		current := client.StorageLocation.GetX(ctx, location.ID)
+		current := fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
 		return current.MergedAt != nil
 	}, time.Second, 10*time.Millisecond)
 }
@@ -322,31 +313,21 @@ func TestBackgroundMergesRespectConcurrencyLimit(t *testing.T) {
 }
 
 func TestWaitForMergesCancelsInFlightMergeAndClearsMergeStart(t *testing.T) {
-	ctx, client, filesystem := newTestServiceDeps(t)
-	adapter := newBlockingMergeStorage(filesystem)
-	service := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1})
+	fixture := startBlockingMergeDownload(t, "hello")
 
-	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("hello")))
-	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
-
-	stream, err := service.Download(ctx, "entry-id")
-	require.NoError(t, err)
-	defer stream.Close()
-	adapter.waitStarted(t)
-
-	service.StopAcceptingMerges()
+	fixture.service.StopAcceptingMerges()
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 
-	err = service.WaitForMerges(waitCtx)
+	err := fixture.service.WaitForMerges(waitCtx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	require.Eventually(t, func() bool {
-		current := client.StorageLocation.GetX(ctx, location.ID)
+		current := fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
 		return current.MergeStartedAt == nil && current.MergedAt == nil
 	}, time.Second, 10*time.Millisecond)
 
-	_, err = filesystem.CreateDownloadStream(ctx, "folder/merged")
+	_, err = fixture.filesystem.CreateDownloadStream(fixture.ctx, "folder/merged")
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
@@ -389,6 +370,43 @@ type failDeleteStorage struct {
 func (s *failDeleteStorage) DeleteFolder(context.Context, string) error {
 	s.deleteCalled = true
 	return errInjectedDeleteFailure
+}
+
+type blockingMergeDownloadFixture struct {
+	ctx        context.Context
+	client     *ent.Client
+	filesystem *storage.FilesystemAdapter
+	adapter    *blockingMergeStorage
+	service    *Service
+	location   *ent.StorageLocation
+	stream     io.ReadCloser
+}
+
+func startBlockingMergeDownload(t *testing.T, content string) *blockingMergeDownloadFixture {
+	t.Helper()
+
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := newBlockingMergeStorage(filesystem)
+	service := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString(content)))
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = stream.Close()
+	})
+	adapter.waitStarted(t)
+
+	return &blockingMergeDownloadFixture{
+		ctx:        ctx,
+		client:     client,
+		filesystem: filesystem,
+		adapter:    adapter,
+		service:    service,
+		location:   location,
+		stream:     stream,
+	}
 }
 
 type blockingMergeStorage struct {

@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"entgo.io/ent/dialect/sql"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
@@ -77,24 +76,13 @@ func (h *Handler) managementRPCListCacheEntries(c *gin.Context, input map[string
 	page := rpcPositiveInt(input, "page", 1, 0)
 	itemsPerPage := rpcPositiveInt(input, "itemsPerPage", defaultManagementItemsPerPage, maxManagementItemsPerPage)
 
-	query := h.db.CacheEntry.Query().
-		Where(filters...).
-		Order(cacheentry.ByUpdatedAt(sql.OrderDesc())).
-		Limit(itemsPerPage).
-		Offset((page - 1) * itemsPerPage)
-	items, err := query.All(c.Request.Context())
+	result, err := h.listManagementCacheEntries(c, filters, page, itemsPerPage)
 	if err != nil {
 		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
 		return
 	}
 
-	total, err := h.db.CacheEntry.Query().Where(filters...).Count(c.Request.Context())
-	if err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
-		return
-	}
-
-	managementRPCSuccess(c, http.StatusOK, cacheEntryListResponse{Total: total, Items: items})
+	managementRPCSuccess(c, http.StatusOK, result)
 }
 
 func (h *Handler) managementRPCGetCacheEntry(c *gin.Context, input map[string]any) {
@@ -150,24 +138,11 @@ func (h *Handler) managementRPCDeleteCacheEntry(c *gin.Context, input map[string
 		return
 	}
 
-	entry, err := h.db.CacheEntry.Query().
-		Where(cacheentry.ID(id)).
-		Only(c.Request.Context())
-	if err != nil {
-		if ent.IsNotFound(err) {
-			managementRPCUndefined(c)
-			return
-		}
+	if err := h.deleteManagementCacheEntry(c, id); err != nil {
 		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
 		return
 	}
 
-	if err := h.db.CacheEntry.DeleteOneID(entry.ID).Exec(c.Request.Context()); err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
-		return
-	}
-
-	h.cleanupOrphanStorageLocations(c, []string{entry.LocationId})
 	managementRPCUndefined(c)
 }
 
@@ -224,23 +199,7 @@ func (h *Handler) managementRPCDeleteStorageLocation(c *gin.Context, input map[s
 		return
 	}
 
-	location, err := h.db.StorageLocation.Query().
-		Where(storagelocation.ID(id)).
-		Only(c.Request.Context())
-	if err != nil {
-		if ent.IsNotFound(err) {
-			managementRPCUndefined(c)
-			return
-		}
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
-		return
-	}
-
-	if err := h.db.StorageLocation.DeleteOneID(location.ID).Exec(c.Request.Context()); err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
-		return
-	}
-	if err := h.storage.DeleteFolder(c.Request.Context(), location.FolderName); err != nil {
+	if err := h.deleteManagementStorageLocation(c, id); err != nil {
 		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
 		return
 	}
@@ -303,7 +262,7 @@ func decodeManagementRPCData(data io.Reader) (map[string]any, error) {
 }
 
 func managementRPCCacheEntryFilters(input map[string]any) []entpredicate.CacheEntry {
-	filters := []entpredicate.CacheEntry{}
+	var filters []entpredicate.CacheEntry
 	if value := rpcString(input, "key"); value != "" {
 		filters = append(filters, cacheentry.Key(value))
 	}

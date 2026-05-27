@@ -33,24 +33,13 @@ func (h *Handler) ListCacheEntries(c *gin.Context) {
 	page := positiveQueryInt(c, "page", 1, 0)
 	itemsPerPage := positiveQueryInt(c, "itemsPerPage", defaultManagementItemsPerPage, maxManagementItemsPerPage)
 
-	query := h.db.CacheEntry.Query().
-		Where(filters...).
-		Order(cacheentry.ByUpdatedAt(sql.OrderDesc())).
-		Limit(itemsPerPage).
-		Offset((page - 1) * itemsPerPage)
-	items, err := query.All(c.Request.Context())
+	result, err := h.listManagementCacheEntries(c, filters, page, itemsPerPage)
 	if err != nil {
 		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
 		return
 	}
 
-	total, err := h.db.CacheEntry.Query().Where(filters...).Count(c.Request.Context())
-	if err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
-		return
-	}
-
-	c.JSON(http.StatusOK, cacheEntryListResponse{Total: total, Items: items})
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) DeleteCacheEntries(c *gin.Context) {
@@ -118,24 +107,11 @@ func (h *Handler) GetCacheEntry(c *gin.Context) {
 }
 
 func (h *Handler) DeleteCacheEntry(c *gin.Context) {
-	entry, err := h.db.CacheEntry.Query().
-		Where(cacheentry.ID(c.Param("id"))).
-		Only(c.Request.Context())
-	if err != nil {
-		if ent.IsNotFound(err) {
-			c.Status(http.StatusNoContent)
-			return
-		}
+	if err := h.deleteManagementCacheEntry(c, c.Param("id")); err != nil {
 		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
 		return
 	}
 
-	if err := h.db.CacheEntry.DeleteOneID(entry.ID).Exec(c.Request.Context()); err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
-		return
-	}
-
-	h.cleanupOrphanStorageLocations(c, []string{entry.LocationId})
 	c.Status(http.StatusNoContent)
 }
 
@@ -156,23 +132,7 @@ func (h *Handler) GetStorageLocation(c *gin.Context) {
 }
 
 func (h *Handler) DeleteStorageLocation(c *gin.Context) {
-	location, err := h.db.StorageLocation.Query().
-		Where(storagelocation.ID(c.Param("id"))).
-		Only(c.Request.Context())
-	if err != nil {
-		if ent.IsNotFound(err) {
-			c.Status(http.StatusNoContent)
-			return
-		}
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
-		return
-	}
-
-	if err := h.db.StorageLocation.DeleteOneID(location.ID).Exec(c.Request.Context()); err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
-		return
-	}
-	if err := h.storage.DeleteFolder(c.Request.Context(), location.FolderName); err != nil {
+	if err := h.deleteManagementStorageLocation(c, c.Param("id")); err != nil {
 		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
 		return
 	}
@@ -230,6 +190,79 @@ func (h *Handler) findManagementCacheEntry(c *gin.Context, key string, version s
 	return entry, nil
 }
 
+func (h *Handler) listManagementCacheEntries(c *gin.Context, filters []entpredicate.CacheEntry, page int, itemsPerPage int) (cacheEntryListResponse, error) {
+	query := h.db.CacheEntry.Query().
+		Where(filters...).
+		Order(cacheentry.ByUpdatedAt(sql.OrderDesc())).
+		Limit(itemsPerPage).
+		Offset((page - 1) * itemsPerPage)
+	items, err := query.All(c.Request.Context())
+	if err != nil {
+		return cacheEntryListResponse{}, err
+	}
+
+	total, err := h.db.CacheEntry.Query().Where(filters...).Count(c.Request.Context())
+	if err != nil {
+		return cacheEntryListResponse{}, err
+	}
+
+	return cacheEntryListResponse{Total: total, Items: items}, nil
+}
+
+func (h *Handler) deleteManagementCacheEntry(c *gin.Context, id string) error {
+	return deleteManagementEntity(
+		func() (*ent.CacheEntry, error) {
+			return h.db.CacheEntry.Query().
+				Where(cacheentry.ID(id)).
+				Only(c.Request.Context())
+		},
+		func(entry *ent.CacheEntry) error {
+			return h.db.CacheEntry.DeleteOneID(entry.ID).Exec(c.Request.Context())
+		},
+		func(entry *ent.CacheEntry) {
+			h.cleanupOrphanStorageLocations(c, []string{entry.LocationId})
+		},
+	)
+}
+
+func (h *Handler) deleteManagementStorageLocation(c *gin.Context, id string) error {
+	return deleteManagementEntity(
+		func() (*ent.StorageLocation, error) {
+			return h.db.StorageLocation.Query().
+				Where(storagelocation.ID(id)).
+				Only(c.Request.Context())
+		},
+		func(location *ent.StorageLocation) error {
+			if err := h.db.StorageLocation.DeleteOneID(location.ID).Exec(c.Request.Context()); err != nil {
+				return err
+			}
+			return h.storage.DeleteFolder(c.Request.Context(), location.FolderName)
+		},
+		nil,
+	)
+}
+
+func deleteManagementEntity[T any](load func() (*T, error), deleteEntity func(*T) error, afterDelete func(*T)) error {
+	entity, err := load()
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if entity == nil {
+		return nil
+	}
+
+	if err := deleteEntity(entity); err != nil {
+		return err
+	}
+	if afterDelete != nil {
+		afterDelete(entity)
+	}
+	return nil
+}
+
 func (h *Handler) cleanupOrphanStorageLocations(c *gin.Context, locationIDs []string) {
 	if len(locationIDs) == 0 {
 		return
@@ -251,7 +284,7 @@ func (h *Handler) cleanupOrphanStorageLocations(c *gin.Context, locationIDs []st
 }
 
 func cacheEntryFilters(c *gin.Context) []entpredicate.CacheEntry {
-	filters := []entpredicate.CacheEntry{}
+	var filters []entpredicate.CacheEntry
 	if value := c.Query("key"); value != "" {
 		filters = append(filters, cacheentry.Key(value))
 	}

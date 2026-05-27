@@ -19,13 +19,11 @@ func (Upload) Annotations() []schema.Annotation {
 }
 
 func (Upload) Fields() []ent.Field {
-	incremental := false
-
 	return []ent.Field{
 		field.Int64("id").
 			Immutable().
 			Unique().
-			Annotations(entsql.Annotation{Incremental: &incremental}),
+			Annotations(entsql.Annotation{Incremental: new(bool)}),
 		field.String("key").MaxLen(512).NotEmpty().SchemaType(originalBoundedStringColumnType(512)),
 		field.String("version").MaxLen(255).NotEmpty().SchemaType(originalBoundedStringColumnType(255)),
 		field.String("scope").MaxLen(255).NotEmpty().SchemaType(originalBoundedStringColumnType(255)),

@@ -286,61 +286,15 @@ func (s *Service) MatchCacheEntry(ctx context.Context, keys []string, version st
 	primaryKey := keys[0]
 	restoreKeys := keys[1:]
 	for _, cacheScope := range scopes {
-		exactPrimary, err := s.findCacheEntry(ctx, cacheEntryMatch{
-			key:     primaryKey,
-			version: version,
-			scope:   cacheScope,
-			repoID:  scope.RepoID,
-			prefix:  false,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if exactPrimary != nil {
-			return exactPrimary, nil
-		}
-
-		prefixedPrimary, err := s.findCacheEntry(ctx, cacheEntryMatch{
-			key:     primaryKey,
-			version: version,
-			scope:   cacheScope,
-			repoID:  scope.RepoID,
-			prefix:  true,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if prefixedPrimary != nil {
-			return prefixedPrimary, nil
+		primaryMatch, err := s.findExactOrPrefixedCacheEntry(ctx, primaryKey, version, cacheScope, scope.RepoID)
+		if err != nil || primaryMatch != nil {
+			return primaryMatch, err
 		}
 
 		for _, restoreKey := range restoreKeys {
-			exactRestore, err := s.findCacheEntry(ctx, cacheEntryMatch{
-				key:     restoreKey,
-				version: version,
-				scope:   cacheScope,
-				repoID:  scope.RepoID,
-				prefix:  false,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if exactRestore != nil {
-				return exactRestore, nil
-			}
-
-			prefixedRestore, err := s.findCacheEntry(ctx, cacheEntryMatch{
-				key:     restoreKey,
-				version: version,
-				scope:   cacheScope,
-				repoID:  scope.RepoID,
-				prefix:  true,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if prefixedRestore != nil {
-				return prefixedRestore, nil
+			restoreMatch, err := s.findExactOrPrefixedCacheEntry(ctx, restoreKey, version, cacheScope, scope.RepoID)
+			if err != nil || restoreMatch != nil {
+				return restoreMatch, err
 			}
 		}
 	}
@@ -605,6 +559,27 @@ type cacheEntryMatch struct {
 	scope   string
 	repoID  string
 	prefix  bool
+}
+
+func (s *Service) findExactOrPrefixedCacheEntry(ctx context.Context, key string, version string, cacheScope string, repoID string) (*ent.CacheEntry, error) {
+	exact, err := s.findCacheEntry(ctx, cacheEntryMatch{
+		key:     key,
+		version: version,
+		scope:   cacheScope,
+		repoID:  repoID,
+		prefix:  false,
+	})
+	if err != nil || exact != nil {
+		return exact, err
+	}
+
+	return s.findCacheEntry(ctx, cacheEntryMatch{
+		key:     key,
+		version: version,
+		scope:   cacheScope,
+		repoID:  repoID,
+		prefix:  true,
+	})
 }
 
 func (s *Service) findCacheEntry(ctx context.Context, match cacheEntryMatch) (*ent.CacheEntry, error) {

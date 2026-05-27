@@ -153,32 +153,26 @@ func TestS3AdapterUploadStreamUsesConfiguredUploadOptions(t *testing.T) {
 }
 
 func TestS3AdapterUploadStreamAbortsFailedMultipartUpload(t *testing.T) {
-	ctx := context.Background()
-	fakeS3 := newFakeS3Server(t, fakeS3Options{failPartNumber: 2})
-	defer fakeS3.Close()
-	adapter, err := newTestS3Adapter(t, fakeS3.URL)
-	require.NoError(t, err)
-
-	body := bytes.NewReader(make([]byte, config.DefaultS3UploadPartSizeBytes+1))
-	err = adapter.UploadStream(ctx, "folder/object", body)
-	require.Error(t, err)
-
-	require.True(t, fakeS3.createMultipartCalled())
-	require.True(t, fakeS3.abortMultipartCalled())
-	require.False(t, fakeS3.completeMultipartCalled())
+	requireFailedMultipartUploadAborted(t, context.Background(), fakeS3Options{failPartNumber: 2})
 }
 
 func TestS3AdapterUploadStreamAbortsCanceledMultipartUploadWithFreshContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fakeS3 := newFakeS3Server(t, fakeS3Options{
+	requireFailedMultipartUploadAborted(t, ctx, fakeS3Options{
 		onUploadPart: func(partNumber int) {
 			if partNumber == 1 {
 				cancel()
 			}
 		},
 	})
-	defer fakeS3.Close()
+}
+
+func requireFailedMultipartUploadAborted(t *testing.T, ctx context.Context, options fakeS3Options) {
+	t.Helper()
+
+	fakeS3 := newFakeS3Server(t, options)
+	t.Cleanup(fakeS3.Close)
 	adapter, err := newTestS3Adapter(t, fakeS3.URL)
 	require.NoError(t, err)
 
