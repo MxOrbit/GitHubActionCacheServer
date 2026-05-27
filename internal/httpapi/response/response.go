@@ -1,7 +1,6 @@
 package response
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,39 +10,9 @@ type Payload interface {
 	responsePayload()
 }
 
-type JSONBody[T Payload] struct {
-	ok      bool
-	payload T
-}
-
-func (b JSONBody[T]) MarshalJSON() ([]byte, error) {
-	fields := map[string]json.RawMessage{}
-
-	ok, err := json.Marshal(b.ok)
-	if err != nil {
-		return nil, err
-	}
-	fields["ok"] = ok
-
-	payload, err := json.Marshal(b.payload)
-	if err != nil {
-		return nil, err
-	}
-
-	payloadFields := map[string]json.RawMessage{}
-	if err := json.Unmarshal(payload, &payloadFields); err != nil {
-		return nil, err
-	}
-	for key, value := range payloadFields {
-		fields[key] = value
-	}
-
-	return json.Marshal(fields)
-}
-
 type JSONResponse[T Payload] interface {
 	StatusCode() int
-	Body() JSONBody[T]
+	Body() T
 }
 
 type TextResponse interface {
@@ -58,7 +27,6 @@ type EmptyResponse interface {
 
 type jsonResponse[T Payload] struct {
 	status  int
-	ok      bool
 	payload T
 }
 
@@ -66,11 +34,8 @@ func (r jsonResponse[T]) StatusCode() int {
 	return r.status
 }
 
-func (r jsonResponse[T]) Body() JSONBody[T] {
-	return JSONBody[T]{
-		ok:      r.ok,
-		payload: r.payload,
-	}
+func (r jsonResponse[T]) Body() T {
+	return r.payload
 }
 
 type textResponse struct {
@@ -99,34 +64,40 @@ func (r emptyResponse) Headers() map[string]string {
 	return r.headers
 }
 
-type EmptyPayload struct{}
+type basePayload struct {
+	OK bool `json:"ok"`
+}
 
-func (EmptyPayload) responsePayload() {}
+func (basePayload) responsePayload() {}
+
+type EmptyPayload struct {
+	basePayload
+}
 
 type CreateCacheEntryPayload struct {
+	basePayload
+
 	SignedUploadURL string `json:"signed_upload_url"`
 }
 
-func (CreateCacheEntryPayload) responsePayload() {}
-
 type GetCacheEntryDownloadURLPayload struct {
+	basePayload
+
 	SignedDownloadURL string `json:"signed_download_url"`
 	MatchedKey        string `json:"matched_key"`
 }
 
-func (GetCacheEntryDownloadURLPayload) responsePayload() {}
-
 type FinalizeCacheEntryUploadPayload struct {
+	basePayload
+
 	EntryID string `json:"entry_id"`
 }
 
-func (FinalizeCacheEntryUploadPayload) responsePayload() {}
-
 type ErrorPayload struct {
+	basePayload
+
 	Error string `json:"error"`
 }
-
-func (ErrorPayload) responsePayload() {}
 
 func JSON[T Payload](c *gin.Context, response JSONResponse[T]) {
 	c.JSON(response.StatusCode(), response.Body())
@@ -153,16 +124,15 @@ func PlainOK(body string) TextResponse {
 func CacheMiss() JSONResponse[EmptyPayload] {
 	return jsonResponse[EmptyPayload]{
 		status:  http.StatusOK,
-		ok:      false,
-		payload: EmptyPayload{},
+		payload: EmptyPayload{basePayload: basePayload{OK: false}},
 	}
 }
 
 func CreateCacheEntry(uploadURL string) JSONResponse[CreateCacheEntryPayload] {
 	return jsonResponse[CreateCacheEntryPayload]{
 		status: http.StatusOK,
-		ok:     true,
 		payload: CreateCacheEntryPayload{
+			basePayload:     basePayload{OK: true},
 			SignedUploadURL: uploadURL,
 		},
 	}
@@ -171,8 +141,8 @@ func CreateCacheEntry(uploadURL string) JSONResponse[CreateCacheEntryPayload] {
 func GetCacheEntryDownloadURL(downloadURL, matchedKey string) JSONResponse[GetCacheEntryDownloadURLPayload] {
 	return jsonResponse[GetCacheEntryDownloadURLPayload]{
 		status: http.StatusOK,
-		ok:     true,
 		payload: GetCacheEntryDownloadURLPayload{
+			basePayload:       basePayload{OK: true},
 			SignedDownloadURL: downloadURL,
 			MatchedKey:        matchedKey,
 		},
@@ -182,9 +152,9 @@ func GetCacheEntryDownloadURL(downloadURL, matchedKey string) JSONResponse[GetCa
 func FinalizeCacheEntryUpload(entryID string) JSONResponse[FinalizeCacheEntryUploadPayload] {
 	return jsonResponse[FinalizeCacheEntryUploadPayload]{
 		status: http.StatusOK,
-		ok:     true,
 		payload: FinalizeCacheEntryUploadPayload{
-			EntryID: entryID,
+			basePayload: basePayload{OK: true},
+			EntryID:     entryID,
 		},
 	}
 }
@@ -201,9 +171,9 @@ func AzureCreated(requestID string) EmptyResponse {
 func Error(status int, message string) JSONResponse[ErrorPayload] {
 	return jsonResponse[ErrorPayload]{
 		status: status,
-		ok:     false,
 		payload: ErrorPayload{
-			Error: message,
+			basePayload: basePayload{OK: false},
+			Error:       message,
 		},
 	}
 }

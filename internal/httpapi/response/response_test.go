@@ -7,10 +7,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestJSONBodyMarshal(t *testing.T) {
+func TestJSONResponseBodyMarshal(t *testing.T) {
 	tests := []struct {
 		name string
-		body json.Marshaler
+		body any
 		want string
 	}{
 		{

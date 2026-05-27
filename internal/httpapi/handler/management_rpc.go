@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -262,28 +261,24 @@ func managementRPCProcedure(c *gin.Context) string {
 
 func decodeManagementRPCInput(c *gin.Context) (map[string]any, error) {
 	if data := strings.TrimSpace(c.Query("data")); data != "" {
-		return decodeManagementRPCData([]byte(data))
+		return decodeManagementRPCData(strings.NewReader(data))
 	}
 	if c.Request.Body == nil {
 		return map[string]any{}, nil
 	}
 
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return nil, err
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		return map[string]any{}, nil
-	}
-	return decodeManagementRPCData(body)
+	return decodeManagementRPCData(c.Request.Body)
 }
 
-func decodeManagementRPCData(data []byte) (map[string]any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+func decodeManagementRPCData(data io.Reader) (map[string]any, error) {
+	decoder := json.NewDecoder(data)
 	decoder.UseNumber()
 
 	var payload any
 	if err := decoder.Decode(&payload); err != nil {
+		if errors.Is(err, io.EOF) {
+			return map[string]any{}, nil
+		}
 		return nil, err
 	}
 

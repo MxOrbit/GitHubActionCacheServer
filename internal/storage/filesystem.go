@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 )
 
 const filesystemUploadTempPrefix = ".upload-"
@@ -52,7 +54,7 @@ func (a *FilesystemAdapter) UploadStream(ctx context.Context, objectName string,
 		}
 	}()
 
-	if _, err := io.Copy(file, contextReader{ctx: ctx, reader: stream}); err != nil {
+	if _, err := bufferpool.Copy(file, contextReader{ctx: ctx, reader: stream}); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write object: %w", err)
 	}

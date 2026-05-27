@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	"github.com/gin-gonic/gin"
@@ -87,7 +88,7 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 	}
 	defer stream.Close()
 
-	written, err := io.Copy(c.Writer, stream)
+	written, err := bufferpool.Copy(c.Writer, stream)
 	if err != nil && written == 0 && !c.Writer.Written() {
 		if errors.Is(err, cache.ErrCacheNotFound) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))

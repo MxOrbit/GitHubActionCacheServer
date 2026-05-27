@@ -6,6 +6,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
@@ -18,11 +19,13 @@ func fallbackProxy(logger zerolog.Logger, target string) gin.HandlerFunc {
 		}
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	director := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		director(req)
-		req.Host = targetURL.Host
+	proxy := &httputil.ReverseProxy{
+		BufferPool: bufferpool.Default,
+		Transport:  bufferpool.WrapTransport(nil),
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(targetURL)
+			req.SetXForwarded()
+		},
 	}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 		logger.Error().
