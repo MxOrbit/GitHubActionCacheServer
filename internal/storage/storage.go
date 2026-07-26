@@ -31,6 +31,7 @@ func (e ObjectNotFoundError) Unwrap() error {
 
 type Adapter interface {
 	UploadStream(ctx context.Context, objectName string, stream io.Reader) error
+	CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error
 	CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error)
 	DeleteFolder(ctx context.Context, folderName string) error
 	CountFilesInFolder(ctx context.Context, folderName string) (int, error)

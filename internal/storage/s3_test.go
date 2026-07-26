@@ -220,6 +220,19 @@ func TestS3AdapterCreateDownloadStreamDoesNotTreatMissingBucketAsObjectNotFound(
 	require.Contains(t, err.Error(), "get s3 object")
 }
 
+func TestS3AdapterCopyObjectUsesServerSideCopy(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	require.NoError(t, adapter.CopyObject(ctx, "folder/blocks/source", "folder/parts/0"))
+	require.Equal(t, "cache-bucket%2Fgh-actions-cache%2Ffolder%2Fblocks%2Fsource", fakeS3.copiedSource())
+	require.Equal(t, "/cache-bucket/gh-actions-cache/folder/parts/0", fakeS3.copiedDestination())
+	require.False(t, fakeS3.putObjectCalled())
+}
+
 func TestS3DeleteErrorsError(t *testing.T) {
 	err := s3DeleteErrorsError([]types.Error{
 		{
@@ -257,17 +270,19 @@ type fakeS3Server struct {
 	failPartNumber     int
 	onUploadPart       func(int)
 
-	mu             sync.Mutex
-	headBucket     int
-	listObjects    int
-	listPrefix     string
-	listMaxKeys    string
-	putObject      bool
-	createUpload   bool
-	uploadParts    []int
-	uploadPartSize []int
-	completeUpload bool
-	abortUpload    bool
+	mu              sync.Mutex
+	headBucket      int
+	listObjects     int
+	listPrefix      string
+	listMaxKeys     string
+	putObject       bool
+	copySource      string
+	copyDestination string
+	createUpload    bool
+	uploadParts     []int
+	uploadPartSize  []int
+	completeUpload  bool
+	abortUpload     bool
 }
 
 func newFakeS3Server(t *testing.T, options fakeS3Options) *fakeS3Server {
@@ -326,6 +341,13 @@ func (s *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = fmt.Fprint(w, "object")
+	case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+		s.mu.Lock()
+		s.copySource = r.Header.Get("X-Amz-Copy-Source")
+		s.copyDestination = r.URL.Path
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = fmt.Fprint(w, `<CopyObjectResult><ETag>"copy"</ETag><LastModified>2026-07-27T00:00:00.000Z</LastModified></CopyObjectResult>`)
 	case r.Method == http.MethodPut && r.URL.Query().Get("partNumber") == "":
 		_, _ = io.Copy(io.Discard, r.Body)
 		s.mu.Lock()
@@ -402,6 +424,18 @@ func (s *fakeS3Server) putObjectCalled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.putObject
+}
+
+func (s *fakeS3Server) copiedSource() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.copySource
+}
+
+func (s *fakeS3Server) copiedDestination() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.copyDestination
 }
 
 func (s *fakeS3Server) createMultipartCalled() bool {

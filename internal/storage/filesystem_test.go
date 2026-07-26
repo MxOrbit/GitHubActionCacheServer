@@ -149,6 +149,51 @@ func TestFilesystemAdapterUploadReplacesExistingObject(t *testing.T) {
 	require.Equal(t, "new", string(body))
 }
 
+func TestFilesystemAdapterCopyObjectPreservesIndependentObjectSemantics(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, adapter.UploadStream(ctx, "folder/blocks/source", strings.NewReader("old")))
+	require.NoError(t, adapter.CopyObject(ctx, "folder/blocks/source", "folder/parts/0"))
+	require.Equal(t, "old", readFilesystemObject(t, ctx, adapter, "folder/blocks/source"))
+	require.Equal(t, "old", readFilesystemObject(t, ctx, adapter, "folder/parts/0"))
+
+	require.NoError(t, adapter.UploadStream(ctx, "folder/blocks/source", strings.NewReader("new")))
+	require.Equal(t, "old", readFilesystemObject(t, ctx, adapter, "folder/parts/0"))
+
+	require.NoError(t, adapter.CopyObject(ctx, "folder/blocks/source", "folder/parts/0"))
+	require.Equal(t, "new", readFilesystemObject(t, ctx, adapter, "folder/parts/0"))
+
+	require.NoError(t, adapter.DeleteFolder(ctx, "folder/blocks"))
+	require.Equal(t, "new", readFilesystemObject(t, ctx, adapter, "folder/parts/0"))
+}
+
+func TestFilesystemAdapterCopyObjectReturnsObjectNotFound(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	err = adapter.CopyObject(ctx, "folder/blocks/missing", "folder/parts/0")
+	require.ErrorIs(t, err, ErrObjectNotFound)
+
+	var notFound ObjectNotFoundError
+	require.True(t, errors.As(err, &notFound))
+	require.Equal(t, "folder/blocks/missing", notFound.ObjectName)
+}
+
+func readFilesystemObject(t *testing.T, ctx context.Context, adapter *FilesystemAdapter, objectName string) string {
+	t.Helper()
+
+	stream, err := adapter.CreateDownloadStream(ctx, objectName)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	return string(body)
+}
+
 type failingReader struct{}
 
 func (r failingReader) Read(p []byte) (int, error) {

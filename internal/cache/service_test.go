@@ -48,6 +48,43 @@ func TestUploadPartFailureDoesNotPoisonFinalize(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestCommitBlockListCopiesBlocksInDeclaredOrderAndCanRetry(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &copyTrackingStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "first", bytes.NewBufferString("hello ")))
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "second", bytes.NewBufferString("world")))
+
+	blockIDs := []string{"second", "first"}
+	require.NoError(t, service.CommitBlockList(ctx, upload.UploadID, blockIDs))
+	require.NoError(t, service.CommitBlockList(ctx, upload.UploadID, blockIDs))
+
+	currentUpload := client.Upload.GetX(ctx, upload.UploadID)
+	require.Equal(t, [][2]string{
+		{blockObjectName(currentUpload.FolderName, "second"), partObjectName(currentUpload.FolderName, 0)},
+		{blockObjectName(currentUpload.FolderName, "first"), partObjectName(currentUpload.FolderName, 1)},
+		{blockObjectName(currentUpload.FolderName, "second"), partObjectName(currentUpload.FolderName, 0)},
+		{blockObjectName(currentUpload.FolderName, "first"), partObjectName(currentUpload.FolderName, 1)},
+	}, adapter.copies)
+	require.Equal(t, "world", readStorageObject(t, ctx, filesystem, partObjectName(currentUpload.FolderName, 0)))
+	require.Equal(t, "hello ", readStorageObject(t, ctx, filesystem, partObjectName(currentUpload.FolderName, 1)))
+	require.Equal(t, "hello ", readStorageObject(t, ctx, filesystem, blockObjectName(currentUpload.FolderName, "first")))
+}
+
+func TestCommitBlockListReportsMissingBlock(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+
+	upload, err := service.CreateUpload(ctx, "key", "version", writableScope())
+	require.NoError(t, err)
+	err = service.CommitBlockList(ctx, upload.UploadID, []string{"missing"})
+	require.ErrorIs(t, err, ErrPartCountMismatch)
+}
+
 func TestMatchCacheEntryUsesOriginalOrder(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
@@ -348,6 +385,28 @@ func TestFinalizeCleanupFailureDoesNotFailCommittedUpload(t *testing.T) {
 
 var errInjectedUploadFailure = errors.New("injected upload failure")
 var errInjectedDeleteFailure = errors.New("injected delete failure")
+
+type copyTrackingStorage struct {
+	storage.Adapter
+	copies [][2]string
+}
+
+func (s *copyTrackingStorage) CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error {
+	s.copies = append(s.copies, [2]string{sourceObjectName, destinationObjectName})
+	return s.Adapter.CopyObject(ctx, sourceObjectName, destinationObjectName)
+}
+
+func readStorageObject(t *testing.T, ctx context.Context, adapter storage.Adapter, objectName string) string {
+	t.Helper()
+
+	stream, err := adapter.CreateDownloadStream(ctx, objectName)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	return string(body)
+}
 
 type failOnceStorage struct {
 	storage.Adapter

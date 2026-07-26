@@ -68,6 +68,80 @@ func (a *FilesystemAdapter) UploadStream(ctx context.Context, objectName string,
 	return nil
 }
 
+func (a *FilesystemAdapter) CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	sourcePath, err := a.safePath(sourceObjectName)
+	if err != nil {
+		return err
+	}
+	destinationPath, err := a.safePath(destinationObjectName)
+	if err != nil {
+		return err
+	}
+
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ObjectNotFoundError{ObjectName: sourceObjectName}
+		}
+		return fmt.Errorf("stat source object: %w", err)
+	}
+	if sourceInfo.IsDir() {
+		return fmt.Errorf("source object is a directory")
+	}
+	if sourcePath == destinationPath {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+		return fmt.Errorf("create object parent directory: %w", err)
+	}
+
+	tempFile, err := os.CreateTemp(filepath.Dir(destinationPath), filesystemUploadTempPrefix+"*")
+	if err != nil {
+		return fmt.Errorf("create temporary object path: %w", err)
+	}
+	tempPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close temporary object path: %w", err)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return fmt.Errorf("prepare temporary object path: %w", err)
+	}
+
+	if err := os.Link(sourcePath, tempPath); err == nil {
+		removeTemp := true
+		defer func() {
+			if removeTemp {
+				_ = os.Remove(tempPath)
+			}
+		}()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := commitFilesystemObject(tempPath, destinationPath); err != nil {
+			return err
+		}
+		removeTemp = false
+		return nil
+	}
+
+	stream, err := a.CreateDownloadStream(ctx, sourceObjectName)
+	if err != nil {
+		return err
+	}
+	copyErr := a.UploadStream(ctx, destinationObjectName, stream)
+	closeErr := stream.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader

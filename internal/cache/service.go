@@ -176,21 +176,16 @@ func (s *Service) CommitBlockList(ctx context.Context, uploadID int64, blockIDs 
 	}
 
 	for index, blockID := range blockIDs {
-		stream, err := s.storage.CreateDownloadStream(ctx, blockObjectName(currentUpload.FolderName, blockID))
+		err := s.storage.CopyObject(
+			ctx,
+			blockObjectName(currentUpload.FolderName, blockID),
+			partObjectName(currentUpload.FolderName, index),
+		)
 		if err != nil {
 			if errors.Is(err, storage.ErrObjectNotFound) {
 				return fmt.Errorf("%w: missing block %d", ErrPartCountMismatch, index)
 			}
 			return err
-		}
-
-		uploadErr := s.storage.UploadStream(ctx, partObjectName(currentUpload.FolderName, index), stream)
-		closeErr := stream.Close()
-		if uploadErr != nil {
-			return uploadErr
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 	}
 

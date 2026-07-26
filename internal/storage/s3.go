@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -94,6 +95,21 @@ func (a *S3Adapter) UploadStream(ctx context.Context, objectName string, stream 
 			return fmt.Errorf("upload s3 object: %w; %v", err, abortErr)
 		}
 		return fmt.Errorf("upload s3 object: %w", err)
+	}
+	return nil
+}
+
+func (a *S3Adapter) CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error {
+	_, err := a.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(a.bucket),
+		CopySource: aws.String(url.PathEscape(a.bucket + "/" + a.key(sourceObjectName))),
+		Key:        aws.String(a.key(destinationObjectName)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return ObjectNotFoundError{ObjectName: sourceObjectName}
+		}
+		return fmt.Errorf("copy s3 object: %w", err)
 	}
 	return nil
 }
