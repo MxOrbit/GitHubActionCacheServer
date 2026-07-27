@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -10,6 +12,7 @@ import (
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 	"github.com/gin-gonic/gin"
 )
 
@@ -233,10 +236,7 @@ func (h *Handler) deleteManagementStorageLocation(c *gin.Context, id string) err
 				Only(c.Request.Context())
 		},
 		func(location *ent.StorageLocation) error {
-			if err := h.db.StorageLocation.DeleteOneID(location.ID).Exec(c.Request.Context()); err != nil {
-				return err
-			}
-			return h.storage.DeleteFolder(c.Request.Context(), location.FolderName)
+			return h.scheduleManagementStorageLocationDeletion(c.Request.Context(), location.ID, false)
 		},
 		nil,
 	)
@@ -278,9 +278,45 @@ func (h *Handler) cleanupOrphanStorageLocations(c *gin.Context, locationIDs []st
 		return
 	}
 	for _, location := range locations {
-		_ = h.storage.DeleteFolder(c.Request.Context(), location.FolderName)
-		_ = h.db.StorageLocation.DeleteOneID(location.ID).Exec(c.Request.Context())
+		_ = h.scheduleManagementStorageLocationDeletion(c.Request.Context(), location.ID, true)
 	}
+}
+
+func (h *Handler) scheduleManagementStorageLocationDeletion(ctx context.Context, locationID string, requireOrphan bool) error {
+	tx, err := h.db.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("start storage location deletion transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	predicates := []entpredicate.StorageLocation{storagelocation.ID(locationID)}
+	if requireOrphan {
+		predicates = append(predicates, storagelocation.Not(storagelocation.HasCacheEntries()))
+	}
+	location, err := tx.StorageLocation.Query().Where(predicates...).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("query storage location for deletion: %w", err)
+	}
+
+	if _, err := storageoutbox.Enqueue(ctx, tx.Client(), location.FolderName); err != nil {
+		return err
+	}
+	if err := tx.StorageLocation.DeleteOneID(location.ID).Exec(ctx); err != nil {
+		return fmt.Errorf("delete storage location: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit storage location deletion: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func cacheEntryFilters(c *gin.Context) []entpredicate.CacheEntry {

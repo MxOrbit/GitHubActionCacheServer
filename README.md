@@ -146,9 +146,16 @@ fall back to server-proxied downloads.
 Cleanup intervals:
 
 - abandoned uploads: every 5 minutes
+- pending physical storage deletions: every 5 minutes
 - expired cache entries: every 24 hours
 - orphan storage locations: every 24 hours
 - superseded parts: every hour, once the merged representation is at least one hour old
+
+Physical folder deletion uses a transactional database outbox. A failed or
+interrupted filesystem/S3 deletion remains queued and is retried by the cleanup
+worker with exponential backoff from 5 minutes up to 24 hours. HTTP request
+paths only enqueue deletion work, and database transactions are never held open
+across storage I/O.
 
 ### Management API
 

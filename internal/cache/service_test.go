@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -171,6 +172,37 @@ func TestCompleteUploadRejectsBlocksWithoutCommittedBlockList(t *testing.T) {
 
 	_, err = service.CompleteUpload(ctx, "key", "version", scope)
 	require.ErrorIs(t, err, ErrNoPartsUploaded)
+	_, err = client.Upload.Get(ctx, upload.UploadID)
+	require.True(t, ent.IsNotFound(err))
+	require.Equal(t, "data", readStorageObject(t, ctx, filesystem, blockObjectName(strconv.FormatInt(upload.UploadID, 10), "block")))
+	task := client.StorageDeletion.Query().OnlyX(ctx)
+	require.Equal(t, strconv.FormatInt(upload.UploadID, 10), task.FolderName)
+	require.Zero(t, task.AttemptCount)
+	require.Nil(t, task.LastAttemptedAt)
+}
+
+func TestCompleteUploadQueuesDeletionWithoutStorageIO(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &failDeleteStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "block", bytes.NewBufferString("data")))
+
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.ErrorIs(t, err, ErrNoPartsUploaded)
+	_, err = client.Upload.Get(ctx, upload.UploadID)
+	require.True(t, ent.IsNotFound(err))
+	require.Equal(t, "data", readStorageObject(t, ctx, filesystem, blockObjectName(strconv.FormatInt(upload.UploadID, 10), "block")))
+	require.False(t, adapter.deleteCalled)
+
+	task := client.StorageDeletion.Query().OnlyX(ctx)
+	require.Equal(t, strconv.FormatInt(upload.UploadID, 10), task.FolderName)
+	require.Zero(t, task.AttemptCount)
+	require.Nil(t, task.LastAttemptedAt)
+	require.Nil(t, task.LastError)
 }
 
 func TestDownloadTrustsPartCountAndOpensEachPartOnlyWhenRead(t *testing.T) {
@@ -622,7 +654,7 @@ func TestWaitForMergesCancelsInFlightMergeAndClearsMergeStart(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
-func TestFinalizeCleanupFailureDoesNotFailCommittedUpload(t *testing.T) {
+func TestFinalizeQueuesCleanupWithoutStorageIO(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &failDeleteStorage{Adapter: filesystem}
 	service := NewService(Options{DB: client, Storage: adapter})
@@ -634,7 +666,11 @@ func TestFinalizeCleanupFailureDoesNotFailCommittedUpload(t *testing.T) {
 
 	_, err = service.CompleteUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
-	require.True(t, adapter.deleteCalled)
+	require.False(t, adapter.deleteCalled)
+	task := client.StorageDeletion.Query().OnlyX(ctx)
+	require.Equal(t, strconv.FormatInt(upload.UploadID, 10)+"/blocks", task.FolderName)
+	require.Zero(t, task.AttemptCount)
+	require.Nil(t, task.LastAttemptedAt)
 }
 
 var errInjectedUploadFailure = errors.New("injected upload failure")

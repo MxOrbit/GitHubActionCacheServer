@@ -40,7 +40,7 @@ func TestOpenAndMigrateSQLite(t *testing.T) {
 		require.NoError(t, sqlDB.Close())
 	})
 
-	for _, table := range []string{"cache_entries", "storage_locations", "uploads"} {
+	for _, table := range []string{"cache_entries", "storage_deletions", "storage_locations", "uploads"} {
 		t.Run(table, func(t *testing.T) {
 			var name string
 			err := sqlDB.QueryRowContext(
@@ -124,6 +124,12 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "materializationUnsupportedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "lastPartUploadedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "committedPartCount"))
+	var storageDeletionsTable string
+	require.NoError(t, sqlDB.QueryRowContext(
+		ctx,
+		`select name from sqlite_master where type = 'table' and name = 'storage_deletions'`,
+	).Scan(&storageDeletionsTable))
+	require.Equal(t, "storage_deletions", storageDeletionsTable)
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "updated_at"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "repo_id"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folder_name"))
@@ -134,10 +140,17 @@ func TestUploadIDDoesNotRequireDatabaseIdentity(t *testing.T) {
 	require.False(t, migrate.UploadsColumns[0].Increment)
 }
 
+func TestStorageDeletionIDUsesDatabaseIdentity(t *testing.T) {
+	require.True(t, migrate.StorageDeletionsColumns[0].Increment)
+}
+
 func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 	require.Equal(t, []string{
 		"id", "key", "version", "scope", "repoId", "updatedAt", "locationId",
 	}, columnNames(migrate.CacheEntriesColumns))
+	require.Equal(t, []string{
+		"id", "folderName", "createdAt", "attemptCount", "lastAttemptedAt", "lastError",
+	}, columnNames(migrate.StorageDeletionsColumns))
 	require.Equal(t, []string{
 		"id", "folderName", "partCount", "mergeStartedAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt",
 	}, columnNames(migrate.StorageLocationsColumns))

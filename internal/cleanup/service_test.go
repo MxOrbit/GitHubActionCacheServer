@@ -2,10 +2,14 @@ package cleanup
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +54,63 @@ func TestRunUploadsDeletesInactiveUploads(t *testing.T) {
 	count, err := filesystem.CountFilesInFolder(ctx, "old-upload/parts")
 	require.NoError(t, err)
 	require.Zero(t, count)
+}
+
+func TestRunStorageDeletionsRetriesFailedUploadCleanup(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	failingStorage := &failingDeleteStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: failingStorage, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
+	old := time.Now().Add(-2 * time.Minute).UnixMilli()
+
+	require.NoError(t, filesystem.UploadStream(ctx, "old-upload/parts/0", bytes.NewBufferString("old")))
+	client.Upload.Create().
+		SetID(1).
+		SetKey("old").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetCreatedAt(old).
+		SetFolderName("old-upload").
+		SaveX(ctx)
+
+	deleted, err := service.RunUploads(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.Zero(t, client.Upload.Query().CountX(ctx))
+	task := client.StorageDeletion.Query().OnlyX(ctx)
+	require.Equal(t, 1, task.AttemptCount)
+
+	service = NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
+	deleted, err = service.RunStorageDeletions(ctx)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.Equal(t, 1, client.StorageDeletion.Query().CountX(ctx))
+
+	client.StorageDeletion.UpdateOneID(task.ID).
+		SetLastAttemptedAt(time.Now().Add(-storageDeletionRetryDelay(task.AttemptCount) - time.Second).UnixMilli()).
+		ExecX(ctx)
+	deleted, err = service.RunStorageDeletions(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.Zero(t, client.StorageDeletion.Query().CountX(ctx))
+	count, err := filesystem.CountFilesInFolder(ctx, "old-upload/parts")
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func TestStorageDeletionRetryBackoff(t *testing.T) {
+	require.Equal(t, storageDeletionRetryBase, storageDeletionRetryDelay(0))
+	require.Equal(t, storageDeletionRetryBase, storageDeletionRetryDelay(1))
+	require.Equal(t, 2*storageDeletionRetryBase, storageDeletionRetryDelay(2))
+	require.Equal(t, 4*storageDeletionRetryBase, storageDeletionRetryDelay(3))
+	require.Equal(t, storageDeletionRetryMax, storageDeletionRetryDelay(100))
+
+	now := time.Now()
+	lastAttemptedAt := now.Add(-2 * storageDeletionRetryBase).UnixMilli()
+	task := &ent.StorageDeletion{AttemptCount: 3, LastAttemptedAt: &lastAttemptedAt}
+	require.False(t, storageDeletionReady(task, now))
+	lastAttemptedAt = now.Add(-4*storageDeletionRetryBase - time.Second).UnixMilli()
+	require.True(t, storageDeletionReady(task, now))
 }
 
 func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
@@ -151,4 +212,12 @@ func TestRunPartsKeepsRecentlySupersededParts(t *testing.T) {
 	count, err := filesystem.CountFilesInFolder(ctx, "recent/parts")
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
+}
+
+type failingDeleteStorage struct {
+	storage.Adapter
+}
+
+func (*failingDeleteStorage) DeleteFolder(context.Context, string) error {
+	return errors.New("injected delete failure")
 }

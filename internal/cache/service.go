@@ -22,6 +22,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 	"github.com/google/uuid"
 )
 
@@ -214,23 +215,23 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 	}
 
 	if currentUpload.FinishedPartUploadCount == 0 {
-		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
+		_ = s.deleteUpload(ctx, currentUpload)
 		return 0, ErrNoPartsUploaded
 	}
 
 	partCount, err := s.committedPartCount(ctx, currentUpload)
 	if err != nil {
 		if errors.Is(err, ErrPartCountMismatch) {
-			_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
+			_ = s.deleteUpload(ctx, currentUpload)
 		}
 		return 0, err
 	}
 	if partCount == 0 {
-		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
+		_ = s.deleteUpload(ctx, currentUpload)
 		return 0, ErrNoPartsUploaded
 	}
 	if partCount > currentUpload.FinishedPartUploadCount {
-		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
+		_ = s.deleteUpload(ctx, currentUpload)
 		return 0, fmt.Errorf(
 			"%w: committed part count %d exceeds finished upload count %d",
 			ErrPartCountMismatch,
@@ -239,14 +240,10 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 		)
 	}
 
-	location, oldFolderName, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
+	location, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
 	if err != nil {
 		return 0, err
 	}
-	if oldFolderName != "" {
-		s.deleteFolderBestEffort(ctx, oldFolderName)
-	}
-	s.deleteFolderBestEffort(ctx, blocksFolderName(currentUpload.FolderName))
 	if s.enableDirectDownloads {
 		s.tryStartMaterialization(location)
 	}
@@ -488,19 +485,34 @@ func (s *Service) isUploadAbandoned(currentUpload *ent.Upload) bool {
 }
 
 func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) error {
-	if err := s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return fmt.Errorf("delete abandoned upload: %w", err)
+	tx, err := s.db.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("start upload deletion transaction: %w", err)
 	}
-	if err := s.storage.DeleteFolder(ctx, currentUpload.FolderName); err != nil {
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := storageoutbox.Enqueue(ctx, tx.Client(), currentUpload.FolderName); err != nil {
 		return err
 	}
+	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
+		return fmt.Errorf("delete upload: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit upload deletion: %w", err)
+	}
+	committed = true
 	return nil
 }
 
-func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (*ent.StorageLocation, string, error) {
+func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (*ent.StorageLocation, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("start transaction: %w", err)
+		return nil, fmt.Errorf("start transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -516,7 +528,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		SetPartCount(partCount).
 		Save(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("create storage location: %w", err)
+		return nil, fmt.Errorf("create storage location: %w", err)
 	}
 
 	existingCacheEntry, err := tx.CacheEntry.Query().
@@ -529,23 +541,24 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		WithLocation().
 		Only(ctx)
 	if err != nil && !ent.IsNotFound(err) {
-		return nil, "", fmt.Errorf("query existing cache entry: %w", err)
+		return nil, fmt.Errorf("query existing cache entry: %w", err)
 	}
 
-	oldFolderName := ""
 	if existingCacheEntry != nil {
 		if existingCacheEntry.Edges.Location != nil {
-			oldFolderName = existingCacheEntry.Edges.Location.FolderName
+			if _, err := storageoutbox.Enqueue(ctx, tx.Client(), existingCacheEntry.Edges.Location.FolderName); err != nil {
+				return nil, err
+			}
 		}
 		if _, err := tx.CacheEntry.UpdateOneID(existingCacheEntry.ID).
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
 			Save(ctx); err != nil {
-			return nil, "", fmt.Errorf("update cache entry: %w", err)
+			return nil, fmt.Errorf("update cache entry: %w", err)
 		}
 		if existingCacheEntry.LocationId != "" {
 			if err := tx.StorageLocation.DeleteOneID(existingCacheEntry.LocationId).Exec(ctx); err != nil {
-				return nil, "", fmt.Errorf("delete old storage location: %w", err)
+				return nil, fmt.Errorf("delete old storage location: %w", err)
 			}
 		}
 	} else {
@@ -558,18 +571,22 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
 			Save(ctx); err != nil {
-			return nil, "", fmt.Errorf("create cache entry: %w", err)
+			return nil, fmt.Errorf("create cache entry: %w", err)
 		}
 	}
 
+	if _, err := storageoutbox.Enqueue(ctx, tx.Client(), blocksFolderName(currentUpload.FolderName)); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return nil, "", fmt.Errorf("delete upload: %w", err)
+		return nil, fmt.Errorf("delete upload: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, "", fmt.Errorf("commit upload: %w", err)
+		return nil, fmt.Errorf("commit upload: %w", err)
 	}
 	committed = true
-	return location, oldFolderName, nil
+	return location, nil
 }
 
 type cacheEntryMatch struct {
@@ -803,10 +820,6 @@ func (s *Service) markMergeFinished(ctx context.Context, locationID string, merg
 		return errMergeAlreadyStarted
 	}
 	return nil
-}
-
-func (s *Service) deleteFolderBestEffort(ctx context.Context, folderName string) {
-	_ = s.storage.DeleteFolder(ctx, folderName)
 }
 
 func (s *Service) clearOwnMergeStart(ctx context.Context, locationID string, mergeStartedAt int64) error {
