@@ -2,8 +2,7 @@
 
 [![License](https://img.shields.io/github/license/MxOrbit/GitHubActionCacheServer)](https://github.com/MxOrbit/GitHubActionCacheServer/blob/main/LICENSE)
 [![Release](https://img.shields.io/github/v/release/MxOrbit/GitHubActionCacheServer?color=blueviolet&include_prereleases)](https://github.com/MxOrbit/GitHubActionCacheServer/releases)
-[![GoReport](https://goreportcard.com/badge/github.com/MxOrbit/GitHubActionCacheServer)](https://goreportcard.com/report/github.com/MxOrbit/GitHubActionCacheServer)
-[![Dockerhub](https://img.shields.io/docker/pulls/mmx233/action-cache-server)](https://hub.docker.com/repository/docker/mmx233/action-cache-server)
+[![Dockerhub](https://img.shields.io/docker/pulls/mmx233/action-cache-server)](https://hub.docker.com/r/mmx233/action-cache-server)
 
 A Go implementation of the GitHub Actions cache service protocol for self-hosted
 runners. It implements the cache v2 API surface used by `actions/cache`, stores
