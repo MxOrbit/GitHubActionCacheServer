@@ -149,12 +149,13 @@ func (s *Service) CreateUpload(ctx context.Context, key, version string, scope a
 	return &CreateUploadResult{UploadID: uploadID}, nil
 }
 
-func (s *Service) UploadPart(ctx context.Context, uploadID int64, partIndex int, stream io.Reader) error {
+func (s *Service) UploadPart(ctx context.Context, uploadID int64, stream io.Reader) error {
 	currentUpload, err := s.uploadByID(ctx, uploadID)
 	if err != nil {
 		return err
 	}
-	return s.uploadObjectWithCounters(ctx, currentUpload, partObjectName(currentUpload.FolderName, partIndex), stream)
+	committedPartCount := 1
+	return s.uploadObjectWithCounters(ctx, currentUpload, partObjectName(currentUpload.FolderName, 0), stream, &committedPartCount)
 }
 
 func (s *Service) UploadBlock(ctx context.Context, uploadID int64, blockID string, stream io.Reader) error {
@@ -162,7 +163,7 @@ func (s *Service) UploadBlock(ctx context.Context, uploadID int64, blockID strin
 	if err != nil {
 		return err
 	}
-	return s.uploadObjectWithCounters(ctx, currentUpload, blockObjectName(currentUpload.FolderName, blockID), stream)
+	return s.uploadObjectWithCounters(ctx, currentUpload, blockObjectName(currentUpload.FolderName, blockID), stream, nil)
 }
 
 func (s *Service) CommitBlockList(ctx context.Context, uploadID int64, blockIDs []string) error {
@@ -188,6 +189,11 @@ func (s *Service) CommitBlockList(ctx context.Context, uploadID int64, blockIDs 
 			return err
 		}
 	}
+	if err := s.db.Upload.UpdateOneID(currentUpload.ID).
+		SetCommittedPartCount(len(blockIDs)).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("record committed block list: %w", err)
+	}
 
 	return nil
 }
@@ -212,17 +218,25 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 		return 0, fmt.Errorf("%w: only %d of %d parts uploaded", ErrPartsStillUploading, currentUpload.FinishedPartUploadCount, currentUpload.StartedPartUploadCount)
 	}
 
-	partCount, err := s.storage.CountFilesInFolder(ctx, partsFolderName(currentUpload.FolderName))
+	partCount, err := s.committedPartCount(ctx, currentUpload)
 	if err != nil {
+		if errors.Is(err, ErrPartCountMismatch) {
+			_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
+		}
 		return 0, err
 	}
 	if partCount == 0 {
 		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
 		return 0, ErrNoPartsUploaded
 	}
-	if err := s.ensureCommittedPartsAreContiguous(ctx, currentUpload.FolderName, partCount); err != nil {
+	if partCount > currentUpload.FinishedPartUploadCount {
 		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
-		return 0, err
+		return 0, fmt.Errorf(
+			"%w: committed part count %d exceeds finished upload count %d",
+			ErrPartCountMismatch,
+			partCount,
+			currentUpload.FinishedPartUploadCount,
+		)
 	}
 
 	oldFolderName, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
@@ -323,9 +337,6 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadClo
 	if location.MergeStartedAt != nil {
 		return s.openCurrentLocation(ctx, location.ID)
 	}
-	if err := s.ensurePartsExist(ctx, location); err != nil {
-		return nil, err
-	}
 	stream, err := s.startMergeDownload(ctx, location)
 	if err != nil {
 		if errors.Is(err, errMergeAlreadyStarted) {
@@ -371,6 +382,7 @@ func (s *Service) createUploadRecord(ctx context.Context, key, version, scope, r
 		_, err = s.db.Upload.Create().
 			SetID(id).
 			SetFolderName(strconv.FormatInt(id, 10)).
+			SetCommittedPartCount(0).
 			SetCreatedAt(time.Now().UnixMilli()).
 			SetKey(key).
 			SetVersion(version).
@@ -419,7 +431,7 @@ func (s *Service) uploadByTuple(ctx context.Context, key, version, scope, repoID
 	return currentUpload, nil
 }
 
-func (s *Service) uploadObjectWithCounters(ctx context.Context, currentUpload *ent.Upload, objectName string, stream io.Reader) error {
+func (s *Service) uploadObjectWithCounters(ctx context.Context, currentUpload *ent.Upload, objectName string, stream io.Reader, committedPartCount *int) error {
 	if err := s.db.Upload.UpdateOneID(currentUpload.ID).AddStartedPartUploadCount(1).Exec(ctx); err != nil {
 		return fmt.Errorf("mark upload started: %w", err)
 	}
@@ -429,10 +441,13 @@ func (s *Service) uploadObjectWithCounters(ctx context.Context, currentUpload *e
 		return err
 	}
 
-	if err := s.db.Upload.UpdateOneID(currentUpload.ID).
+	update := s.db.Upload.UpdateOneID(currentUpload.ID).
 		SetLastPartUploadedAt(time.Now().UnixMilli()).
-		AddFinishedPartUploadCount(1).
-		Exec(ctx); err != nil {
+		AddFinishedPartUploadCount(1)
+	if committedPartCount != nil {
+		update.SetCommittedPartCount(*committedPartCount)
+	}
+	if err := update.Exec(ctx); err != nil {
 		return fmt.Errorf("mark upload finished: %w", err)
 	}
 
@@ -612,9 +627,6 @@ func (s *Service) openMerged(ctx context.Context, location *ent.StorageLocation)
 }
 
 func (s *Service) openParts(ctx context.Context, location *ent.StorageLocation) (io.ReadCloser, error) {
-	if err := s.ensurePartsExist(ctx, location); err != nil {
-		return nil, err
-	}
 	return newPartsReadCloser(ctx, s.storage, location.FolderName, location.PartCount), nil
 }
 
@@ -632,21 +644,19 @@ func (s *Service) openCurrentLocation(ctx context.Context, locationID string) (i
 	return s.openParts(ctx, location)
 }
 
-func (s *Service) ensurePartsExist(ctx context.Context, location *ent.StorageLocation) error {
-	count, err := s.storage.CountFilesInFolder(ctx, partsFolderName(location.FolderName))
+func (s *Service) committedPartCount(ctx context.Context, currentUpload *ent.Upload) (int, error) {
+	if currentUpload.CommittedPartCount != nil {
+		return *currentUpload.CommittedPartCount, nil
+	}
+
+	count, err := s.storage.CountFilesInFolder(ctx, partsFolderName(currentUpload.FolderName))
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if count < location.PartCount {
-		return ErrCacheNotFound
+	if err := s.ensureCommittedPartsAreContiguous(ctx, currentUpload.FolderName, count); err != nil {
+		return 0, err
 	}
-	if err := s.ensureCommittedPartsAreContiguous(ctx, location.FolderName, location.PartCount); err != nil {
-		if errors.Is(err, ErrPartCountMismatch) {
-			return ErrCacheNotFound
-		}
-		return err
-	}
-	return nil
+	return count, nil
 }
 
 func (s *Service) ensureCommittedPartsAreContiguous(ctx context.Context, folderName string, partCount int) error {

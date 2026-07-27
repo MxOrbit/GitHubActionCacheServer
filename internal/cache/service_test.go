@@ -40,10 +40,10 @@ func TestUploadPartFailureDoesNotPoisonFinalize(t *testing.T) {
 	upload, err := service.CreateUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
 
-	err = service.UploadPart(ctx, upload.UploadID, 0, bytes.NewBufferString("failed"))
+	err = service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("failed"))
 	require.ErrorIs(t, err, errInjectedUploadFailure)
 
-	require.NoError(t, service.UploadPart(ctx, upload.UploadID, 0, bytes.NewBufferString("ok")))
+	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("ok")))
 	_, err = service.CompleteUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
 }
@@ -64,6 +64,8 @@ func TestCommitBlockListCopiesBlocksInDeclaredOrderAndCanRetry(t *testing.T) {
 	require.NoError(t, service.CommitBlockList(ctx, upload.UploadID, blockIDs))
 
 	currentUpload := client.Upload.GetX(ctx, upload.UploadID)
+	require.NotNil(t, currentUpload.CommittedPartCount)
+	require.Equal(t, len(blockIDs), *currentUpload.CommittedPartCount)
 	require.Equal(t, [][2]string{
 		{blockObjectName(currentUpload.FolderName, "second"), partObjectName(currentUpload.FolderName, 0)},
 		{blockObjectName(currentUpload.FolderName, "first"), partObjectName(currentUpload.FolderName, 1)},
@@ -83,6 +85,111 @@ func TestCommitBlockListReportsMissingBlock(t *testing.T) {
 	require.NoError(t, err)
 	err = service.CommitBlockList(ctx, upload.UploadID, []string{"missing"})
 	require.ErrorIs(t, err, ErrPartCountMismatch)
+}
+
+func TestCompleteUploadTrustsPersistedPartCount(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("data")))
+	currentUpload := client.Upload.GetX(ctx, upload.UploadID)
+	require.NotNil(t, currentUpload.CommittedPartCount)
+	require.Equal(t, 1, *currentUpload.CommittedPartCount)
+	require.Equal(t, 1, currentUpload.FinishedPartUploadCount)
+	adapter.reset()
+
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.Zero(t, adapter.countCalls)
+	require.Zero(t, adapter.downloadCalls)
+}
+
+func TestCompleteUploadValidatesLegacyUploadWithoutPartCountMetadata(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+
+	client.Upload.Create().
+		SetID(42).
+		SetKey("legacy-key").
+		SetVersion("version").
+		SetScope(scope.Scopes[0].Scope).
+		SetRepoId(scope.RepoID).
+		SetCreatedAt(time.Now().UnixMilli()).
+		SetStartedPartUploadCount(1).
+		SetFinishedPartUploadCount(1).
+		SetFolderName("legacy-upload").
+		SaveX(ctx)
+	require.NoError(t, filesystem.UploadStream(ctx, "legacy-upload/parts/0", bytes.NewBufferString("data")))
+
+	_, err := service.CompleteUpload(ctx, "legacy-key", "version", scope)
+	require.NoError(t, err)
+	require.Equal(t, 1, adapter.countCalls)
+	require.Equal(t, 1, adapter.downloadCalls)
+}
+
+func TestCompleteUploadKeepsLegacyUploadAfterTransientStorageError(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem, countErr: errInjectedStorageFailure}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+
+	client.Upload.Create().
+		SetID(42).
+		SetKey("legacy-key").
+		SetVersion("version").
+		SetScope(scope.Scopes[0].Scope).
+		SetRepoId(scope.RepoID).
+		SetCreatedAt(time.Now().UnixMilli()).
+		SetStartedPartUploadCount(1).
+		SetFinishedPartUploadCount(1).
+		SetFolderName("legacy-upload").
+		SaveX(ctx)
+
+	_, err := service.CompleteUpload(ctx, "legacy-key", "version", scope)
+	require.ErrorIs(t, err, errInjectedStorageFailure)
+	_, err = client.Upload.Get(ctx, 42)
+	require.NoError(t, err)
+}
+
+func TestCompleteUploadRejectsBlocksWithoutCommittedBlockList(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "block", bytes.NewBufferString("data")))
+
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.ErrorIs(t, err, ErrNoPartsUploaded)
+}
+
+func TestDownloadTrustsPartCountAndOpensEachPartOnlyWhenRead(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	service.StopAcceptingMerges()
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("hello ")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("world")))
+	createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	require.Zero(t, adapter.countCalls)
+	require.Zero(t, adapter.downloadCalls)
+
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "hello world", string(body))
+	require.Zero(t, adapter.countCalls)
+	require.Equal(t, 2, adapter.downloadCalls)
 }
 
 func TestMatchCacheEntryUsesOriginalOrder(t *testing.T) {
@@ -376,7 +483,7 @@ func TestFinalizeCleanupFailureDoesNotFailCommittedUpload(t *testing.T) {
 
 	upload, err := service.CreateUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
-	require.NoError(t, service.UploadPart(ctx, upload.UploadID, 0, bytes.NewBufferString("data")))
+	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("data")))
 
 	_, err = service.CompleteUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
@@ -385,10 +492,36 @@ func TestFinalizeCleanupFailureDoesNotFailCommittedUpload(t *testing.T) {
 
 var errInjectedUploadFailure = errors.New("injected upload failure")
 var errInjectedDeleteFailure = errors.New("injected delete failure")
+var errInjectedStorageFailure = errors.New("injected storage failure")
 
 type copyTrackingStorage struct {
 	storage.Adapter
 	copies [][2]string
+}
+
+type storageCallTrackingAdapter struct {
+	storage.Adapter
+	countCalls    int
+	downloadCalls int
+	countErr      error
+}
+
+func (s *storageCallTrackingAdapter) CountFilesInFolder(ctx context.Context, folderName string) (int, error) {
+	s.countCalls++
+	if s.countErr != nil {
+		return 0, s.countErr
+	}
+	return s.Adapter.CountFilesInFolder(ctx, folderName)
+}
+
+func (s *storageCallTrackingAdapter) CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error) {
+	s.downloadCalls++
+	return s.Adapter.CreateDownloadStream(ctx, objectName)
+}
+
+func (s *storageCallTrackingAdapter) reset() {
+	s.countCalls = 0
+	s.downloadCalls = 0
 }
 
 func (s *copyTrackingStorage) CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error {

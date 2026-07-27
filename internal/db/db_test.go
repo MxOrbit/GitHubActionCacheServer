@@ -122,6 +122,7 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "repoId"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folderName"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "lastPartUploadedAt"))
+	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "committedPartCount"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "updated_at"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "repo_id"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folder_name"))
@@ -140,7 +141,7 @@ func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 		"id", "folderName", "partCount", "mergeStartedAt", "mergedAt", "partsDeletedAt", "lastDownloadedAt",
 	}, columnNames(migrate.StorageLocationsColumns))
 	require.Equal(t, []string{
-		"id", "key", "version", "scope", "repoId", "createdAt", "lastPartUploadedAt", "startedPartUploadCount", "finishedPartUploadCount", "folderName",
+		"id", "key", "version", "scope", "repoId", "createdAt", "lastPartUploadedAt", "startedPartUploadCount", "finishedPartUploadCount", "folderName", "committedPartCount",
 	}, columnNames(migrate.UploadsColumns))
 }
 

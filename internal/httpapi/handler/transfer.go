@@ -61,7 +61,7 @@ func (h *Handler) UploadPart(c *gin.Context) {
 			return
 		}
 	} else {
-		if err := h.cache.UploadPart(c.Request.Context(), uploadID, 0, c.Request.Body); err != nil {
+		if err := h.cache.UploadPart(c.Request.Context(), uploadID, c.Request.Body); err != nil {
 			writeCacheError(c, err)
 			return
 		}

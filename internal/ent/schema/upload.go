@@ -40,6 +40,11 @@ func (Upload) Fields() []ent.Field {
 			NotEmpty().
 			StorageKey("folderName").
 			SchemaType(originalTextColumnType),
+		field.Int("committedPartCount").
+			Optional().
+			Nillable().
+			NonNegative().
+			StorageKey("committedPartCount"),
 	}
 }
 
