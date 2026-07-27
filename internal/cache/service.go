@@ -27,6 +27,7 @@ import (
 
 const (
 	directDownloadTTL              = 10 * time.Minute
+	lastDownloadedAtUpdateInterval = 10 * time.Minute
 	abandonedUploadLifetime        = 24 * time.Hour
 	mergeCleanupTimeout            = 10 * time.Second
 	stalledMaterializationLifetime = 15 * time.Minute
@@ -37,7 +38,6 @@ var (
 	ErrUploadAlreadyExists = errors.New("upload already exists")
 	ErrUploadNotFound      = errors.New("upload not found")
 	ErrNoPartsUploaded     = errors.New("no parts have been uploaded")
-	ErrPartsStillUploading = errors.New("not all parts have been uploaded")
 	ErrPartCountMismatch   = errors.New("uploaded part count does not match actual part count in storage")
 	ErrCacheNotFound       = errors.New("cache not found")
 	errMergeAlreadyStarted = errors.New("merge already started")
@@ -159,7 +159,7 @@ func (s *Service) UploadPart(ctx context.Context, uploadID int64, stream io.Read
 		return err
 	}
 	committedPartCount := 1
-	return s.uploadObjectWithCounters(ctx, currentUpload, partObjectName(currentUpload.FolderName, 0), stream, &committedPartCount)
+	return s.uploadObject(ctx, currentUpload, partObjectName(currentUpload.FolderName, 0), stream, &committedPartCount)
 }
 
 func (s *Service) UploadBlock(ctx context.Context, uploadID int64, blockID string, stream io.Reader) error {
@@ -167,7 +167,7 @@ func (s *Service) UploadBlock(ctx context.Context, uploadID int64, blockID strin
 	if err != nil {
 		return err
 	}
-	return s.uploadObjectWithCounters(ctx, currentUpload, blockObjectName(currentUpload.FolderName, blockID), stream, nil)
+	return s.uploadObject(ctx, currentUpload, blockObjectName(currentUpload.FolderName, blockID), stream, nil)
 }
 
 func (s *Service) CommitBlockList(ctx context.Context, uploadID int64, blockIDs []string) error {
@@ -216,10 +216,6 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 	if currentUpload.FinishedPartUploadCount == 0 {
 		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
 		return 0, ErrNoPartsUploaded
-	}
-	if currentUpload.StartedPartUploadCount != currentUpload.FinishedPartUploadCount {
-		_ = s.db.Upload.DeleteOneID(currentUpload.ID).Exec(ctx)
-		return 0, fmt.Errorf("%w: only %d of %d parts uploaded", ErrPartsStillUploading, currentUpload.FinishedPartUploadCount, currentUpload.StartedPartUploadCount)
 	}
 
 	partCount, err := s.committedPartCount(ctx, currentUpload)
@@ -294,6 +290,7 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 				if err != nil {
 					return nil, err
 				}
+				s.touchStorageLocationIfStale(ctx, location)
 				downloadURL = url
 			}
 		}
@@ -343,9 +340,7 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadClo
 		return nil, ErrCacheNotFound
 	}
 
-	_ = s.db.StorageLocation.UpdateOneID(location.ID).
-		SetLastDownloadedAt(time.Now().UnixMilli()).
-		Exec(ctx)
+	s.touchStorageLocationIfStale(ctx, location)
 
 	if location.MergedAt != nil {
 		return s.openMerged(ctx, location)
@@ -438,13 +433,8 @@ func (s *Service) uploadByTuple(ctx context.Context, key, version, scope, repoID
 	return currentUpload, nil
 }
 
-func (s *Service) uploadObjectWithCounters(ctx context.Context, currentUpload *ent.Upload, objectName string, stream io.Reader, committedPartCount *int) error {
-	if err := s.db.Upload.UpdateOneID(currentUpload.ID).AddStartedPartUploadCount(1).Exec(ctx); err != nil {
-		return fmt.Errorf("mark upload started: %w", err)
-	}
-
+func (s *Service) uploadObject(ctx context.Context, currentUpload *ent.Upload, objectName string, stream io.Reader, committedPartCount *int) error {
 	if err := s.storage.UploadStream(ctx, objectName, stream); err != nil {
-		_ = s.rollbackStartedPartUpload(ctx, currentUpload.ID)
 		return err
 	}
 
@@ -461,6 +451,25 @@ func (s *Service) uploadObjectWithCounters(ctx context.Context, currentUpload *e
 	return nil
 }
 
+func (s *Service) touchStorageLocationIfStale(ctx context.Context, location *ent.StorageLocation) {
+	now := time.Now()
+	staleBefore := now.Add(-lastDownloadedAtUpdateInterval).UnixMilli()
+	if location.LastDownloadedAt != nil && *location.LastDownloadedAt >= staleBefore {
+		return
+	}
+
+	_, _ = s.db.StorageLocation.Update().
+		Where(
+			storagelocation.ID(location.ID),
+			storagelocation.Or(
+				storagelocation.LastDownloadedAtIsNil(),
+				storagelocation.LastDownloadedAtLT(staleBefore),
+			),
+		).
+		SetLastDownloadedAt(now.UnixMilli()).
+		Save(ctx)
+}
+
 func uploadTuple(key, version, scope, repoID string) []entpredicate.Upload {
 	return []entpredicate.Upload{
 		upload.Key(key),
@@ -468,13 +477,6 @@ func uploadTuple(key, version, scope, repoID string) []entpredicate.Upload {
 		upload.Scope(scope),
 		upload.RepoId(repoID),
 	}
-}
-
-func (s *Service) rollbackStartedPartUpload(ctx context.Context, uploadID int64) error {
-	if err := s.db.Upload.UpdateOneID(uploadID).AddStartedPartUploadCount(-1).Exec(ctx); err != nil {
-		return fmt.Errorf("roll back started part upload: %w", err)
-	}
-	return nil
 }
 
 func (s *Service) isUploadAbandoned(currentUpload *ent.Upload) bool {

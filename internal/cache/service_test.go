@@ -39,8 +39,14 @@ func TestUploadPartFailureDoesNotPoisonFinalize(t *testing.T) {
 
 	err = service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("failed"))
 	require.ErrorIs(t, err, errInjectedUploadFailure)
+	currentUpload := client.Upload.GetX(ctx, upload.UploadID)
+	require.Zero(t, currentUpload.StartedPartUploadCount)
+	require.Zero(t, currentUpload.FinishedPartUploadCount)
 
 	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("ok")))
+	currentUpload = client.Upload.GetX(ctx, upload.UploadID)
+	require.Zero(t, currentUpload.StartedPartUploadCount)
+	require.Equal(t, 1, currentUpload.FinishedPartUploadCount)
 	_, err = service.CompleteUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
 }
@@ -278,6 +284,51 @@ func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, "direct://entry-id-folder/parts/0", result.DownloadURL)
 	require.Equal(t, "entry-id-folder/parts/0", adapter.objectName)
+	location := client.StorageLocation.GetX(ctx, result.CacheEntry.LocationId)
+	require.NotNil(t, location.LastDownloadedAt)
+}
+
+func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+
+	recentLocation := createCacheEntryForDownload(ctx, client, "recent-entry", "recent-folder")
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(recentLocation.FolderName, 0), bytes.NewBufferString("recent")))
+	recent := time.Now().Add(-lastDownloadedAtUpdateInterval / 2).UnixMilli()
+	client.StorageLocation.UpdateOneID(recentLocation.ID).SetLastDownloadedAt(recent).ExecX(ctx)
+
+	recentStream, err := service.Download(ctx, "recent-entry")
+	require.NoError(t, err)
+	require.NoError(t, recentStream.Close())
+	require.Equal(t, recent, *client.StorageLocation.GetX(ctx, recentLocation.ID).LastDownloadedAt)
+
+	staleLocation := createCacheEntryForDownload(ctx, client, "stale-entry", "stale-folder")
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(staleLocation.FolderName, 0), bytes.NewBufferString("stale")))
+	stale := time.Now().Add(-lastDownloadedAtUpdateInterval - time.Minute).UnixMilli()
+	client.StorageLocation.UpdateOneID(staleLocation.ID).SetLastDownloadedAt(stale).ExecX(ctx)
+	touchedAfter := time.Now().UnixMilli()
+
+	staleStream, err := service.Download(ctx, "stale-entry")
+	require.NoError(t, err)
+	require.NoError(t, staleStream.Close())
+	refreshed := client.StorageLocation.GetX(ctx, staleLocation.ID).LastDownloadedAt
+	require.NotNil(t, refreshed)
+	require.GreaterOrEqual(t, *refreshed, touchedAfter)
+}
+
+func TestTouchStorageLocationDoesNotOverwriteNewerConcurrentTimestamp(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	stale := time.Now().Add(-lastDownloadedAtUpdateInterval - time.Minute).UnixMilli()
+	client.StorageLocation.UpdateOneID(location.ID).SetLastDownloadedAt(stale).ExecX(ctx)
+	staleSnapshot := client.StorageLocation.GetX(ctx, location.ID)
+
+	newer := time.Now().UnixMilli()
+	client.StorageLocation.UpdateOneID(location.ID).SetLastDownloadedAt(newer).ExecX(ctx)
+	service.touchStorageLocationIfStale(ctx, staleSnapshot)
+
+	require.Equal(t, newer, *client.StorageLocation.GetX(ctx, location.ID).LastDownloadedAt)
 }
 
 func TestLegacyMaterializedSinglePartUsesMergedObjectForDirectDownload(t *testing.T) {
