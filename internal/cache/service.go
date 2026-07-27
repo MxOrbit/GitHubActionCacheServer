@@ -26,9 +26,10 @@ import (
 )
 
 const (
-	directDownloadTTL       = 10 * time.Minute
-	abandonedUploadLifetime = 24 * time.Hour
-	mergeCleanupTimeout     = 10 * time.Second
+	directDownloadTTL              = 10 * time.Minute
+	abandonedUploadLifetime        = 24 * time.Hour
+	mergeCleanupTimeout            = 10 * time.Second
+	stalledMaterializationLifetime = 15 * time.Minute
 )
 
 var (
@@ -45,6 +46,7 @@ var (
 type Service struct {
 	db                    *ent.Client
 	storage               storage.Adapter
+	composer              storage.ComposeAdapter
 	enableDirectDownloads bool
 	mergeCtx              context.Context
 	mergeCancel           context.CancelFunc
@@ -79,10 +81,12 @@ func NewService(options Options) *Service {
 		mergeConcurrency = 1
 	}
 	mergeCtx, mergeCancel := context.WithCancel(context.Background())
+	composer, _ := options.Storage.(storage.ComposeAdapter)
 
 	return &Service{
 		db:                    options.DB,
 		storage:               options.Storage,
+		composer:              composer,
 		enableDirectDownloads: options.EnableDirectDownloads,
 		mergeCtx:              mergeCtx,
 		mergeCancel:           mergeCancel,
@@ -239,7 +243,7 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 		)
 	}
 
-	oldFolderName, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
+	location, oldFolderName, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
 	if err != nil {
 		return 0, err
 	}
@@ -247,6 +251,9 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 		s.deleteFolderBestEffort(ctx, oldFolderName)
 	}
 	s.deleteFolderBestEffort(ctx, blocksFolderName(currentUpload.FolderName))
+	if s.enableDirectDownloads {
+		s.tryStartMaterialization(location)
+	}
 
 	return currentUpload.ID, nil
 }
@@ -273,8 +280,17 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 			if err != nil {
 				return nil, fmt.Errorf("query storage location: %w", err)
 			}
-			if location.MergedAt != nil {
-				url, err := direct.CreateDownloadURL(ctx, mergedObjectName(location.FolderName), directDownloadTTL)
+			directObjectName := ""
+			switch {
+			case location.MergedAt != nil:
+				directObjectName = mergedObjectName(location.FolderName)
+			case location.PartCount == 1:
+				directObjectName = partObjectName(location.FolderName, 0)
+			default:
+				s.tryStartMaterialization(location)
+			}
+			if directObjectName != "" {
+				url, err := direct.CreateDownloadURL(ctx, directObjectName, directDownloadTTL)
 				if err != nil {
 					return nil, err
 				}
@@ -334,17 +350,8 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadClo
 	if location.MergedAt != nil {
 		return s.openMerged(ctx, location)
 	}
-	if location.MergeStartedAt != nil {
-		return s.openCurrentLocation(ctx, location.ID)
-	}
-	stream, err := s.startMergeDownload(ctx, location)
-	if err != nil {
-		if errors.Is(err, errMergeAlreadyStarted) {
-			return s.openCurrentLocation(ctx, location.ID)
-		}
-		return nil, err
-	}
-	return stream, nil
+	s.tryStartMaterialization(location)
+	return s.openParts(ctx, location)
 }
 
 func WriteScope(scope auth.CacheScope) (string, bool) {
@@ -488,10 +495,10 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 	return nil
 }
 
-func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (string, error) {
+func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (*ent.StorageLocation, string, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
-		return "", fmt.Errorf("start transaction: %w", err)
+		return nil, "", fmt.Errorf("start transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -507,7 +514,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		SetPartCount(partCount).
 		Save(ctx)
 	if err != nil {
-		return "", fmt.Errorf("create storage location: %w", err)
+		return nil, "", fmt.Errorf("create storage location: %w", err)
 	}
 
 	existingCacheEntry, err := tx.CacheEntry.Query().
@@ -520,7 +527,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		WithLocation().
 		Only(ctx)
 	if err != nil && !ent.IsNotFound(err) {
-		return "", fmt.Errorf("query existing cache entry: %w", err)
+		return nil, "", fmt.Errorf("query existing cache entry: %w", err)
 	}
 
 	oldFolderName := ""
@@ -532,11 +539,11 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
 			Save(ctx); err != nil {
-			return "", fmt.Errorf("update cache entry: %w", err)
+			return nil, "", fmt.Errorf("update cache entry: %w", err)
 		}
 		if existingCacheEntry.LocationId != "" {
 			if err := tx.StorageLocation.DeleteOneID(existingCacheEntry.LocationId).Exec(ctx); err != nil {
-				return "", fmt.Errorf("delete old storage location: %w", err)
+				return nil, "", fmt.Errorf("delete old storage location: %w", err)
 			}
 		}
 	} else {
@@ -549,18 +556,18 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
 			Save(ctx); err != nil {
-			return "", fmt.Errorf("create cache entry: %w", err)
+			return nil, "", fmt.Errorf("create cache entry: %w", err)
 		}
 	}
 
 	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return "", fmt.Errorf("delete upload: %w", err)
+		return nil, "", fmt.Errorf("delete upload: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit upload: %w", err)
+		return nil, "", fmt.Errorf("commit upload: %w", err)
 	}
 	committed = true
-	return oldFolderName, nil
+	return location, oldFolderName, nil
 }
 
 type cacheEntryMatch struct {
@@ -630,20 +637,6 @@ func (s *Service) openParts(ctx context.Context, location *ent.StorageLocation) 
 	return newPartsReadCloser(ctx, s.storage, location.FolderName, location.PartCount), nil
 }
 
-func (s *Service) openCurrentLocation(ctx context.Context, locationID string) (io.ReadCloser, error) {
-	location, err := s.db.StorageLocation.Query().Where(storagelocation.ID(locationID)).Only(ctx)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return nil, ErrCacheNotFound
-		}
-		return nil, fmt.Errorf("query storage location: %w", err)
-	}
-	if location.MergedAt != nil {
-		return s.openMerged(ctx, location)
-	}
-	return s.openParts(ctx, location)
-}
-
 func (s *Service) committedPartCount(ctx context.Context, currentUpload *ent.Upload) (int, error) {
 	if currentUpload.CommittedPartCount != nil {
 		return *currentUpload.CommittedPartCount, nil
@@ -675,68 +668,40 @@ func (s *Service) ensureCommittedPartsAreContiguous(ctx context.Context, folderN
 	return nil
 }
 
-func (s *Service) mergeLocation(ctx context.Context, location *ent.StorageLocation) error {
-	mergeStartedAt, err := s.markMergeStarted(ctx, location.ID)
-	if err != nil {
-		return err
-	}
-
-	reader := newPartsReadCloser(ctx, s.storage, location.FolderName, location.PartCount)
-	defer reader.Close()
-	if err := s.storage.UploadStream(ctx, mergedObjectName(location.FolderName), reader); err != nil {
-		_ = s.clearOwnMergeStart(ctx, location.ID, mergeStartedAt)
-		if errors.Is(err, storage.ErrObjectNotFound) {
-			return ErrCacheNotFound
-		}
-		return err
-	}
-
-	return s.markMergeFinished(ctx, location.ID, mergeStartedAt)
-}
-
-func (s *Service) startMergeDownload(ctx context.Context, location *ent.StorageLocation) (io.ReadCloser, error) {
-	if !s.reserveMerge() {
-		return s.openParts(ctx, location)
-	}
-
-	mergeStartedAt, err := s.markMergeStarted(ctx, location.ID)
-	if err != nil {
-		s.finishReservedMerge()
-		return nil, err
-	}
-
-	responseReader, responseWriter := io.Pipe()
-
-	go s.mergeLocationInBackground(location, mergeStartedAt, responseWriter)
-
-	return responseReader, nil
-}
-
-func (s *Service) mergeLocationInBackground(location *ent.StorageLocation, mergeStartedAt int64, responseWriter *io.PipeWriter) {
-	defer s.finishReservedMerge()
-
-	reader := newPartsReadCloser(s.mergeCtx, s.storage, location.FolderName, location.PartCount)
-	defer reader.Close()
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-s.mergeCtx.Done():
-			_ = responseWriter.CloseWithError(s.mergeCtx.Err())
-		case <-done:
-		}
-	}()
-
-	tee := io.TeeReader(reader, responseWriter)
-	if err := s.storage.UploadStream(s.mergeCtx, mergedObjectName(location.FolderName), tee); err != nil {
-		close(done)
-		_ = responseWriter.CloseWithError(err)
-		s.rollbackMergeStart(location.ID, mergeStartedAt)
+func (s *Service) tryStartMaterialization(location *ent.StorageLocation) {
+	if s.composer == nil || location.PartCount < 2 || location.MergedAt != nil || location.MaterializationUnsupportedAt != nil || location.PartsDeletedAt != nil {
 		return
 	}
-	close(done)
+	if !s.reserveMerge() {
+		return
+	}
 
-	_ = responseWriter.Close()
+	mergeStartedAt, err := s.markMergeStarted(s.mergeCtx, location.ID)
+	if err != nil {
+		s.finishReservedMerge()
+		return
+	}
+
+	go s.materializeLocationInBackground(location, mergeStartedAt)
+}
+
+func (s *Service) materializeLocationInBackground(location *ent.StorageLocation, mergeStartedAt int64) {
+	defer s.finishReservedMerge()
+
+	sources := make([]string, location.PartCount)
+	for index := range sources {
+		sources[index] = partObjectName(location.FolderName, index)
+	}
+	if err := s.composer.ComposeObjects(s.mergeCtx, mergedObjectName(location.FolderName), sources); err != nil {
+		if errors.Is(err, storage.ErrComposeUnsupported) {
+			if markErr := s.markMaterializationUnsupported(location.ID, mergeStartedAt); markErr != nil {
+				s.rollbackMergeStart(location.ID, mergeStartedAt)
+			}
+		} else {
+			s.rollbackMergeStart(location.ID, mergeStartedAt)
+		}
+		return
+	}
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
@@ -775,11 +740,17 @@ func (s *Service) rollbackMergeStart(locationID string, mergeStartedAt int64) {
 
 func (s *Service) markMergeStarted(ctx context.Context, locationID string) (int64, error) {
 	mergeStartedAt := time.Now().UnixMilli()
+	stalledBefore := time.Now().Add(-stalledMaterializationLifetime).UnixMilli()
 	affected, err := s.db.StorageLocation.Update().
 		Where(
 			storagelocation.ID(locationID),
-			storagelocation.MergeStartedAtIsNil(),
+			storagelocation.Or(
+				storagelocation.MergeStartedAtIsNil(),
+				storagelocation.MergeStartedAtLT(stalledBefore),
+			),
 			storagelocation.MergedAtIsNil(),
+			storagelocation.MaterializationUnsupportedAtIsNil(),
+			storagelocation.PartsDeletedAtIsNil(),
 		).
 		SetMergeStartedAt(mergeStartedAt).
 		Save(ctx)
@@ -790,6 +761,28 @@ func (s *Service) markMergeStarted(ctx context.Context, locationID string) (int6
 		return 0, errMergeAlreadyStarted
 	}
 	return mergeStartedAt, nil
+}
+
+func (s *Service) markMaterializationUnsupported(locationID string, mergeStartedAt int64) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
+	defer cancel()
+
+	affected, err := s.db.StorageLocation.Update().
+		Where(
+			storagelocation.ID(locationID),
+			storagelocation.MergeStartedAt(mergeStartedAt),
+			storagelocation.MergedAtIsNil(),
+		).
+		SetMaterializationUnsupportedAt(time.Now().UnixMilli()).
+		ClearMergeStartedAt().
+		Save(cleanupCtx)
+	if err != nil {
+		return fmt.Errorf("mark materialization unsupported: %w", err)
+	}
+	if affected == 0 {
+		return errMergeAlreadyStarted
+	}
+	return nil
 }
 
 func (s *Service) markMergeFinished(ctx context.Context, locationID string, mergeStartedAt int64) error {

@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	itemsPerPage             = 10
-	abandonedUploadThreshold = time.Minute
-	stalledMergeThreshold    = 15 * time.Minute
+	itemsPerPage               = 10
+	abandonedUploadThreshold   = time.Minute
+	materializedPartsRetention = time.Hour
 )
 
 type Service struct {
@@ -120,12 +120,13 @@ func (s *Service) RunStorageLocations(ctx context.Context) (int, error) {
 }
 
 func (s *Service) RunParts(ctx context.Context) (int, error) {
+	cutoff := time.Now().Add(-materializedPartsRetention).UnixMilli()
 	deletedParts := 0
 
 	for {
 		locations, err := s.db.StorageLocation.Query().
 			Where(
-				storagelocation.MergedAtNotNil(),
+				storagelocation.MergedAtLT(cutoff),
 				storagelocation.PartsDeletedAtIsNil(),
 			).
 			Limit(itemsPerPage).
@@ -149,22 +150,6 @@ func (s *Service) RunParts(ctx context.Context) (int, error) {
 			deletedParts += location.PartCount
 		}
 	}
-}
-
-func (s *Service) RunMerges(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-stalledMergeThreshold).UnixMilli()
-	updated, err := s.db.StorageLocation.Update().
-		Where(
-			storagelocation.MergeStartedAtLT(cutoff),
-			storagelocation.MergedAtIsNil(),
-		).
-		ClearMergeStartedAt().
-		ClearMergedAt().
-		Save(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("reset stalled merges: %w", err)
-	}
-	return updated, nil
 }
 
 func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) error {

@@ -117,15 +117,24 @@ Schema migrations run automatically at startup.
 
 S3 credentials are loaded through the AWS SDK default credential chain.
 
+For S3 deployments, configure an `AbortIncompleteMultipartUpload` bucket
+lifecycle rule. It cleans up multipart uploads left incomplete if the server
+exits during composition; verify lifecycle support when using an S3-compatible
+endpoint.
+
 ### Cache Behavior
 
 | Variable                      | Default              | Description                                                                                                    |
 |-------------------------------|----------------------|----------------------------------------------------------------------------------------------------------------|
-| `ENABLE_DIRECT_DOWNLOADS`     | `false`              | When using S3, return S3 presigned URLs for already merged objects.                                            |
+| `ENABLE_DIRECT_DOWNLOADS`     | `false`              | When using S3, presigns eligible cache objects instead of proxying their downloads through the server.         |
 | `DOWNLOAD_URL_SIGNING_SECRET` | generated at startup | HMAC secret for local signed download URLs. Set a stable value for multi-instance or restart-safe deployments. |
-| `CACHE_MERGE_CONCURRENCY`     | CPU count            | Maximum number of background first-download merges. Values below `1` fall back to CPU count.                   |
+| `CACHE_MERGE_CONCURRENCY`     | CPU count            | Maximum number of concurrent S3 materializations. Values below `1` fall back to CPU count.                     |
 
 Local signed download URLs and S3 direct download URLs expire after 10 minutes.
+Single-part S3 caches are presigned directly. Multi-part caches are presigned
+after composition when all non-final parts satisfy the backend's multipart
+upload size constraints (5 MiB on AWS S3); unsupported layouts transparently
+fall back to server-proxied downloads.
 
 ### Cleanup
 
@@ -139,8 +148,7 @@ Cleanup intervals:
 - abandoned uploads: every 5 minutes
 - expired cache entries: every 24 hours
 - orphan storage locations: every 24 hours
-- merged parts: every hour
-- stalled merges: every hour
+- superseded parts: every hour, once the merged representation is at least one hour old
 
 ### Management API
 

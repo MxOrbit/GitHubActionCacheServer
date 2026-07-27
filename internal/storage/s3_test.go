@@ -17,12 +17,37 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/require"
 )
 
 func TestS3AdapterImplementsDirectDownload(t *testing.T) {
 	var _ Adapter = (*S3Adapter)(nil)
 	var _ DirectDownloadAdapter = (*S3Adapter)(nil)
+	var _ ComposeAdapter = (*S3Adapter)(nil)
+}
+
+func TestIsS3ComposeUnsupported(t *testing.T) {
+	tests := []struct {
+		code string
+		want bool
+	}{
+		{code: "EntityTooSmall", want: true},
+		{code: "NotImplemented", want: true},
+		{code: "NotImplementedException", want: true},
+		{code: "InvalidArgument", want: false},
+		{code: "InvalidRequest", want: false},
+		{code: "SlowDown", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			err := &smithy.GenericAPIError{Code: test.code, Message: "test error"}
+			require.Equal(t, test.want, isS3ComposeUnsupported(err))
+		})
+	}
+
+	require.True(t, isS3ComposeUnsupported(fmt.Errorf("compose plan: %w", ErrComposeUnsupported)))
 }
 
 func TestS3KeyUsesCachePrefix(t *testing.T) {
@@ -233,6 +258,103 @@ func TestS3AdapterCopyObjectUsesServerSideCopy(t *testing.T) {
 	require.False(t, fakeS3.putObjectCalled())
 }
 
+func TestS3AdapterComposeObjectsUsesMultipartServerSideCopies(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{objectSizes: map[string]int64{
+		"/cache-bucket/gh-actions-cache/folder/parts/0": s3MinimumComposePartSize,
+		"/cache-bucket/gh-actions-cache/folder/parts/1": 1,
+	}})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	require.NoError(t, adapter.ComposeObjects(ctx, "folder/merged", []string{"folder/parts/0", "folder/parts/1"}))
+	require.Equal(t, []string{
+		"/cache-bucket/gh-actions-cache/folder/parts/0",
+		"/cache-bucket/gh-actions-cache/folder/parts/1",
+	}, fakeS3.headObjectPaths())
+	require.Equal(t, []int{1, 2}, fakeS3.copiedPartNumbers())
+	require.Equal(t, []string{
+		"cache-bucket%2Fgh-actions-cache%2Ffolder%2Fparts%2F0",
+		"cache-bucket%2Fgh-actions-cache%2Ffolder%2Fparts%2F1",
+	}, fakeS3.copiedPartSources())
+	require.Equal(t, []string{"", ""}, fakeS3.copiedPartRanges())
+	require.True(t, fakeS3.completeMultipartCalled())
+	require.False(t, fakeS3.abortMultipartCalled())
+}
+
+func TestS3AdapterComposeObjectsRejectsSmallNonFinalSource(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{objectSizes: map[string]int64{
+		"/cache-bucket/gh-actions-cache/folder/parts/0": 1,
+		"/cache-bucket/gh-actions-cache/folder/parts/1": s3MinimumComposePartSize,
+	}})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	err = adapter.ComposeObjects(ctx, "folder/merged", []string{"folder/parts/0", "folder/parts/1"})
+	require.ErrorIs(t, err, ErrComposeUnsupported)
+	require.False(t, fakeS3.createMultipartCalled())
+}
+
+func TestS3AdapterComposeObjectsAbortsFailedMultipartCopy(t *testing.T) {
+	ctx := context.Background()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{
+		failPartNumber: 2,
+		objectSizes: map[string]int64{
+			"/cache-bucket/gh-actions-cache/folder/parts/0": s3MinimumComposePartSize,
+			"/cache-bucket/gh-actions-cache/folder/parts/1": 1,
+		},
+	})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	err = adapter.ComposeObjects(ctx, "folder/merged", []string{"folder/parts/0", "folder/parts/1"})
+	require.Error(t, err)
+	require.True(t, fakeS3.abortMultipartCalled())
+	require.False(t, fakeS3.completeMultipartCalled())
+}
+
+func TestS3AdapterComposeObjectsAbortsCanceledMultipartCopyWithFreshContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fakeS3 := newFakeS3Server(t, fakeS3Options{
+		onCopyPart: func(partNumber int) {
+			if partNumber == 1 {
+				cancel()
+			}
+		},
+		objectSizes: map[string]int64{
+			"/cache-bucket/gh-actions-cache/folder/parts/0": s3MinimumComposePartSize,
+			"/cache-bucket/gh-actions-cache/folder/parts/1": 1,
+		},
+	})
+	defer fakeS3.Close()
+	adapter, err := newTestS3Adapter(t, fakeS3.URL)
+	require.NoError(t, err)
+
+	err = adapter.ComposeObjects(ctx, "folder/merged", []string{"folder/parts/0", "folder/parts/1"})
+	require.Error(t, err)
+	require.True(t, fakeS3.abortMultipartCalled())
+	require.False(t, fakeS3.completeMultipartCalled())
+}
+
+func TestPlanS3ComposePartsSplitsLargeSourceIntoBalancedRanges(t *testing.T) {
+	sourceSize := s3MaximumComposePartSize + s3MinimumComposePartSize
+	parts, err := planS3ComposeParts([]string{"large"}, []int64{sourceSize})
+	require.NoError(t, err)
+	require.Len(t, parts, 2)
+	require.Equal(t, int64(0), parts[0].start)
+	require.Equal(t, parts[0].size, parts[1].start)
+	require.Equal(t, sourceSize, parts[0].size+parts[1].size)
+	require.GreaterOrEqual(t, parts[0].size, s3MinimumComposePartSize)
+	require.GreaterOrEqual(t, parts[1].size, s3MinimumComposePartSize)
+	require.LessOrEqual(t, parts[0].size, s3MaximumComposePartSize)
+	require.LessOrEqual(t, parts[1].size, s3MaximumComposePartSize)
+}
+
 func TestS3DeleteErrorsError(t *testing.T) {
 	err := s3DeleteErrorsError([]types.Error{
 		{
@@ -259,6 +381,8 @@ type fakeS3Options struct {
 	getObjectErrorCode string
 	failPartNumber     int
 	onUploadPart       func(int)
+	onCopyPart         func(int)
+	objectSizes        map[string]int64
 }
 
 type fakeS3Server struct {
@@ -269,18 +393,24 @@ type fakeS3Server struct {
 	getObjectErrorCode string
 	failPartNumber     int
 	onUploadPart       func(int)
+	onCopyPart         func(int)
+	objectSizes        map[string]int64
 
 	mu              sync.Mutex
 	headBucket      int
 	listObjects     int
 	listPrefix      string
 	listMaxKeys     string
+	headObjects     []string
 	putObject       bool
 	copySource      string
 	copyDestination string
 	createUpload    bool
 	uploadParts     []int
 	uploadPartSize  []int
+	copyParts       []int
+	copyPartSources []string
+	copyPartRanges  []string
 	completeUpload  bool
 	abortUpload     bool
 }
@@ -304,6 +434,8 @@ func newFakeS3Server(t *testing.T, options fakeS3Options) *fakeS3Server {
 		getObjectErrorCode: options.getObjectErrorCode,
 		failPartNumber:     options.failPartNumber,
 		onUploadPart:       options.onUploadPart,
+		onCopyPart:         options.onCopyPart,
+		objectSizes:        options.objectSizes,
 	}
 	fakeS3.Server = httptest.NewServer(http.HandlerFunc(fakeS3.handle))
 	return fakeS3
@@ -316,6 +448,18 @@ func (s *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.headBucket++
 		s.mu.Unlock()
 		w.WriteHeader(s.headBucketStatus)
+	case r.Method == http.MethodHead && strings.HasPrefix(r.URL.Path, "/cache-bucket/"):
+		s.mu.Lock()
+		s.headObjects = append(s.headObjects, r.URL.Path)
+		size, ok := s.objectSizes[r.URL.Path]
+		s.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `<Error><Code>NoSuchKey</Code><Message>object not found</Message></Error>`)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodGet && r.URL.Path == "/cache-bucket" && r.URL.Query().Get("list-type") == "2":
 		s.mu.Lock()
 		s.listObjects++
@@ -341,6 +485,25 @@ func (s *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = fmt.Fprint(w, "object")
+	case r.Method == http.MethodPut && r.URL.Query().Get("uploadId") == "upload-id" && r.Header.Get("X-Amz-Copy-Source") != "":
+		partNumber, _ := strconv.Atoi(r.URL.Query().Get("partNumber"))
+		s.mu.Lock()
+		s.copyParts = append(s.copyParts, partNumber)
+		s.copyPartSources = append(s.copyPartSources, r.Header.Get("X-Amz-Copy-Source"))
+		s.copyPartRanges = append(s.copyPartRanges, r.Header.Get("X-Amz-Copy-Source-Range"))
+		failPartNumber := s.failPartNumber
+		onCopyPart := s.onCopyPart
+		s.mu.Unlock()
+		if onCopyPart != nil {
+			onCopyPart(partNumber)
+		}
+		if partNumber == failPartNumber {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `<Error><Code>InternalError</Code><Message>copy part failed</Message></Error>`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = fmt.Fprintf(w, `<CopyPartResult><ETag>"copy-part-%d"</ETag><LastModified>2026-07-27T00:00:00.000Z</LastModified></CopyPartResult>`, partNumber)
 	case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
 		s.mu.Lock()
 		s.copySource = r.Header.Get("X-Amz-Copy-Source")
@@ -424,6 +587,30 @@ func (s *fakeS3Server) putObjectCalled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.putObject
+}
+
+func (s *fakeS3Server) headObjectPaths() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.headObjects...)
+}
+
+func (s *fakeS3Server) copiedPartNumbers() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.copyParts...)
+}
+
+func (s *fakeS3Server) copiedPartSources() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.copyPartSources...)
+}
+
+func (s *fakeS3Server) copiedPartRanges() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.copyPartRanges...)
 }
 
 func (s *fakeS3Server) copiedSource() string {

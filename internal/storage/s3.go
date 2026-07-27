@@ -18,6 +18,19 @@ import (
 	"github.com/aws/smithy-go"
 )
 
+const (
+	s3MinimumComposePartSize int64 = 5 * 1024 * 1024
+	s3MaximumComposePartSize int64 = 5 * 1024 * 1024 * 1024
+	s3MaximumComposeParts          = 10_000
+)
+
+type s3ComposePart struct {
+	sourceObjectName string
+	start            int64
+	size             int64
+	sourceSize       int64
+}
+
 type S3Adapter struct {
 	client    *s3.Client
 	presign   *s3.PresignClient
@@ -112,6 +125,154 @@ func (a *S3Adapter) CopyObject(ctx context.Context, sourceObjectName, destinatio
 		return fmt.Errorf("copy s3 object: %w", err)
 	}
 	return nil
+}
+
+func (a *S3Adapter) ComposeObjects(ctx context.Context, destinationObjectName string, sourceObjectNames []string) error {
+	if len(sourceObjectNames) == 0 {
+		return fmt.Errorf("%w: no source objects", ErrComposeUnsupported)
+	}
+	if len(sourceObjectNames) > s3MaximumComposeParts {
+		return fmt.Errorf("%w: %d sources exceed the S3 limit of %d parts", ErrComposeUnsupported, len(sourceObjectNames), s3MaximumComposeParts)
+	}
+
+	sourceSizes := make([]int64, len(sourceObjectNames))
+	for index, sourceObjectName := range sourceObjectNames {
+		output, err := a.client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(a.bucket),
+			Key:    aws.String(a.key(sourceObjectName)),
+		})
+		if err != nil {
+			if isS3NotFound(err) {
+				return ObjectNotFoundError{ObjectName: sourceObjectName}
+			}
+			if isS3ComposeUnsupported(err) {
+				return fmt.Errorf("%w: inspect compose source: %v", ErrComposeUnsupported, err)
+			}
+			return fmt.Errorf("inspect s3 compose source: %w", err)
+		}
+		sourceSizes[index] = aws.ToInt64(output.ContentLength)
+	}
+
+	parts, err := planS3ComposeParts(sourceObjectNames, sourceSizes)
+	if err != nil {
+		return err
+	}
+
+	created, err := a.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(a.key(destinationObjectName)),
+	})
+	if err != nil {
+		if isS3ComposeUnsupported(err) {
+			return fmt.Errorf("%w: create multipart upload: %v", ErrComposeUnsupported, err)
+		}
+		return fmt.Errorf("create s3 compose upload: %w", err)
+	}
+	uploadID := aws.ToString(created.UploadId)
+	if uploadID == "" {
+		return fmt.Errorf("create s3 compose upload: missing upload id")
+	}
+
+	completedParts := make([]types.CompletedPart, 0, len(parts))
+	for index, part := range parts {
+		partNumber := int32(index + 1)
+		input := &s3.UploadPartCopyInput{
+			Bucket:     aws.String(a.bucket),
+			CopySource: aws.String(url.PathEscape(a.bucket + "/" + a.key(part.sourceObjectName))),
+			Key:        aws.String(a.key(destinationObjectName)),
+			PartNumber: aws.Int32(partNumber),
+			UploadId:   aws.String(uploadID),
+		}
+		if part.start != 0 || part.size != part.sourceSize {
+			input.CopySourceRange = aws.String(fmt.Sprintf("bytes=%d-%d", part.start, part.start+part.size-1))
+		}
+
+		copied, copyErr := a.client.UploadPartCopy(ctx, input)
+		if copyErr != nil {
+			return a.failS3Compose(destinationObjectName, uploadID, fmt.Errorf("copy s3 compose part %d: %w", partNumber, copyErr))
+		}
+		if copied.CopyPartResult == nil || copied.CopyPartResult.ETag == nil {
+			return a.failS3Compose(destinationObjectName, uploadID, fmt.Errorf("copy s3 compose part %d: missing etag", partNumber))
+		}
+		completedParts = append(completedParts, types.CompletedPart{
+			ETag:       copied.CopyPartResult.ETag,
+			PartNumber: aws.Int32(partNumber),
+		})
+	}
+
+	_, err = a.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(a.bucket),
+		Key:      aws.String(a.key(destinationObjectName)),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completedParts,
+		},
+	})
+	if err != nil {
+		return a.failS3Compose(destinationObjectName, uploadID, fmt.Errorf("complete s3 compose upload: %w", err))
+	}
+	return nil
+}
+
+func planS3ComposeParts(sourceObjectNames []string, sourceSizes []int64) ([]s3ComposePart, error) {
+	if len(sourceObjectNames) == 0 || len(sourceObjectNames) != len(sourceSizes) {
+		return nil, fmt.Errorf("%w: invalid source metadata", ErrComposeUnsupported)
+	}
+
+	parts := make([]s3ComposePart, 0, len(sourceObjectNames))
+	for index, sourceObjectName := range sourceObjectNames {
+		sourceSize := sourceSizes[index]
+		if sourceSize <= 0 {
+			return nil, fmt.Errorf("%w: source %d is empty", ErrComposeUnsupported, index)
+		}
+
+		partCount := int((sourceSize + s3MaximumComposePartSize - 1) / s3MaximumComposePartSize)
+		baseSize := sourceSize / int64(partCount)
+		extraBytes := sourceSize % int64(partCount)
+		start := int64(0)
+		for partIndex := 0; partIndex < partCount; partIndex++ {
+			size := baseSize
+			if int64(partIndex) < extraBytes {
+				size++
+			}
+			parts = append(parts, s3ComposePart{
+				sourceObjectName: sourceObjectName,
+				start:            start,
+				size:             size,
+				sourceSize:       sourceSize,
+			})
+			start += size
+		}
+	}
+
+	if len(parts) > s3MaximumComposeParts {
+		return nil, fmt.Errorf("%w: %d parts exceed the S3 limit of %d", ErrComposeUnsupported, len(parts), s3MaximumComposeParts)
+	}
+	for index, part := range parts[:len(parts)-1] {
+		if part.size < s3MinimumComposePartSize {
+			return nil, fmt.Errorf("%w: non-final part %d is smaller than %d bytes", ErrComposeUnsupported, index, s3MinimumComposePartSize)
+		}
+	}
+	return parts, nil
+}
+
+func (a *S3Adapter) failS3Compose(destinationObjectName, uploadID string, composeErr error) error {
+	if isS3ComposeUnsupported(composeErr) {
+		composeErr = fmt.Errorf("%w: %v", ErrComposeUnsupported, composeErr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s3MultipartAbortTimeout(a.multipartAbortTimeout))
+	defer cancel()
+
+	_, abortErr := a.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(a.bucket),
+		Key:      aws.String(a.key(destinationObjectName)),
+		UploadId: aws.String(uploadID),
+	})
+	if abortErr != nil && !isS3NotFound(abortErr) {
+		return fmt.Errorf("%w; abort s3 compose upload: %v", composeErr, abortErr)
+	}
+	return composeErr
 }
 
 func (a *S3Adapter) abortFailedMultipartUpload(objectName string, uploadErr error) error {
@@ -333,6 +494,10 @@ func isS3NotFound(err error) bool {
 
 func isS3BucketNotFound(err error) bool {
 	return isS3ErrorCode(err, "NoSuchBucket", "NotFound")
+}
+
+func isS3ComposeUnsupported(err error) bool {
+	return errors.Is(err, ErrComposeUnsupported) || isS3ErrorCode(err, "EntityTooSmall", "NotImplemented", "NotImplementedException")
 }
 
 func isS3ErrorCode(err error, codes ...string) bool {

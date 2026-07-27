@@ -116,7 +116,7 @@ func TestRunPartsDeletesMergedParts(t *testing.T) {
 		SetID("merged-location").
 		SetFolderName("merged").
 		SetPartCount(2).
-		SetMergedAt(time.Now().UnixMilli()).
+		SetMergedAt(time.Now().Add(-materializedPartsRetention - time.Minute).UnixMilli()).
 		SaveX(ctx)
 
 	deleted, err := service.RunParts(ctx)
@@ -130,23 +130,25 @@ func TestRunPartsDeletesMergedParts(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestRunMergesResetsStalledMerges(t *testing.T) {
+func TestRunPartsKeepsRecentlySupersededParts(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
-	old := time.Now().Add(-16 * time.Minute).UnixMilli()
 
+	require.NoError(t, filesystem.UploadStream(ctx, "recent/parts/0", bytes.NewBufferString("data")))
 	location := client.StorageLocation.Create().
-		SetID("stalled-location").
-		SetFolderName("stalled").
+		SetID("recent-location").
+		SetFolderName("recent").
 		SetPartCount(1).
-		SetMergeStartedAt(old).
+		SetMergedAt(time.Now().UnixMilli()).
 		SaveX(ctx)
 
-	updated, err := service.RunMerges(ctx)
+	deleted, err := service.RunParts(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, updated)
+	require.Zero(t, deleted)
 
 	current := client.StorageLocation.GetX(ctx, location.ID)
-	require.Nil(t, current.MergeStartedAt)
-	require.Nil(t, current.MergedAt)
+	require.Nil(t, current.PartsDeletedAt)
+	count, err := filesystem.CountFilesInFolder(ctx, "recent/parts")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }

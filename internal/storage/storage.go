@@ -15,7 +15,10 @@ const (
 	DriverS3         = "s3"
 )
 
-var ErrObjectNotFound = errors.New("object not found in storage")
+var (
+	ErrObjectNotFound     = errors.New("object not found in storage")
+	ErrComposeUnsupported = errors.New("object sequence cannot be composed by this storage backend")
+)
 
 type ObjectNotFoundError struct {
 	ObjectName string
@@ -40,6 +43,10 @@ type Adapter interface {
 
 type DirectDownloadAdapter interface {
 	CreateDownloadURL(ctx context.Context, objectName string, ttl time.Duration) (string, error)
+}
+
+type ComposeAdapter interface {
+	ComposeObjects(ctx context.Context, destinationObjectName string, sourceObjectNames []string) error
 }
 
 func NewAdapter(ctx context.Context, cfg config.StorageConfig) (Adapter, error) {

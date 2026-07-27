@@ -33,6 +33,7 @@ func (StorageLocation) Fields() []ent.Field {
 			StorageKey("partCount"),
 		field.Int64("mergeStartedAt").Optional().Nillable().StorageKey("mergeStartedAt"),
 		field.Int64("mergedAt").Optional().Nillable().StorageKey("mergedAt"),
+		field.Int64("materializationUnsupportedAt").Optional().Nillable().StorageKey("materializationUnsupportedAt"),
 		field.Int64("partsDeletedAt").Optional().Nillable().StorageKey("partsDeletedAt"),
 		field.Int64("lastDownloadedAt").Optional().Nillable().StorageKey("lastDownloadedAt"),
 	}

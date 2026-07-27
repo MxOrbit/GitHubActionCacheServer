@@ -5,14 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/cleanup"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
@@ -268,25 +265,129 @@ func TestCreateUploadReservationIsAtomic(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
-func TestMergeLocationDoesNotStartFromStaleMergedLocation(t *testing.T) {
+func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &directURLStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
+	createMatchedCacheEntry(ctx, client, "entry-id", "key")
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
+		return "fallback"
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "direct://entry-id-folder/parts/0", result.DownloadURL)
+	require.Equal(t, "entry-id-folder/parts/0", adapter.objectName)
+}
+
+func TestLegacyMaterializedSinglePartUsesMergedObjectForDirectDownload(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &directURLStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	client.StorageLocation.UpdateOneID(entry.LocationId).
+		SetMergedAt(time.Now().Add(-time.Hour).UnixMilli()).
+		SetPartsDeletedAt(time.Now().UnixMilli()).
+		ExecX(ctx)
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
+		return "fallback"
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "direct://entry-id-folder/merged", result.DownloadURL)
+	require.Equal(t, "entry-id-folder/merged", adapter.objectName)
+}
+
+func TestDirectDownloadsScheduleMaterializationAfterFinalize(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := newBlockingComposeStorage(filesystem)
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true, MergeConcurrency: 1})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "first", bytes.NewBufferString("hello ")))
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "second", bytes.NewBufferString("world")))
+	require.NoError(t, service.CommitBlockList(ctx, upload.UploadID, []string{"first", "second"}))
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	adapter.waitStarted(t)
+
+	location := client.StorageLocation.Query().OnlyX(ctx)
+	require.NotNil(t, location.MergeStartedAt)
+	require.Nil(t, location.MergedAt)
+
+	adapter.releaseOne()
+	require.NoError(t, service.WaitForMerges(ctx))
+	location = client.StorageLocation.GetX(ctx, location.ID)
+	require.NotNil(t, location.MergedAt)
+	require.Equal(t, "hello world", readStorageObject(t, ctx, filesystem, mergedObjectName(location.FolderName)))
+}
+
+func TestFilesystemDownloadStreamsPartsWithoutMaterializing(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("hello ")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("world")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "hello world", string(body))
+
+	current := client.StorageLocation.GetX(ctx, location.ID)
+	require.Nil(t, current.MergeStartedAt)
+	require.Nil(t, current.MergedAt)
+	_, err = filesystem.CreateDownloadStream(ctx, "folder/merged")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
+func TestStalePartsLocationDoesNotRestartCompletedMaterialization(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &trackingComposeStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
 	mergedAt := time.Now().UnixMilli()
 	location := client.StorageLocation.Create().
 		SetID("location-id").
 		SetFolderName("folder").
-		SetPartCount(1).
+		SetPartCount(2).
 		SetMergedAt(mergedAt).
 		SaveX(ctx)
 	staleLocation := *location
 	staleLocation.MergedAt = nil
 
-	err := service.mergeLocation(ctx, &staleLocation)
-	require.ErrorIs(t, err, errMergeAlreadyStarted)
+	service.tryStartMaterialization(&staleLocation)
+	require.NoError(t, service.WaitForMerges(ctx))
+	require.Zero(t, adapter.callCount())
 
 	current := client.StorageLocation.GetX(ctx, location.ID)
 	require.NotNil(t, current.MergedAt)
 	require.Equal(t, mergedAt, *current.MergedAt)
+}
+
+func TestStalledMaterializationCanBeRescheduledByRequest(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &trackingComposeStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("a")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("b")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+	client.StorageLocation.UpdateOneID(location.ID).
+		SetMergeStartedAt(time.Now().Add(-stalledMaterializationLifetime - time.Minute).UnixMilli()).
+		ExecX(ctx)
+
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.NoError(t, service.WaitForMerges(ctx))
+
+	current := client.StorageLocation.GetX(ctx, location.ID)
+	require.NotNil(t, current.MergedAt)
+	require.Equal(t, 1, adapter.callCount())
 }
 
 func TestFailedMergeCleanupDoesNotClearCompletedMerge(t *testing.T) {
@@ -311,116 +412,118 @@ func TestFailedMergeCleanupDoesNotClearCompletedMerge(t *testing.T) {
 	require.Equal(t, mergedAt, *current.MergedAt)
 }
 
-func TestMergeLocationKeepsPartsForConcurrentReaders(t *testing.T) {
-	ctx, client, filesystem := newTestServiceDeps(t)
-	service := NewService(Options{DB: client, Storage: filesystem})
-	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("part")))
-	location := client.StorageLocation.Create().
-		SetID("location-id").
-		SetFolderName("folder").
-		SetPartCount(1).
-		SaveX(ctx)
-
-	require.NoError(t, service.mergeLocation(ctx, location))
-
-	count, err := filesystem.CountFilesInFolder(ctx, "folder/parts")
-	require.NoError(t, err)
-	require.Equal(t, 1, count)
-
-	current := client.StorageLocation.GetX(ctx, location.ID)
-	require.NotNil(t, current.MergedAt)
-	require.Nil(t, current.PartsDeletedAt)
-}
-
-func TestDownloadStreamsPartsWhileMergeRunsInBackground(t *testing.T) {
-	fixture := startBlockingMergeDownload(t, "hello")
+func TestDownloadIsIndependentFromBackgroundMaterialization(t *testing.T) {
+	fixture := startBlockingMaterializationDownload(t, "hello", " world")
 
 	current := fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
 	require.NotNil(t, current.MergeStartedAt)
 	require.Nil(t, current.MergedAt)
 
-	body := make([]byte, len("hello"))
-	_, err := io.ReadFull(fixture.stream, body)
+	body, err := io.ReadAll(fixture.stream)
 	require.NoError(t, err)
-	require.Equal(t, "hello", string(body))
+	require.Equal(t, "hello world", string(body))
 
 	fixture.adapter.releaseOne()
-	rest, err := io.ReadAll(fixture.stream)
-	require.NoError(t, err)
-	require.Empty(t, rest)
-	require.Eventually(t, func() bool {
-		current := fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
-		return current.MergedAt != nil
-	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, fixture.service.WaitForMerges(fixture.ctx))
+	current = fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
+	require.NotNil(t, current.MergedAt)
+	require.Equal(t, "hello world", readStorageObject(t, fixture.ctx, fixture.filesystem, "folder/merged"))
 }
 
-func TestFirstDownloadPartsRemainUntilReturnedStreamCloses(t *testing.T) {
+func TestSinglePartNeverMaterializes(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
-	service := NewService(Options{DB: client, Storage: filesystem, MergeConcurrency: 1})
-	cleanupService := cleanup.NewService(cleanup.Options{
-		DB:      client,
-		Storage: filesystem,
-		Config:  config.CleanupConfig{CacheOlderThanDays: 90},
-	})
+	adapter := &trackingComposeStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("data")))
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
 
-	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("hello")))
-	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("world")))
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "data", string(body))
+	require.Zero(t, adapter.callCount())
+
+	current := client.StorageLocation.GetX(ctx, location.ID)
+	require.Nil(t, current.MergeStartedAt)
+	require.Nil(t, current.MergedAt)
+}
+
+func TestUnsupportedMaterializationIsPersisted(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &trackingComposeStorage{Adapter: filesystem, errors: []error{storage.ErrComposeUnsupported}}
+	service := NewService(Options{DB: client, Storage: adapter})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("a")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("b")))
 	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
 
 	stream, err := service.Download(ctx, "entry-id")
 	require.NoError(t, err)
-	defer stream.Close()
-
-	firstPart := make([]byte, len("hello"))
-	_, err = io.ReadFull(stream, firstPart)
-	require.NoError(t, err)
-	require.Equal(t, "hello", string(firstPart))
-
-	time.Sleep(50 * time.Millisecond)
-
-	current := client.StorageLocation.GetX(ctx, location.ID)
-	require.Nil(t, current.MergedAt)
-
-	deleted, err := cleanupService.RunParts(ctx)
-	require.NoError(t, err)
-	require.Zero(t, deleted)
-
-	rest, err := io.ReadAll(stream)
-	require.NoError(t, err)
-	require.Equal(t, "world", string(rest))
-
+	require.NoError(t, stream.Close())
 	require.Eventually(t, func() bool {
 		current := client.StorageLocation.GetX(ctx, location.ID)
-		return current.MergedAt != nil
+		return current.MaterializationUnsupportedAt != nil && current.MergeStartedAt == nil
 	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, 1, adapter.callCount())
 
-	deleted, err = cleanupService.RunParts(ctx)
+	stream, err = service.Download(ctx, "entry-id")
 	require.NoError(t, err)
-	require.Equal(t, 2, deleted)
+	require.NoError(t, stream.Close())
+	require.Equal(t, 1, adapter.callCount())
 }
 
-func TestBackgroundMergesRespectConcurrencyLimit(t *testing.T) {
+func TestTransientMaterializationFailureCanRetry(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
-	adapter := newBlockingMergeStorage(filesystem)
+	adapter := &trackingComposeStorage{Adapter: filesystem, errors: []error{errInjectedStorageFailure}}
+	service := NewService(Options{DB: client, Storage: adapter})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("a")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("b")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Eventually(t, func() bool {
+		current := client.StorageLocation.GetX(ctx, location.ID)
+		return adapter.callCount() == 1 && current.MergeStartedAt == nil
+	}, time.Second, 10*time.Millisecond)
+
+	stream, err = service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.NoError(t, service.WaitForMerges(ctx))
+	require.Equal(t, 2, adapter.callCount())
+	current := client.StorageLocation.GetX(ctx, location.ID)
+	require.NotNil(t, current.MergedAt)
+}
+
+func TestBackgroundMaterializationsRespectConcurrencyLimit(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := newBlockingComposeStorage(filesystem)
 	service := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1})
 
 	require.NoError(t, filesystem.UploadStream(ctx, "folder-a/parts/0", bytes.NewBufferString("a")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder-a/parts/1", bytes.NewBufferString("a2")))
 	require.NoError(t, filesystem.UploadStream(ctx, "folder-b/parts/0", bytes.NewBufferString("b")))
-	createCacheEntryForDownload(ctx, client, "entry-a", "folder-a")
-	createCacheEntryForDownload(ctx, client, "entry-b", "folder-b")
+	require.NoError(t, filesystem.UploadStream(ctx, "folder-b/parts/1", bytes.NewBufferString("b2")))
+	createCacheEntryForDownloadWithPartCount(ctx, client, "entry-a", "folder-a", 2)
+	createCacheEntryForDownloadWithPartCount(ctx, client, "entry-b", "folder-b", 2)
 
 	streamA, err := service.Download(ctx, "entry-a")
 	require.NoError(t, err)
 	defer streamA.Close()
-	bodyA := make([]byte, len("a"))
-	_, err = io.ReadFull(streamA, bodyA)
+	bodyA, err := io.ReadAll(streamA)
 	require.NoError(t, err)
-	require.Equal(t, "a", string(bodyA))
+	require.Equal(t, "aa2", string(bodyA))
 
 	streamB, err := service.Download(ctx, "entry-b")
 	require.NoError(t, err)
 	defer streamB.Close()
 	adapter.waitStarted(t)
+	bodyB, err := io.ReadAll(streamB)
+	require.NoError(t, err)
+	require.Equal(t, "bb2", string(bodyB))
 
 	select {
 	case <-adapter.started:
@@ -429,9 +532,6 @@ func TestBackgroundMergesRespectConcurrencyLimit(t *testing.T) {
 	}
 
 	adapter.releaseOne()
-	restA, err := io.ReadAll(streamA)
-	require.NoError(t, err)
-	require.Empty(t, restA)
 	require.NoError(t, service.WaitForMerges(ctx))
 	require.Equal(t, 1, adapter.maxActive())
 
@@ -443,21 +543,17 @@ func TestBackgroundMergesRespectConcurrencyLimit(t *testing.T) {
 	require.NoError(t, err)
 	defer streamBRetry.Close()
 	adapter.waitStarted(t)
-	bodyB := make([]byte, len("b"))
-	_, err = io.ReadFull(streamBRetry, bodyB)
+	bodyBRetry, err := io.ReadAll(streamBRetry)
 	require.NoError(t, err)
-	require.Equal(t, "b", string(bodyB))
+	require.Equal(t, "bb2", string(bodyBRetry))
 	adapter.releaseOne()
-	restB, err := io.ReadAll(streamBRetry)
-	require.NoError(t, err)
-	require.Empty(t, restB)
 
 	require.NoError(t, service.WaitForMerges(ctx))
 	require.Equal(t, 1, adapter.maxActive())
 }
 
 func TestWaitForMergesCancelsInFlightMergeAndClearsMergeStart(t *testing.T) {
-	fixture := startBlockingMergeDownload(t, "hello")
+	fixture := startBlockingMaterializationDownload(t, "hello", " world")
 
 	fixture.service.StopAcceptingMerges()
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
@@ -564,24 +660,64 @@ func (s *failDeleteStorage) DeleteFolder(context.Context, string) error {
 	return errInjectedDeleteFailure
 }
 
-type blockingMergeDownloadFixture struct {
+type directURLStorage struct {
+	storage.Adapter
+	objectName string
+}
+
+func (s *directURLStorage) CreateDownloadURL(_ context.Context, objectName string, _ time.Duration) (string, error) {
+	s.objectName = objectName
+	return "direct://" + objectName, nil
+}
+
+type trackingComposeStorage struct {
+	storage.Adapter
+	mu     sync.Mutex
+	calls  int
+	errors []error
+}
+
+func (s *trackingComposeStorage) ComposeObjects(ctx context.Context, destinationObjectName string, sourceObjectNames []string) error {
+	s.mu.Lock()
+	callIndex := s.calls
+	s.calls++
+	var err error
+	if callIndex < len(s.errors) {
+		err = s.errors[callIndex]
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return composeTestObjects(ctx, s.Adapter, destinationObjectName, sourceObjectNames)
+}
+
+func (s *trackingComposeStorage) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+type blockingMaterializationDownloadFixture struct {
 	ctx        context.Context
 	client     *ent.Client
 	filesystem *storage.FilesystemAdapter
-	adapter    *blockingMergeStorage
+	adapter    *blockingComposeStorage
 	service    *Service
 	location   *ent.StorageLocation
 	stream     io.ReadCloser
 }
 
-func startBlockingMergeDownload(t *testing.T, content string) *blockingMergeDownloadFixture {
+func startBlockingMaterializationDownload(t *testing.T, contents ...string) *blockingMaterializationDownloadFixture {
 	t.Helper()
 
 	ctx, client, filesystem := newTestServiceDeps(t)
-	adapter := newBlockingMergeStorage(filesystem)
+	adapter := newBlockingComposeStorage(filesystem)
 	service := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1})
-	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString(content)))
-	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	for index, content := range contents {
+		require.NoError(t, filesystem.UploadStream(ctx, partObjectName("folder", index), bytes.NewBufferString(content)))
+	}
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", len(contents))
 
 	stream, err := service.Download(ctx, "entry-id")
 	require.NoError(t, err)
@@ -590,7 +726,7 @@ func startBlockingMergeDownload(t *testing.T, content string) *blockingMergeDown
 	})
 	adapter.waitStarted(t)
 
-	return &blockingMergeDownloadFixture{
+	return &blockingMaterializationDownloadFixture{
 		ctx:        ctx,
 		client:     client,
 		filesystem: filesystem,
@@ -601,7 +737,7 @@ func startBlockingMergeDownload(t *testing.T, content string) *blockingMergeDown
 	}
 }
 
-type blockingMergeStorage struct {
+type blockingComposeStorage struct {
 	storage.Adapter
 	started chan struct{}
 	release chan struct{}
@@ -610,19 +746,15 @@ type blockingMergeStorage struct {
 	max     int
 }
 
-func newBlockingMergeStorage(adapter storage.Adapter) *blockingMergeStorage {
-	return &blockingMergeStorage{
+func newBlockingComposeStorage(adapter storage.Adapter) *blockingComposeStorage {
+	return &blockingComposeStorage{
 		Adapter: adapter,
 		started: make(chan struct{}, 10),
 		release: make(chan struct{}, 10),
 	}
 }
 
-func (s *blockingMergeStorage) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {
-	if !strings.HasSuffix(objectName, "/merged") {
-		return s.Adapter.UploadStream(ctx, objectName, stream)
-	}
-
+func (s *blockingComposeStorage) ComposeObjects(ctx context.Context, destinationObjectName string, sourceObjectNames []string) error {
 	s.mu.Lock()
 	s.active++
 	if s.active > s.max {
@@ -631,23 +763,18 @@ func (s *blockingMergeStorage) UploadStream(ctx context.Context, objectName stri
 	s.mu.Unlock()
 	s.started <- struct{}{}
 
-	err := s.Adapter.UploadStream(ctx, objectName, stream)
-	if err != nil {
-		s.decrementActive()
-		return err
-	}
-
 	select {
 	case <-s.release:
 	case <-ctx.Done():
 		s.decrementActive()
 		return ctx.Err()
 	}
+	err := composeTestObjects(ctx, s.Adapter, destinationObjectName, sourceObjectNames)
 	s.decrementActive()
-	return nil
+	return err
 }
 
-func (s *blockingMergeStorage) waitStarted(t *testing.T) {
+func (s *blockingComposeStorage) waitStarted(t *testing.T) {
 	t.Helper()
 
 	select {
@@ -657,20 +784,39 @@ func (s *blockingMergeStorage) waitStarted(t *testing.T) {
 	}
 }
 
-func (s *blockingMergeStorage) releaseOne() {
+func (s *blockingComposeStorage) releaseOne() {
 	s.release <- struct{}{}
 }
 
-func (s *blockingMergeStorage) maxActive() int {
+func (s *blockingComposeStorage) maxActive() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.max
 }
 
-func (s *blockingMergeStorage) decrementActive() {
+func (s *blockingComposeStorage) decrementActive() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active--
+}
+
+func composeTestObjects(ctx context.Context, adapter storage.Adapter, destinationObjectName string, sourceObjectNames []string) error {
+	var body bytes.Buffer
+	for _, sourceObjectName := range sourceObjectNames {
+		stream, err := adapter.CreateDownloadStream(ctx, sourceObjectName)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(&body, stream)
+		closeErr := stream.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return adapter.UploadStream(ctx, destinationObjectName, &body)
 }
 
 func newTestServiceDeps(t *testing.T) (context.Context, *ent.Client, *storage.FilesystemAdapter) {

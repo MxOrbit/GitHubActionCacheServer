@@ -264,13 +264,14 @@ func TestManagementRPCFindMany(t *testing.T) {
 	require.Empty(t, rpcResponse.Meta)
 }
 
-func TestDownloadSurfacesImmediateMergeUploadFailure(t *testing.T) {
+func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("-tail")))
 	location := client.StorageLocation.Create().
 		SetID("location-id").
 		SetFolderName("folder").
-		SetPartCount(1).
+		SetPartCount(2).
 		SaveX(ctx)
 	client.CacheEntry.Create().
 		SetID("entry-id").
@@ -286,7 +287,7 @@ func TestDownloadSurfacesImmediateMergeUploadFailure(t *testing.T) {
 	cfg.Cache.DownloadURLSigningSecret = "test-secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
 		DB:      client,
-		Storage: failMergedUploadStorage{Adapter: filesystem},
+		Storage: failComposeStorage{Adapter: filesystem},
 	})
 
 	signedURL := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
@@ -294,8 +295,12 @@ func TestDownloadSurfacesImmediateMergeUploadFailure(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusInternalServerError, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"merge upload failed"}`, rec.Body.String())
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "body-tail", rec.Body.String())
+	require.Eventually(t, func() bool {
+		current := client.StorageLocation.GetX(ctx, location.ID)
+		return current.MergeStartedAt == nil && current.MergedAt == nil
+	}, time.Second, 10*time.Millisecond)
 }
 
 func newTestRouter(t *testing.T) http.Handler {
@@ -316,15 +321,12 @@ func newTestConfig(t *testing.T) config.Config {
 	return cfg
 }
 
-var errMergeUploadFailed = errors.New("merge upload failed")
+var errComposeFailed = errors.New("compose failed")
 
-type failMergedUploadStorage struct {
+type failComposeStorage struct {
 	storage.Adapter
 }
 
-func (s failMergedUploadStorage) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {
-	if strings.HasSuffix(objectName, "/merged") {
-		return errMergeUploadFailed
-	}
-	return s.Adapter.UploadStream(ctx, objectName, stream)
+func (s failComposeStorage) ComposeObjects(context.Context, string, []string) error {
+	return errComposeFailed
 }

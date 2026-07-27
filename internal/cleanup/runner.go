@@ -12,7 +12,6 @@ const (
 	cacheEntriesInterval     = 24 * time.Hour
 	storageLocationsInterval = 24 * time.Hour
 	partsInterval            = time.Hour
-	mergesInterval           = time.Hour
 )
 
 type Runner struct {
@@ -37,7 +36,6 @@ func (r *Runner) Start(ctx context.Context) {
 	go r.runPeriodically(ctx, "cleanup:cache-entries", cacheEntriesInterval, r.service.RunCacheEntries)
 	go r.runPeriodically(ctx, "cleanup:storage-locations", storageLocationsInterval, r.service.RunStorageLocations)
 	go r.runPeriodically(ctx, "cleanup:parts", partsInterval, r.service.RunParts)
-	go r.runPeriodically(ctx, "cleanup:merges", mergesInterval, r.service.RunMerges)
 }
 
 func (r *Runner) runPeriodically(ctx context.Context, name string, interval time.Duration, run func(context.Context) (int, error)) {
