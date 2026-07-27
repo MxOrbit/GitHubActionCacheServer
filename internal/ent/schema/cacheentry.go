@@ -55,5 +55,14 @@ func (CacheEntry) Indexes() []ent.Index {
 		index.Fields("key", "version").StorageKey("idx_cache_entries_key_version"),
 		index.Fields("scope").StorageKey("idx_cache_entries_scope"),
 		index.Fields("repoId").StorageKey("idx_cache_entries_repoId"),
+		index.Fields("repoId", "scope", "version", "key").
+			StorageKey("idx_cache_entries_repo_scope_version_key").
+			Annotations(
+				entsql.PrefixColumn("repoId", 64),
+				entsql.PrefixColumn("scope", 191),
+				entsql.PrefixColumn("version", 64),
+				entsql.PrefixColumn("key", 191),
+				entsql.OpClassColumn("key", "text_pattern_ops"),
+			),
 	}
 }

@@ -134,6 +134,7 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "repo_id"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folder_name"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "last_part_uploaded_at"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_repo_scope_version_key"))
 }
 
 func TestUploadIDDoesNotRequireDatabaseIdentity(t *testing.T) {
@@ -182,12 +183,79 @@ func TestGeneratedSchemaMatchesOriginalIndexNames(t *testing.T) {
 		"idx_cache_entries_key_version",
 		"idx_cache_entries_scope",
 		"idx_cache_entries_repoId",
+		"idx_cache_entries_repo_scope_version_key",
 	}, indexNames(migrate.CacheEntriesTable.Indexes))
 	require.Equal(t, []string{
 		"idx_uploads_key_version",
 		"idx_uploads_scope",
 		"idx_uploads_repoId",
 	}, indexNames(migrate.UploadsTable.Indexes[:3]))
+}
+
+func TestCacheMatchIndexAnnotations(t *testing.T) {
+	matchIndex := migrate.CacheEntriesTable.Indexes[3]
+	require.Equal(t, []string{"repoId", "scope", "version", "key"}, columnNames(matchIndex.Columns))
+	require.Equal(t, map[string]uint{
+		"repoId":  64,
+		"scope":   191,
+		"version": 64,
+		"key":     191,
+	}, matchIndex.Annotation.PrefixColumns)
+	require.Equal(t, map[string]string{
+		"key": "text_pattern_ops",
+	}, matchIndex.Annotation.OpClassColumns)
+}
+
+func TestSQLiteCacheMatchQueryPlans(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "cache-server.db")
+
+	client, err := OpenAndMigrate(ctx, config.DBConfig{
+		Driver:     DriverSQLite,
+		SQLitePath: dbPath,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Close())
+
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, sqlDB.Close())
+	})
+
+	tests := []struct {
+		name  string
+		query string
+		args  []any
+		want  string
+	}{
+		{
+			name: "exact",
+			query: `EXPLAIN QUERY PLAN
+				SELECT id FROM cache_entries
+				WHERE repoId = ? AND scope = ? AND version = ? AND key = ?
+				LIMIT 1`,
+			args: []any{"123", "refs/heads/main", "version", "linux-cache"},
+			want: "idx_cache_entries_repo_scope_version_key (repoId=? AND scope=? AND version=? AND key=?)",
+		},
+		{
+			name: "restore prefix",
+			query: `EXPLAIN QUERY PLAN
+				SELECT id FROM cache_entries
+				WHERE repoId = ? AND scope = ? AND version = ? AND key LIKE ?
+				ORDER BY updatedAt DESC
+				LIMIT 1`,
+			args: []any{"123", "refs/heads/main", "version", "linux-%"},
+			want: "idx_cache_entries_repo_scope_version_key (repoId=? AND scope=? AND version=?)",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := sqliteQueryPlan(ctx, t, sqlDB, test.query, test.args...)
+			require.Contains(t, plan, test.want)
+		})
+	}
 }
 
 func TestStorageLocationDeleteCascadesCacheEntries(t *testing.T) {
@@ -286,4 +354,38 @@ func sqliteColumnExists(ctx context.Context, t *testing.T, db *sql.DB, table str
 	}
 	require.NoError(t, rows.Err())
 	return false
+}
+
+func sqliteIndexExists(ctx context.Context, t *testing.T, db *sql.DB, index string) bool {
+	t.Helper()
+
+	var name string
+	err := db.QueryRowContext(
+		ctx,
+		`select name from sqlite_master where type = 'index' and name = ?`,
+		index,
+	).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false
+	}
+	require.NoError(t, err)
+	return name == index
+}
+
+func sqliteQueryPlan(ctx context.Context, t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, rows.Err())
+	return strings.Join(details, "\n")
 }
