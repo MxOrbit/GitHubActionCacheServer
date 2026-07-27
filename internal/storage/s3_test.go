@@ -21,6 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Two sources require 2 HEADs, 1 multipart create, 2 part copies, and 1 multipart complete.
+const s3TwoSourceComposeRequestCount = 6
+
 func TestS3AdapterImplementsDirectDownload(t *testing.T) {
 	var _ Adapter = (*S3Adapter)(nil)
 	var _ DirectDownloadAdapter = (*S3Adapter)(nil)
@@ -268,7 +271,9 @@ func TestS3AdapterComposeObjectsUsesMultipartServerSideCopies(t *testing.T) {
 	adapter, err := newTestS3Adapter(t, fakeS3.URL)
 	require.NoError(t, err)
 
+	requestsBefore := fakeS3.requestCountValue()
 	require.NoError(t, adapter.ComposeObjects(ctx, "folder/merged", []string{"folder/parts/0", "folder/parts/1"}))
+	require.Equal(t, s3TwoSourceComposeRequestCount, fakeS3.requestCountValue()-requestsBefore)
 	require.Equal(t, []string{
 		"/cache-bucket/gh-actions-cache/folder/parts/0",
 		"/cache-bucket/gh-actions-cache/folder/parts/1",
@@ -397,6 +402,7 @@ type fakeS3Server struct {
 	objectSizes        map[string]int64
 
 	mu              sync.Mutex
+	requestCount    int
 	headBucket      int
 	listObjects     int
 	listPrefix      string
@@ -415,7 +421,7 @@ type fakeS3Server struct {
 	abortUpload     bool
 }
 
-func newFakeS3Server(t *testing.T, options fakeS3Options) *fakeS3Server {
+func newFakeS3Server(t testing.TB, options fakeS3Options) *fakeS3Server {
 	t.Helper()
 
 	if options.headBucketStatus == 0 {
@@ -442,6 +448,10 @@ func newFakeS3Server(t *testing.T, options fakeS3Options) *fakeS3Server {
 }
 
 func (s *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.requestCount++
+	s.mu.Unlock()
+
 	switch {
 	case r.Method == http.MethodHead && r.URL.Path == "/cache-bucket":
 		s.mu.Lock()
@@ -565,6 +575,12 @@ func (s *fakeS3Server) headBucketCount() int {
 	return s.headBucket
 }
 
+func (s *fakeS3Server) requestCountValue() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requestCount
+}
+
 func (s *fakeS3Server) listObjectsCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -671,13 +687,13 @@ func hasQueryKey(r *http.Request, key string) bool {
 	return ok
 }
 
-func newTestS3Adapter(t *testing.T, endpoint string) (*S3Adapter, error) {
+func newTestS3Adapter(t testing.TB, endpoint string) (*S3Adapter, error) {
 	t.Helper()
 
 	return newTestS3AdapterWithConfig(t, config.StorageConfig{S3EndpointURL: endpoint})
 }
 
-func newTestS3AdapterWithConfig(t *testing.T, cfg config.StorageConfig) (*S3Adapter, error) {
+func newTestS3AdapterWithConfig(t testing.TB, cfg config.StorageConfig) (*S3Adapter, error) {
 	t.Helper()
 
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")

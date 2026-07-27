@@ -122,6 +122,21 @@ lifecycle rule. It cleans up multipart uploads left incomplete if the server
 exits during composition; verify lifecycle support when using an S3-compatible
 endpoint.
 
+An AWS S3 lifecycle configuration can scope the rule to the cache prefix:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-cache-uploads",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "gh-actions-cache/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}
+```
+
 ### Cache Behavior
 
 | Variable                      | Default              | Description                                                                                                    |
@@ -200,6 +215,21 @@ E2E_S3_ENDPOINT_URL=http://127.0.0.1:9000 \
 E2E_S3_BUCKET=cache-test \
 go test ./e2e -run 'TestExternal(Postgres|MySQL|S3MinIO)SaveAndRestore' -count=1
 ```
+
+Targeted data-path benchmarks cover filesystem whole-cache upload/download,
+Azure block commit, ordered-parts versus merged downloads, concurrent runners,
+and S3 server-side composition:
+
+```sh
+go test ./internal/cache ./internal/storage -run '^$' -bench 'Benchmark(Filesystem|Azure|S3)' -benchmem -count=5
+```
+
+Streaming benchmarks run with 32 KiB, 128 KiB, 256 KiB, and 1 MiB buffers.
+The concurrent-runner benchmark also reports p95 latency and peak process RSS;
+the deterministic S3 protocol benchmark reports and asserts SDK HTTP requests
+per composition. When `E2E_S3_ENDPOINT_URL` and `E2E_S3_BUCKET` are configured,
+the same command also runs composition against that external S3-compatible
+backend to measure its wall-clock latency.
 
 The repository also contains a Go smoke test for the cache v2 HTTP protocol
 shape. Full runner-level compatibility should be tested with the patched
