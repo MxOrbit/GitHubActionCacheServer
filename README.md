@@ -69,11 +69,16 @@ external SQL database plus S3 storage.
 
 ### Authentication
 
-| Variable                        | Default                                                        | Description                                                          |
-|---------------------------------|----------------------------------------------------------------|----------------------------------------------------------------------|
-| `GITHUB_ACTIONS_TOKEN_ISSUER`   | `https://token.actions.githubusercontent.com`                  | Expected JWT issuer.                                                 |
-| `GITHUB_ACTIONS_TOKEN_JWKS_URL` | `https://token.actions.githubusercontent.com/.well-known/jwks` | JWKS URL for JWT verification.                                       |
-| `SKIP_TOKEN_VALIDATION`         | `false`                                                        | Parses JWTs without signature verification. Intended for tests only. |
+| Variable                        | Default                                       | Description                                                                            |
+|---------------------------------|-----------------------------------------------|----------------------------------------------------------------------------------------|
+| `ACTIONS_TOKEN_ISSUER`          | `https://token.actions.githubusercontent.com` | Expected JWT issuer. Set this to the GHES Actions token issuer for GHES deployments.   |
+| `GITHUB_ACTIONS_TOKEN_ISSUER`   | empty                                         | Legacy alias for `ACTIONS_TOKEN_ISSUER`; ignored when the canonical variable is set.   |
+| `GITHUB_ACTIONS_TOKEN_JWKS_URL` | derived from the effective issuer             | Explicit JWKS URL override for deployments whose keys use a nonstandard URL.           |
+| `SKIP_TOKEN_VALIDATION`         | `false`                                       | Parses JWTs without signature verification. Intended for tests only.                   |
+
+Unless explicitly overridden, the JWKS URL is
+`{effective issuer}/.well-known/jwks`. Trailing slashes are removed from the
+effective issuer before JWT validation and JWKS derivation.
 
 The token must contain `repository_id` and an `ac` claim with cache scopes. A
 scope with permission `>= 2` is required for saves; scopes with permission `>= 1`

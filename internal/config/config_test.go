@@ -12,6 +12,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ADDR", "")
 	t.Setenv("API_BASE_URL", "")
 	t.Setenv("DEFAULT_ACTIONS_RESULTS_URL", "")
+	t.Setenv("ACTIONS_TOKEN_ISSUER", "")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_ISSUER", "")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_JWKS_URL", "")
 	t.Setenv("SKIP_TOKEN_VALIDATION", "")
@@ -43,7 +44,7 @@ func TestLoadDefaults(t *testing.T) {
 	require.Empty(t, cfg.Server.APIBaseURL)
 	require.Equal(t, DefaultActionsResultsURL, cfg.Server.DefaultActionsResultsURL)
 	require.Equal(t, DefaultTokenIssuer, cfg.Auth.TokenIssuer)
-	require.Equal(t, DefaultTokenJWKSURL, cfg.Auth.TokenJWKSURL)
+	require.Equal(t, DefaultTokenIssuer+"/.well-known/jwks", cfg.Auth.TokenJWKSURL)
 	require.False(t, cfg.Auth.SkipTokenValidation)
 	require.Equal(t, "sqlite", cfg.DB.Driver)
 	require.Equal(t, ".data/sqlite.db", cfg.DB.SQLitePath)
@@ -69,7 +70,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ADDR", ":8080")
 	t.Setenv("API_BASE_URL", "https://cache.example")
 	t.Setenv("DEFAULT_ACTIONS_RESULTS_URL", "https://results.example")
-	t.Setenv("GITHUB_ACTIONS_TOKEN_ISSUER", "https://issuer.example")
+	t.Setenv("ACTIONS_TOKEN_ISSUER", "https://issuer.example")
+	t.Setenv("GITHUB_ACTIONS_TOKEN_ISSUER", "https://legacy-issuer.example")
 	t.Setenv("GITHUB_ACTIONS_TOKEN_JWKS_URL", "https://issuer.example/.well-known/jwks")
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	t.Setenv("DB_DRIVER", "postgres")
@@ -119,6 +121,63 @@ func TestLoadFromEnv(t *testing.T) {
 	require.True(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 30, cfg.Cleanup.CacheOlderThanDays)
 	require.True(t, cfg.Debug)
+}
+
+func TestLoadTokenIssuerConfiguration(t *testing.T) {
+	tests := []struct {
+		name         string
+		issuer       string
+		legacyIssuer string
+		jwksURL      string
+		wantIssuer   string
+		wantJWKSURL  string
+	}{
+		{
+			name:        "defaults",
+			wantIssuer:  DefaultTokenIssuer,
+			wantJWKSURL: DefaultTokenIssuer + "/.well-known/jwks",
+		},
+		{
+			name:        "canonical issuer derives JWKS and trims trailing slashes",
+			issuer:      "https://ghes.example///",
+			wantIssuer:  "https://ghes.example",
+			wantJWKSURL: "https://ghes.example/.well-known/jwks",
+		},
+		{
+			name:         "legacy issuer derives JWKS",
+			legacyIssuer: "https://legacy-ghes.example/",
+			wantIssuer:   "https://legacy-ghes.example",
+			wantJWKSURL:  "https://legacy-ghes.example/.well-known/jwks",
+		},
+		{
+			name:         "canonical issuer takes precedence over legacy issuer",
+			issuer:       "https://canonical.example",
+			legacyIssuer: "https://legacy.example",
+			wantIssuer:   "https://canonical.example",
+			wantJWKSURL:  "https://canonical.example/.well-known/jwks",
+		},
+		{
+			name:         "explicit JWKS URL overrides derived URL",
+			issuer:       "https://ghes.example/",
+			legacyIssuer: "https://legacy.example",
+			jwksURL:      "https://keys.example/custom-jwks",
+			wantIssuer:   "https://ghes.example",
+			wantJWKSURL:  "https://keys.example/custom-jwks",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ACTIONS_TOKEN_ISSUER", tt.issuer)
+			t.Setenv("GITHUB_ACTIONS_TOKEN_ISSUER", tt.legacyIssuer)
+			t.Setenv("GITHUB_ACTIONS_TOKEN_JWKS_URL", tt.jwksURL)
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantIssuer, cfg.Auth.TokenIssuer)
+			require.Equal(t, tt.wantJWKSURL, cfg.Auth.TokenJWKSURL)
+		})
+	}
 }
 
 func TestLoadPreservesS3UploadPartSizeBelowMinimumForValidation(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/tools"
@@ -14,7 +15,6 @@ const (
 	DefaultAddr              = ":3000"
 	DefaultActionsResultsURL = "https://results-receiver.actions.githubusercontent.com"
 	DefaultTokenIssuer       = "https://token.actions.githubusercontent.com"
-	DefaultTokenJWKSURL      = "https://token.actions.githubusercontent.com/.well-known/jwks"
 
 	MinS3UploadPartSizeBytes       = 5 * 1024 * 1024
 	DefaultS3KeyPrefix             = "gh-actions-cache"
@@ -102,6 +102,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	tokenIssuer := strings.TrimRight(
+		tools.EnvOrDefault(
+			"ACTIONS_TOKEN_ISSUER",
+			tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_ISSUER", DefaultTokenIssuer),
+		),
+		"/",
+	)
+	tokenJWKSURL := tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_JWKS_URL", tokenIssuer+"/.well-known/jwks")
 
 	return Config{
 		Server: ServerConfig{
@@ -110,8 +118,8 @@ func Load() (Config, error) {
 			DefaultActionsResultsURL: tools.EnvOrDefault("DEFAULT_ACTIONS_RESULTS_URL", DefaultActionsResultsURL),
 		},
 		Auth: AuthConfig{
-			TokenIssuer:         tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_ISSUER", DefaultTokenIssuer),
-			TokenJWKSURL:        tools.EnvOrDefault("GITHUB_ACTIONS_TOKEN_JWKS_URL", DefaultTokenJWKSURL),
+			TokenIssuer:         tokenIssuer,
+			TokenJWKSURL:        tokenJWKSURL,
 			SkipTokenValidation: tools.ParseBool(tools.EnvOrDefault("SKIP_TOKEN_VALIDATION", "false")),
 		},
 		DB: DBConfig{
