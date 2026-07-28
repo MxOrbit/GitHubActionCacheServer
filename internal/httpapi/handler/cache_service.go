@@ -1,13 +1,11 @@
 package handler
 
 import (
-	"net/http"
 	"strings"
 
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/baseurl"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
+	twirppb "github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/twirp"
 	"github.com/gin-gonic/gin"
 )
 
@@ -23,8 +21,9 @@ type getCacheEntryDownloadURLRequest struct {
 }
 
 type finalizeCacheEntryUploadRequest struct {
-	Key     string `json:"key"`
-	Version string `json:"version"`
+	Key       string `json:"key"`
+	SizeBytes int64  `json:"size_bytes"`
+	Version   string `json:"version"`
 }
 
 type keyedCacheRequest interface {
@@ -57,7 +56,7 @@ func (r finalizeCacheEntryUploadRequest) cacheVersion() string {
 }
 
 func (h *Handler) CreateCacheEntry(c *gin.Context) {
-	body, scope, ok := bindCacheRequest[createCacheEntryRequest](c)
+	body, scope, wireFormat, ok := bindCacheRequest(c, decodeCreateCacheEntryRequest)
 	if !ok {
 		return
 	}
@@ -69,11 +68,17 @@ func (h *Handler) CreateCacheEntry(c *gin.Context) {
 	}
 
 	base := baseurl.FromRequest(c.Request, h.cfg.Server.APIBaseURL)
-	response.JSON(c, response.CreateCacheEntry(base+"/devstoreaccount1/upload/"+formatInt64(upload.UploadID)))
+	uploadURL := base + "/devstoreaccount1/upload/" + formatInt64(upload.UploadID)
+	writeCacheResponse(
+		c,
+		wireFormat,
+		response.CreateCacheEntry(uploadURL),
+		&twirppb.CreateCacheEntryResponse{Ok: true, SignedUploadUrl: uploadURL},
+	)
 }
 
 func (h *Handler) GetCacheEntryDownloadURL(c *gin.Context) {
-	body, scope, ok := bindCacheRequest[getCacheEntryDownloadURLRequest](c)
+	body, scope, wireFormat, ok := bindCacheRequest(c, decodeGetCacheEntryDownloadURLRequest)
 	if !ok {
 		return
 	}
@@ -94,15 +99,29 @@ func (h *Handler) GetCacheEntryDownloadURL(c *gin.Context) {
 		return
 	}
 	if match == nil {
-		response.JSON(c, response.CacheMiss())
+		writeCacheResponse(
+			c,
+			wireFormat,
+			response.CacheMiss(),
+			&twirppb.GetCacheEntryDownloadURLResponse{Ok: false},
+		)
 		return
 	}
 
-	response.JSON(c, response.GetCacheEntryDownloadURL(match.DownloadURL, match.CacheEntry.Key))
+	writeCacheResponse(
+		c,
+		wireFormat,
+		response.GetCacheEntryDownloadURL(match.DownloadURL, match.CacheEntry.Key),
+		&twirppb.GetCacheEntryDownloadURLResponse{
+			Ok:                true,
+			SignedDownloadUrl: match.DownloadURL,
+			MatchedKey:        match.CacheEntry.Key,
+		},
+	)
 }
 
 func (h *Handler) FinalizeCacheEntryUpload(c *gin.Context) {
-	body, scope, ok := bindCacheRequest[finalizeCacheEntryUploadRequest](c)
+	body, scope, wireFormat, ok := bindCacheRequest(c, decodeFinalizeCacheEntryUploadRequest)
 	if !ok {
 		return
 	}
@@ -113,23 +132,12 @@ func (h *Handler) FinalizeCacheEntryUpload(c *gin.Context) {
 		return
 	}
 
-	response.JSON(c, response.FinalizeCacheEntryUpload(formatInt64(uploadID)))
-}
-
-func bindCacheRequest[T keyedCacheRequest](c *gin.Context) (T, auth.CacheScope, bool) {
-	var body T
-	if err := c.ShouldBindJSON(&body); err != nil || body.cacheKey() == "" || body.cacheVersion() == "" {
-		response.JSON(c, response.Error(http.StatusBadRequest, "invalid body"))
-		return body, auth.CacheScope{}, false
-	}
-
-	scope, ok := middleware.CacheScope(c)
-	if !ok {
-		response.JSON(c, response.Error(http.StatusUnauthorized, "cache scope missing"))
-		return body, auth.CacheScope{}, false
-	}
-
-	return body, scope, true
+	writeCacheResponse(
+		c,
+		wireFormat,
+		response.FinalizeCacheEntryUpload(formatInt64(uploadID)),
+		&twirppb.FinalizeCacheEntryUploadResponse{Ok: true, EntryId: uploadID},
+	)
 }
 
 func nonBlankStrings(values []string) []string {
