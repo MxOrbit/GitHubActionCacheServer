@@ -143,6 +143,7 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folder_name"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "last_part_uploaded_at"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_repo_scope_version_key"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_location_updated_at"))
 }
 
 func TestUploadIDDoesNotRequireDatabaseIdentity(t *testing.T) {
@@ -195,6 +196,7 @@ func TestGeneratedSchemaMatchesOriginalIndexNames(t *testing.T) {
 		"idx_cache_entries_scope",
 		"idx_cache_entries_repoId",
 		"idx_cache_entries_repo_scope_version_key",
+		"idx_cache_entries_location_updated_at",
 	}, indexNames(migrate.CacheEntriesTable.Indexes))
 	require.Equal(t, []string{
 		"idx_uploads_key_version",
@@ -267,6 +269,30 @@ func TestSQLiteCacheMatchQueryPlans(t *testing.T) {
 			require.Contains(t, plan, test.want)
 		})
 	}
+}
+
+func TestSQLiteRetentionLookupUsesLocationUpdatedAtIndex(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "cache-server.db")
+
+	client, err := OpenAndMigrate(ctx, config.DBConfig{
+		Driver:     DriverSQLite,
+		SQLitePath: dbPath,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Close())
+
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, sqlDB.Close())
+	})
+
+	plan := sqliteQueryPlan(ctx, t, sqlDB, `EXPLAIN QUERY PLAN
+		SELECT id FROM cache_entries
+		WHERE locationId = ? AND updatedAt >= ?
+		LIMIT 1`, "location-id", int64(123))
+	require.Contains(t, plan, "idx_cache_entries_location_updated_at (locationId=? AND updatedAt>?)")
 }
 
 func TestStorageLocationDeleteCascadesCacheEntries(t *testing.T) {

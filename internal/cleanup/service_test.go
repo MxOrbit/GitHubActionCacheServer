@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
@@ -116,10 +118,10 @@ func TestStorageDeletionRetryBackoff(t *testing.T) {
 
 func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
-	now := time.Now()
+	now := time.Now().Truncate(time.Millisecond)
 	lifecycle := storagelifecycle.NewWithOptions(client, storagelifecycle.Options{Now: func() time.Time { return now }})
-	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}, Lifecycle: lifecycle})
-	old := time.Now().Add(-31 * 24 * time.Hour).UnixMilli()
+	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}, Lifecycle: lifecycle, Now: func() time.Time { return now }})
+	old := now.Add(-31 * 24 * time.Hour).UnixMilli()
 
 	require.NoError(t, filesystem.UploadStream(ctx, "expired/parts/0", bytes.NewBufferString("data")))
 	location := client.StorageLocation.Create().
@@ -134,7 +136,7 @@ func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
 		SetVersion("version").
 		SetScope("scope").
 		SetRepoId("repo").
-		SetUpdatedAt(time.Now().UnixMilli()).
+		SetUpdatedAt(old).
 		SetLocation(location).
 		SaveX(ctx)
 
@@ -157,17 +159,93 @@ func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
 	require.Zero(t, locationCount)
 }
 
-func TestRunCacheEntriesFencesActiveReaderBeforePhysicalDeletion(t *testing.T) {
+func TestRunCacheEntriesUsesSavedAtForNeverDownloadedLocations(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
-	now := time.Now()
+	now := time.Now().Truncate(time.Millisecond)
+	cutoff := now.Add(-30 * 24 * time.Hour).UnixMilli()
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config:  config.CleanupConfig{CacheOlderThanDays: 30},
+		Now:     func() time.Time { return now },
+	})
+
+	oldLocation := createRetentionLocation(ctx, client, "never-downloaded-old", nil, cutoff-1)
+	recentLocation := createRetentionLocation(ctx, client, "never-downloaded-recent", nil, cutoff)
+
+	deleted, err := service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, oldLocation.ID).DeletionRequestedAt)
+	require.Zero(t, client.CacheEntry.Query().Where(cacheentry.LocationId(oldLocation.ID)).CountX(ctx))
+	require.Nil(t, client.StorageLocation.GetX(ctx, recentLocation.ID).DeletionRequestedAt)
+	require.Equal(t, 1, client.CacheEntry.Query().Where(cacheentry.LocationId(recentLocation.ID)).CountX(ctx))
+}
+
+func TestRunCacheEntriesRequiresEverySharedEntryToBeExpired(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	cutoff := now.Add(-30 * 24 * time.Hour).UnixMilli()
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config:  config.CleanupConfig{CacheOlderThanDays: 30},
+		Now:     func() time.Time { return now },
+	})
+	location := createRetentionLocation(ctx, client, "shared", nil, cutoff-1)
+	client.CacheEntry.Create().
+		SetID("shared-recent-entry").
+		SetKey("shared-recent-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(cutoff).
+		SetLocation(location).
+		SaveX(ctx)
+
+	deleted, err := service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.Equal(t, 2, client.CacheEntry.Query().Where(cacheentry.LocationId(location.ID)).CountX(ctx))
+
+	client.CacheEntry.UpdateOneID("shared-recent-entry").SetUpdatedAt(cutoff - 1).ExecX(ctx)
+	deleted, err = service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.Zero(t, client.CacheEntry.Query().Where(cacheentry.LocationId(location.ID)).CountX(ctx))
+}
+
+func TestRunCacheEntriesKeepsRecentlyDownloadedLocation(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	cutoff := now.Add(-30 * 24 * time.Hour).UnixMilli()
+	recent := cutoff
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config:  config.CleanupConfig{CacheOlderThanDays: 30},
+		Now:     func() time.Time { return now },
+	})
+	location := createRetentionLocation(ctx, client, "recently-downloaded", &recent, cutoff-1)
+
+	deleted, err := service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+}
+
+func TestRunCacheEntriesSkipsActiveReader(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
 	lifecycle := storagelifecycle.NewWithOptions(client, storagelifecycle.Options{Now: func() time.Time { return now }})
-	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}, Lifecycle: lifecycle})
+	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}, Lifecycle: lifecycle, Now: func() time.Time { return now }})
+	old := now.Add(-31 * 24 * time.Hour).UnixMilli()
 	require.NoError(t, filesystem.UploadStream(ctx, "active-reader/parts/0", bytes.NewBufferString("data")))
 	location := client.StorageLocation.Create().
 		SetID("active-reader-location").
 		SetFolderName("active-reader").
 		SetPartCount(1).
-		SetLastDownloadedAt(time.Now().Add(-31 * 24 * time.Hour).UnixMilli()).
+		SetLastDownloadedAt(old).
 		SaveX(ctx)
 	client.CacheEntry.Create().
 		SetID("active-reader-entry").
@@ -175,7 +253,7 @@ func TestRunCacheEntriesFencesActiveReaderBeforePhysicalDeletion(t *testing.T) {
 		SetVersion("version").
 		SetScope("scope").
 		SetRepoId("repo").
-		SetUpdatedAt(time.Now().UnixMilli()).
+		SetUpdatedAt(old).
 		SetLocation(location).
 		SaveX(ctx)
 	lease, err := lifecycle.AcquireReader(ctx, "active-reader-entry", storagelifecycle.AcquireReaderOptions{})
@@ -183,14 +261,20 @@ func TestRunCacheEntriesFencesActiveReaderBeforePhysicalDeletion(t *testing.T) {
 
 	deleted, err := service.RunCacheEntries(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, deleted)
-	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
-	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+	require.Zero(t, deleted)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
 	count, err := filesystem.CountFilesInFolder(ctx, "active-reader/parts")
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
 	require.NoError(t, lifecycle.ReleaseReader(ctx, lease.ID))
+	deleted, err = service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+
 	now = now.Add(storagelifecycle.DeletionGracePeriod + time.Second)
 	finalized, err := service.RunPendingStorageLocations(ctx)
 	require.NoError(t, err)
@@ -198,6 +282,45 @@ func TestRunCacheEntriesFencesActiveReaderBeforePhysicalDeletion(t *testing.T) {
 	count, err = filesystem.CountFilesInFolder(ctx, "active-reader/parts")
 	require.NoError(t, err)
 	require.Zero(t, count)
+}
+
+func TestRunCacheEntriesZeroDaysDisablesRetention(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	old := now.Add(-365 * 24 * time.Hour).UnixMilli()
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config:  config.CleanupConfig{CacheOlderThanDays: 0},
+		Now:     func() time.Time { return now },
+	})
+	location := createRetentionLocation(ctx, client, "cleanup-disabled", &old, old)
+
+	deleted, err := service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+	require.Equal(t, 1, client.CacheEntry.Query().Where(cacheentry.LocationId(location.ID)).CountX(ctx))
+}
+
+func TestRunCacheEntriesDrainsMoreThanOnePage(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	old := now.Add(-31 * 24 * time.Hour).UnixMilli()
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config:  config.CleanupConfig{CacheOlderThanDays: 30},
+		Now:     func() time.Time { return now },
+	})
+	for index := 0; index < itemsPerPage+1; index++ {
+		createRetentionLocation(ctx, client, fmt.Sprintf("paged-%02d", index), nil, old)
+	}
+
+	deleted, err := service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, itemsPerPage+1, deleted)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
 }
 
 func TestRunStorageLocationsDeletesOrphans(t *testing.T) {
@@ -281,4 +404,23 @@ type failingDeleteStorage struct {
 
 func (*failingDeleteStorage) DeleteFolder(context.Context, string) error {
 	return errors.New("injected delete failure")
+}
+
+func createRetentionLocation(ctx context.Context, client *ent.Client, id string, lastDownloadedAt *int64, updatedAt int64) *ent.StorageLocation {
+	location := client.StorageLocation.Create().
+		SetID(id + "-location").
+		SetFolderName(id + "-folder").
+		SetPartCount(1).
+		SetNillableLastDownloadedAt(lastDownloadedAt).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID(id + "-entry").
+		SetKey(id + "-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(updatedAt).
+		SetLocation(location).
+		SaveX(ctx)
+	return location
 }

@@ -8,9 +8,11 @@ import (
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
@@ -30,6 +32,7 @@ type Service struct {
 	storage   storage.Adapter
 	config    config.CleanupConfig
 	lifecycle *storagelifecycle.Service
+	now       func() time.Time
 }
 
 type Options struct {
@@ -37,18 +40,24 @@ type Options struct {
 	Storage   storage.Adapter
 	Config    config.CleanupConfig
 	Lifecycle *storagelifecycle.Service
+	Now       func() time.Time
 }
 
 func NewService(options Options) *Service {
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
 	lifecycle := options.Lifecycle
 	if lifecycle == nil {
-		lifecycle = storagelifecycle.New(options.DB)
+		lifecycle = storagelifecycle.NewWithOptions(options.DB, storagelifecycle.Options{Now: now})
 	}
 	return &Service{
 		db:        options.DB,
 		storage:   options.Storage,
 		config:    options.Config,
 		lifecycle: lifecycle,
+		now:       now,
 	}
 }
 
@@ -84,15 +93,36 @@ func (s *Service) RunUploads(ctx context.Context) (int, error) {
 }
 
 func (s *Service) RunCacheEntries(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-time.Duration(s.config.CacheOlderThanDays) * 24 * time.Hour).UnixMilli()
+	if s.config.CacheOlderThanDays == 0 {
+		return 0, nil
+	}
+
+	now := s.now()
+	cutoff := now.Add(-time.Duration(s.config.CacheOlderThanDays) * 24 * time.Hour).UnixMilli()
 	deleted := 0
+	cursor := ""
 
 	for {
-		locations, err := s.db.StorageLocation.Query().
-			Where(
+		predicates := []predicate.StorageLocation{
+			storagelocation.HasCacheEntries(),
+			storagelocation.Or(
+				storagelocation.LastDownloadedAtIsNil(),
 				storagelocation.LastDownloadedAtLT(cutoff),
-				storagelocation.DeletionRequestedAtIsNil(),
-			).
+			),
+			storagelocation.Not(
+				storagelocation.HasCacheEntriesWith(cacheentry.UpdatedAtGTE(cutoff)),
+			),
+			storagelocation.Not(
+				storagelocation.HasReaderLeasesWith(storagereaderlease.ExpiresAtGT(now.UnixMilli())),
+			),
+			storagelocation.DeletionRequestedAtIsNil(),
+		}
+		if cursor != "" {
+			predicates = append(predicates, storagelocation.IDGT(cursor))
+		}
+		locations, err := s.db.StorageLocation.Query().
+			Where(predicates...).
+			Order(storagelocation.ByID()).
 			Limit(itemsPerPage).
 			All(ctx)
 		if err != nil {
@@ -103,8 +133,16 @@ func (s *Service) RunCacheEntries(ctx context.Context) (int, error) {
 		}
 
 		for _, location := range locations {
-			if err := s.deleteStorageLocation(ctx, location, true); err != nil {
+			cursor = location.ID
+			result, err := s.lifecycle.RequestExpiredLocationDeletion(ctx, location.ID, cutoff)
+			if err != nil {
 				return deleted, err
+			}
+			if !result.Fenced {
+				continue
+			}
+			if result.Task != nil {
+				_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
 			}
 			deleted++
 		}

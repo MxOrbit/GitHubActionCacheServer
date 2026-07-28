@@ -127,6 +127,45 @@ func TestDirectReaderLeaseProtectsFullSignedURLTTL(t *testing.T) {
 	require.True(t, result.Finalized)
 }
 
+func TestExpiredLocationDeletionRechecksAccessAndReaderLease(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	cutoff := now.Add(-30 * 24 * time.Hour).UnixMilli()
+	old := cutoff - 1
+	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
+	location := createLifecycleEntry(ctx, client, "entry", "location", 1)
+	client.CacheEntry.UpdateOneID("entry").SetUpdatedAt(old).ExecX(ctx)
+	client.StorageLocation.UpdateOneID(location.ID).SetLastDownloadedAt(old).ExecX(ctx)
+
+	lease, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	result, err := service.RequestExpiredLocationDeletion(ctx, location.ID, cutoff)
+	require.NoError(t, err)
+	require.False(t, result.Fenced)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
+
+	client.CacheEntry.UpdateOneID("entry").SetUpdatedAt(cutoff).ExecX(ctx)
+	result, err = service.RequestExpiredLocationDeletion(ctx, location.ID, cutoff)
+	require.NoError(t, err)
+	require.False(t, result.Fenced)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+
+	client.CacheEntry.UpdateOneID("entry").SetUpdatedAt(old).ExecX(ctx)
+	client.StorageLocation.UpdateOneID(location.ID).SetLastDownloadedAt(cutoff).ExecX(ctx)
+	result, err = service.RequestExpiredLocationDeletion(ctx, location.ID, cutoff)
+	require.NoError(t, err)
+	require.False(t, result.Fenced)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+
+	client.StorageLocation.UpdateOneID(location.ID).SetLastDownloadedAt(old).ExecX(ctx)
+	result, err = service.RequestExpiredLocationDeletion(ctx, location.ID, cutoff)
+	require.NoError(t, err)
+	require.True(t, result.Fenced)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+}
+
 func TestPurgeDanglingCacheEntryIsConditionalAndFencesOnlyChildlessLocation(t *testing.T) {
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	service := New(client)

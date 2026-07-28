@@ -177,10 +177,14 @@ reader leases, so running old and new cleanup workers concurrently is unsafe.
 
 ### Cleanup
 
-| Variable                        | Default | Description                                                           |
-|---------------------------------|---------|-----------------------------------------------------------------------|
-| `DISABLE_CLEANUP_JOBS`          | `false` | Disables background cleanup jobs.                                     |
-| `CACHE_CLEANUP_OLDER_THAN_DAYS` | `90`    | Deletes cache storage locations not downloaded within this many days. |
+| Variable                        | Default | Description                                                                                  |
+|---------------------------------|---------|----------------------------------------------------------------------------------------------|
+| `DISABLE_CLEANUP_JOBS`          | `false` | Disables background cleanup jobs.                                                            |
+| `CACHE_CLEANUP_OLDER_THAN_DAYS` | `90`    | Deletes inactive cache storage locations after this many days. Set to `0` to disable expiry. |
+
+A location expires only when its last download and every referencing entry's
+save time predate the cutoff. Active reader leases defer expiry, and proxied or
+direct-URL access refreshes recency at most once every 10 minutes.
 
 Cleanup intervals:
 

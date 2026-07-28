@@ -399,8 +399,6 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadClo
 	}
 	location := lease.Location
 
-	s.touchStorageLocationIfStale(ctx, location)
-
 	var stream io.ReadCloser
 	if lease.Scope == storagereaderlease.ScopeStorage {
 		stream, err = s.openMerged(ctx, location)
@@ -412,6 +410,7 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadClo
 		s.releaseReaderLease(lease.ID)
 		return nil, err
 	}
+	s.touchStorageLocationIfStale(ctx, location)
 	return newLeasedReadCloser(stream, s.lifecycle, lease), nil
 }
 

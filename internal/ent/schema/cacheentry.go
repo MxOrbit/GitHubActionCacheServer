@@ -64,5 +64,7 @@ func (CacheEntry) Indexes() []ent.Index {
 				entsql.PrefixColumn("key", 191),
 				entsql.OpClassColumn("key", "text_pattern_ops"),
 			),
+		index.Fields("locationId", "updatedAt").
+			StorageKey("idx_cache_entries_location_updated_at"),
 	}
 }

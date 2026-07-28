@@ -327,6 +327,24 @@ func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(storagelifecycle.DirectDownloadLeaseDuration), time.UnixMilli(lease.ExpiresAt), time.Second)
 }
 
+func TestDirectDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &directURLStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	location := client.StorageLocation.GetX(ctx, entry.LocationId)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(location.FolderName, 0), bytes.NewBufferString("data")))
+	recent := time.Now().Add(-lastDownloadedAtUpdateInterval / 2).UnixMilli()
+	client.StorageLocation.UpdateOneID(location.ID).SetLastDownloadedAt(recent).ExecX(ctx)
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
+		return "fallback"
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, recent, *client.StorageLocation.GetX(ctx, location.ID).LastDownloadedAt)
+}
+
 func TestReplacementFencesOldLocationUntilLazyReaderCloses(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
@@ -404,6 +422,22 @@ func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
 	refreshed := client.StorageLocation.GetX(ctx, staleLocation.ID).LastDownloadedAt
 	require.NotNil(t, refreshed)
 	require.GreaterOrEqual(t, *refreshed, touchedAfter)
+}
+
+func TestFailedMergedDownloadDoesNotUpdateLastDownloadedAt(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: &downloadErrorStorage{Adapter: filesystem}})
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	stale := time.Now().Add(-lastDownloadedAtUpdateInterval - time.Minute).UnixMilli()
+	client.StorageLocation.UpdateOneID(location.ID).
+		SetMergedAt(time.Now().UnixMilli()).
+		SetLastDownloadedAt(stale).
+		ExecX(ctx)
+
+	_, err := service.Download(ctx, "entry-id")
+	require.ErrorIs(t, err, errInjectedStorageFailure)
+	require.Equal(t, stale, *client.StorageLocation.GetX(ctx, location.ID).LastDownloadedAt)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
 }
 
 func TestTouchStorageLocationDoesNotOverwriteNewerConcurrentTimestamp(t *testing.T) {
@@ -1029,6 +1063,14 @@ func (s *failDeleteStorage) DeleteFolder(context.Context, string) error {
 type directURLStorage struct {
 	storage.Adapter
 	objectName string
+}
+
+type downloadErrorStorage struct {
+	storage.Adapter
+}
+
+func (*downloadErrorStorage) CreateDownloadStream(context.Context, string) (io.ReadCloser, error) {
+	return nil, errInjectedStorageFailure
 }
 
 type objectExistsErrorStorage struct {

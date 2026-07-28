@@ -67,6 +67,11 @@ var (
 					},
 				},
 			},
+			{
+				Name:    "idx_cache_entries_location_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{CacheEntriesColumns[6], CacheEntriesColumns[5]},
+			},
 		},
 	}
 	// StorageDeletionsColumns holds the columns for the "storage_deletions" table.

@@ -87,4 +87,4 @@ jobs:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_EC2_METADATA_DISABLED: "true"
-        run: go test ./e2e -run 'TestExternal(Postgres|MySQL|S3MinIO)SaveAndRestore' -count=1
+        run: go test ./e2e -run 'TestExternal((Postgres|MySQL)(FilesystemSaveAndRestore|CleanupRetention)|S3MinIOSaveAndRestore)' -count=1

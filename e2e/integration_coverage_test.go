@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cleanup"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
@@ -56,6 +57,24 @@ func TestExternalMySQLFilesystemSaveAndRestore(t *testing.T) {
 	runSaveRestoreFlow(t, router, uniqueIntegrationCacheKey("mysql"), "mysql-cache-content")
 }
 
+func TestExternalPostgresCleanupRetention(t *testing.T) {
+	dbCfg, ok := externalPostgresConfig()
+	if !ok {
+		t.Skip("set E2E_POSTGRES_URL to run PostgreSQL integration coverage")
+	}
+
+	runExternalCleanupRetention(t, dbCfg)
+}
+
+func TestExternalMySQLCleanupRetention(t *testing.T) {
+	dbCfg, ok := externalMySQLConfig()
+	if !ok {
+		t.Skip("set E2E_MYSQL_HOST, E2E_MYSQL_DATABASE and E2E_MYSQL_USER to run MySQL integration coverage")
+	}
+
+	runExternalCleanupRetention(t, dbCfg)
+}
+
 func TestExternalS3MinIOSaveAndRestore(t *testing.T) {
 	storageCfg, ok := externalS3Config()
 	if !ok {
@@ -94,6 +113,93 @@ func runSaveRestoreFlow(t *testing.T, router http.Handler, key string, content s
 	})
 	require.Equal(t, key, matchResponse.MatchedKey)
 	require.Equal(t, content, downloadCache(t, router, parseSignedURL(t, matchResponse.SignedDownloadURL)))
+}
+
+func runExternalCleanupRetention(t *testing.T, dbCfg config.DBConfig) {
+	t.Helper()
+
+	ctx := context.Background()
+	client := openExternalDB(t, ctx, dbCfg)
+	filesystem := testutil.NewFilesystemAdapter(t)
+	now := time.Now().Truncate(time.Millisecond)
+	cutoff := now.Add(-30 * 24 * time.Hour).UnixMilli()
+	old := cutoff - 1
+	lifecycle := storagelifecycle.NewWithOptions(client, storagelifecycle.Options{Now: func() time.Time { return now }})
+
+	expired := createExternalRetentionLocation(ctx, client, "expired", nil, old)
+	recent := createExternalRetentionLocation(ctx, client, "recent", nil, cutoff)
+	shared := createExternalRetentionLocation(ctx, client, "shared", nil, old)
+	client.CacheEntry.Create().
+		SetID("shared-recent-entry").
+		SetKey("shared-recent-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(cutoff).
+		SetLocation(shared).
+		SaveX(ctx)
+	downloadedAt := cutoff
+	downloaded := createExternalRetentionLocation(ctx, client, "downloaded", &downloadedAt, old)
+	active := createExternalRetentionLocation(ctx, client, "active", nil, old)
+	lease, err := lifecycle.AcquireReader(ctx, "active-entry", storagelifecycle.AcquireReaderOptions{})
+	require.NoError(t, err)
+
+	disabled := cleanup.NewService(cleanup.Options{
+		DB:        client,
+		Storage:   filesystem,
+		Config:    config.CleanupConfig{CacheOlderThanDays: 0},
+		Lifecycle: lifecycle,
+		Now:       func() time.Time { return now },
+	})
+	deleted, err := disabled.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.Equal(t, 6, client.CacheEntry.Query().CountX(ctx))
+
+	service := cleanup.NewService(cleanup.Options{
+		DB:        client,
+		Storage:   filesystem,
+		Config:    config.CleanupConfig{CacheOlderThanDays: 30},
+		Lifecycle: lifecycle,
+		Now:       func() time.Time { return now },
+	})
+	deleted, err = service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, expired.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, recent.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, shared.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, downloaded.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, active.ID).DeletionRequestedAt)
+
+	client.CacheEntry.UpdateOneID("recent-entry").SetUpdatedAt(old).ExecX(ctx)
+	client.CacheEntry.UpdateOneID("shared-recent-entry").SetUpdatedAt(old).ExecX(ctx)
+	client.StorageLocation.UpdateOneID(downloaded.ID).SetLastDownloadedAt(old).ExecX(ctx)
+	require.NoError(t, lifecycle.ReleaseReader(ctx, lease.ID))
+
+	deleted, err = service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 4, deleted)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+}
+
+func createExternalRetentionLocation(ctx context.Context, client *ent.Client, id string, lastDownloadedAt *int64, updatedAt int64) *ent.StorageLocation {
+	location := client.StorageLocation.Create().
+		SetID(id + "-location").
+		SetFolderName(id + "-folder").
+		SetPartCount(1).
+		SetNillableLastDownloadedAt(lastDownloadedAt).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID(id + "-entry").
+		SetKey(id + "-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(updatedAt).
+		SetLocation(location).
+		SaveX(ctx)
+	return location
 }
 
 func openExternalDB(t *testing.T, ctx context.Context, cfg config.DBConfig) *ent.Client {

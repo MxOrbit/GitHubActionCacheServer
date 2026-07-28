@@ -337,16 +337,111 @@ func (s *Service) RequestLocationDeletion(ctx context.Context, locationID string
 	return result, nil
 }
 
-func (s *Service) FenceDetachedLocation(ctx context.Context, db *ent.Client, locationID string) (DeletionResult, error) {
-	affected, err := db.StorageLocation.Update().
-		Where(storagelocation.ID(locationID)).
+// RequestExpiredLocationDeletion atomically rechecks retention eligibility
+// after fencing concurrent readers and cache-entry replacement transactions.
+func (s *Service) RequestExpiredLocationDeletion(ctx context.Context, locationID string, cutoff int64) (DeletionResult, error) {
+	tx, err := s.db.Tx(ctx)
+	if err != nil {
+		return DeletionResult{}, fmt.Errorf("start expired storage location deletion transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	affected, err := tx.StorageLocation.Update().
+		Where(
+			storagelocation.ID(locationID),
+			storagelocation.DeletionRequestedAtIsNil(),
+		).
 		AddLeaseVersion(1).
 		Save(ctx)
 	if err != nil {
-		return DeletionResult{}, fmt.Errorf("lock storage location for deletion: %w", err)
+		return DeletionResult{}, fmt.Errorf("lock expired storage location for deletion: %w", err)
 	}
 	if affected == 0 {
+		if err := tx.Commit(); err != nil {
+			return DeletionResult{}, fmt.Errorf("commit skipped expired storage location deletion: %w", err)
+		}
+		committed = true
 		return DeletionResult{}, nil
+	}
+
+	location, err := tx.StorageLocation.Query().Where(storagelocation.ID(locationID)).Only(ctx)
+	if err != nil {
+		return DeletionResult{}, fmt.Errorf("query expired storage location: %w", err)
+	}
+	now := s.now().UnixMilli()
+	if location.LastDownloadedAt != nil && *location.LastDownloadedAt >= cutoff {
+		if err := tx.Commit(); err != nil {
+			return DeletionResult{}, fmt.Errorf("commit recently downloaded storage location check: %w", err)
+		}
+		committed = true
+		return DeletionResult{}, nil
+	}
+
+	hasEntries, err := tx.CacheEntry.Query().Where(cacheentry.LocationId(locationID)).Exist(ctx)
+	if err != nil {
+		return DeletionResult{}, fmt.Errorf("query retained cache entries: %w", err)
+	}
+	hasRecentEntry, err := tx.CacheEntry.Query().
+		Where(
+			cacheentry.LocationId(locationID),
+			cacheentry.UpdatedAtGTE(cutoff),
+		).
+		Exist(ctx)
+	if err != nil {
+		return DeletionResult{}, fmt.Errorf("query recently saved cache entries: %w", err)
+	}
+	hasActiveReader, err := tx.StorageReaderLease.Query().
+		Where(
+			storagereaderlease.StorageLocationId(locationID),
+			storagereaderlease.ExpiresAtGT(now),
+		).
+		Exist(ctx)
+	if err != nil {
+		return DeletionResult{}, fmt.Errorf("query active readers for retained storage location: %w", err)
+	}
+	if !hasEntries || hasRecentEntry || hasActiveReader {
+		if err := tx.Commit(); err != nil {
+			return DeletionResult{}, fmt.Errorf("commit retained storage location check: %w", err)
+		}
+		committed = true
+		return DeletionResult{}, nil
+	}
+
+	if _, err := tx.CacheEntry.Delete().Where(cacheentry.LocationId(locationID)).Exec(ctx); err != nil {
+		return DeletionResult{}, fmt.Errorf("delete expired cache entries: %w", err)
+	}
+	result, err := s.fenceDetachedLocation(ctx, tx.Client(), locationID, false)
+	if err != nil {
+		return DeletionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DeletionResult{}, fmt.Errorf("commit expired storage location deletion: %w", err)
+	}
+	committed = true
+	return result, nil
+}
+
+func (s *Service) FenceDetachedLocation(ctx context.Context, db *ent.Client, locationID string) (DeletionResult, error) {
+	return s.fenceDetachedLocation(ctx, db, locationID, true)
+}
+
+func (s *Service) fenceDetachedLocation(ctx context.Context, db *ent.Client, locationID string, lock bool) (DeletionResult, error) {
+	if lock {
+		affected, err := db.StorageLocation.Update().
+			Where(storagelocation.ID(locationID)).
+			AddLeaseVersion(1).
+			Save(ctx)
+		if err != nil {
+			return DeletionResult{}, fmt.Errorf("lock storage location for deletion: %w", err)
+		}
+		if affected == 0 {
+			return DeletionResult{}, nil
+		}
 	}
 
 	hasEntries, err := db.CacheEntry.Query().Where(cacheentry.LocationId(locationID)).Exist(ctx)
