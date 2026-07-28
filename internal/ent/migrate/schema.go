@@ -151,6 +151,7 @@ var (
 		{Name: "finishedPartUploadCount", Type: field.TypeInt, Default: 0},
 		{Name: "folderName", Type: field.TypeString, SchemaType: map[string]string{"mysql": "text", "postgres": "text", "sqlite3": "text"}},
 		{Name: "committedPartCount", Type: field.TypeInt, Nullable: true},
+		{Name: "tupleHash", Type: field.TypeString, Nullable: true, Size: 64, SchemaType: map[string]string{"mysql": "varchar(64)", "postgres": "text", "sqlite3": "text"}},
 	}
 	// UploadsTable holds the schema information for the "uploads" table.
 	UploadsTable = &schema.Table{
@@ -174,9 +175,9 @@ var (
 				Columns: []*schema.Column{UploadsColumns[4]},
 			},
 			{
-				Name:    "upload_key_version_scope_repoId",
+				Name:    "idx_uploads_tuple_hash",
 				Unique:  true,
-				Columns: []*schema.Column{UploadsColumns[1], UploadsColumns[2], UploadsColumns[3], UploadsColumns[4]},
+				Columns: []*schema.Column{UploadsColumns[11]},
 			},
 		},
 	}

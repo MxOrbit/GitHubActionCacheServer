@@ -3505,6 +3505,7 @@ type UploadMutation struct {
 	folderName                 *string
 	committedPartCount         *int
 	addcommittedPartCount      *int
+	tupleHash                  *string
 	clearedFields              map[string]struct{}
 	done                       bool
 	oldValue                   func(context.Context) (*Upload, error)
@@ -4103,6 +4104,55 @@ func (m *UploadMutation) ResetCommittedPartCount() {
 	delete(m.clearedFields, upload.FieldCommittedPartCount)
 }
 
+// SetTupleHash sets the "tupleHash" field.
+func (m *UploadMutation) SetTupleHash(s string) {
+	m.tupleHash = &s
+}
+
+// TupleHash returns the value of the "tupleHash" field in the mutation.
+func (m *UploadMutation) TupleHash() (r string, exists bool) {
+	v := m.tupleHash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTupleHash returns the old "tupleHash" field's value of the Upload entity.
+// If the Upload object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadMutation) OldTupleHash(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTupleHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTupleHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTupleHash: %w", err)
+	}
+	return oldValue.TupleHash, nil
+}
+
+// ClearTupleHash clears the value of the "tupleHash" field.
+func (m *UploadMutation) ClearTupleHash() {
+	m.tupleHash = nil
+	m.clearedFields[upload.FieldTupleHash] = struct{}{}
+}
+
+// TupleHashCleared returns if the "tupleHash" field was cleared in this mutation.
+func (m *UploadMutation) TupleHashCleared() bool {
+	_, ok := m.clearedFields[upload.FieldTupleHash]
+	return ok
+}
+
+// ResetTupleHash resets all changes to the "tupleHash" field.
+func (m *UploadMutation) ResetTupleHash() {
+	m.tupleHash = nil
+	delete(m.clearedFields, upload.FieldTupleHash)
+}
+
 // Where appends a list predicates to the UploadMutation builder.
 func (m *UploadMutation) Where(ps ...predicate.Upload) {
 	m.predicates = append(m.predicates, ps...)
@@ -4137,7 +4187,7 @@ func (m *UploadMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UploadMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 11)
 	if m.key != nil {
 		fields = append(fields, upload.FieldKey)
 	}
@@ -4168,6 +4218,9 @@ func (m *UploadMutation) Fields() []string {
 	if m.committedPartCount != nil {
 		fields = append(fields, upload.FieldCommittedPartCount)
 	}
+	if m.tupleHash != nil {
+		fields = append(fields, upload.FieldTupleHash)
+	}
 	return fields
 }
 
@@ -4196,6 +4249,8 @@ func (m *UploadMutation) Field(name string) (ent.Value, bool) {
 		return m.FolderName()
 	case upload.FieldCommittedPartCount:
 		return m.CommittedPartCount()
+	case upload.FieldTupleHash:
+		return m.TupleHash()
 	}
 	return nil, false
 }
@@ -4225,6 +4280,8 @@ func (m *UploadMutation) OldField(ctx context.Context, name string) (ent.Value, 
 		return m.OldFolderName(ctx)
 	case upload.FieldCommittedPartCount:
 		return m.OldCommittedPartCount(ctx)
+	case upload.FieldTupleHash:
+		return m.OldTupleHash(ctx)
 	}
 	return nil, fmt.Errorf("unknown Upload field %s", name)
 }
@@ -4303,6 +4360,13 @@ func (m *UploadMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCommittedPartCount(v)
+		return nil
+	case upload.FieldTupleHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTupleHash(v)
 		return nil
 	}
 	return fmt.Errorf("unknown Upload field %s", name)
@@ -4403,6 +4467,9 @@ func (m *UploadMutation) ClearedFields() []string {
 	if m.FieldCleared(upload.FieldCommittedPartCount) {
 		fields = append(fields, upload.FieldCommittedPartCount)
 	}
+	if m.FieldCleared(upload.FieldTupleHash) {
+		fields = append(fields, upload.FieldTupleHash)
+	}
 	return fields
 }
 
@@ -4422,6 +4489,9 @@ func (m *UploadMutation) ClearField(name string) error {
 		return nil
 	case upload.FieldCommittedPartCount:
 		m.ClearCommittedPartCount()
+		return nil
+	case upload.FieldTupleHash:
+		m.ClearTupleHash()
 		return nil
 	}
 	return fmt.Errorf("unknown Upload nullable field %s", name)
@@ -4460,6 +4530,9 @@ func (m *UploadMutation) ResetField(name string) error {
 		return nil
 	case upload.FieldCommittedPartCount:
 		m.ResetCommittedPartCount()
+		return nil
+	case upload.FieldTupleHash:
+		m.ResetTupleHash()
 		return nil
 	}
 	return fmt.Errorf("unknown Upload field %s", name)

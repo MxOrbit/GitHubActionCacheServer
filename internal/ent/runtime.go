@@ -210,4 +210,8 @@ func init() {
 	uploadDescCommittedPartCount := uploadFields[10].Descriptor()
 	// upload.CommittedPartCountValidator is a validator for the "committedPartCount" field. It is called by the builders before save.
 	upload.CommittedPartCountValidator = uploadDescCommittedPartCount.Validators[0].(func(int) error)
+	// uploadDescTupleHash is the schema descriptor for tupleHash field.
+	uploadDescTupleHash := uploadFields[11].Descriptor()
+	// upload.TupleHashValidator is a validator for the "tupleHash" field. It is called by the builders before save.
+	upload.TupleHashValidator = uploadDescTupleHash.Validators[0].(func(string) error)
 }

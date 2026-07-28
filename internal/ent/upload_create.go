@@ -111,6 +111,20 @@ func (_c *UploadCreate) SetNillableCommittedPartCount(v *int) *UploadCreate {
 	return _c
 }
 
+// SetTupleHash sets the "tupleHash" field.
+func (_c *UploadCreate) SetTupleHash(v string) *UploadCreate {
+	_c.mutation.SetTupleHash(v)
+	return _c
+}
+
+// SetNillableTupleHash sets the "tupleHash" field if the given value is not nil.
+func (_c *UploadCreate) SetNillableTupleHash(v *string) *UploadCreate {
+	if v != nil {
+		_c.SetTupleHash(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UploadCreate) SetID(v int64) *UploadCreate {
 	_c.mutation.SetID(v)
@@ -228,6 +242,11 @@ func (_c *UploadCreate) check() error {
 			return &ValidationError{Name: "committedPartCount", err: fmt.Errorf(`ent: validator failed for field "Upload.committedPartCount": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.TupleHash(); ok {
+		if err := upload.TupleHashValidator(v); err != nil {
+			return &ValidationError{Name: "tupleHash", err: fmt.Errorf(`ent: validator failed for field "Upload.tupleHash": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -299,6 +318,10 @@ func (_c *UploadCreate) createSpec() (*Upload, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.CommittedPartCount(); ok {
 		_spec.SetField(upload.FieldCommittedPartCount, field.TypeInt, value)
 		_node.CommittedPartCount = &value
+	}
+	if value, ok := _c.mutation.TupleHash(); ok {
+		_spec.SetField(upload.FieldTupleHash, field.TypeString, value)
+		_node.TupleHash = &value
 	}
 	return _node, _spec
 }

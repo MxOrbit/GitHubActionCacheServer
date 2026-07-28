@@ -214,6 +214,26 @@ func (_u *UploadUpdate) ClearCommittedPartCount() *UploadUpdate {
 	return _u
 }
 
+// SetTupleHash sets the "tupleHash" field.
+func (_u *UploadUpdate) SetTupleHash(v string) *UploadUpdate {
+	_u.mutation.SetTupleHash(v)
+	return _u
+}
+
+// SetNillableTupleHash sets the "tupleHash" field if the given value is not nil.
+func (_u *UploadUpdate) SetNillableTupleHash(v *string) *UploadUpdate {
+	if v != nil {
+		_u.SetTupleHash(*v)
+	}
+	return _u
+}
+
+// ClearTupleHash clears the value of the "tupleHash" field.
+func (_u *UploadUpdate) ClearTupleHash() *UploadUpdate {
+	_u.mutation.ClearTupleHash()
+	return _u
+}
+
 // Mutation returns the UploadMutation object of the builder.
 func (_u *UploadUpdate) Mutation() *UploadMutation {
 	return _u.mutation
@@ -288,6 +308,11 @@ func (_u *UploadUpdate) check() error {
 			return &ValidationError{Name: "committedPartCount", err: fmt.Errorf(`ent: validator failed for field "Upload.committedPartCount": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.TupleHash(); ok {
+		if err := upload.TupleHashValidator(v); err != nil {
+			return &ValidationError{Name: "tupleHash", err: fmt.Errorf(`ent: validator failed for field "Upload.tupleHash": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -353,6 +378,12 @@ func (_u *UploadUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.CommittedPartCountCleared() {
 		_spec.ClearField(upload.FieldCommittedPartCount, field.TypeInt)
+	}
+	if value, ok := _u.mutation.TupleHash(); ok {
+		_spec.SetField(upload.FieldTupleHash, field.TypeString, value)
+	}
+	if _u.mutation.TupleHashCleared() {
+		_spec.ClearField(upload.FieldTupleHash, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -561,6 +592,26 @@ func (_u *UploadUpdateOne) ClearCommittedPartCount() *UploadUpdateOne {
 	return _u
 }
 
+// SetTupleHash sets the "tupleHash" field.
+func (_u *UploadUpdateOne) SetTupleHash(v string) *UploadUpdateOne {
+	_u.mutation.SetTupleHash(v)
+	return _u
+}
+
+// SetNillableTupleHash sets the "tupleHash" field if the given value is not nil.
+func (_u *UploadUpdateOne) SetNillableTupleHash(v *string) *UploadUpdateOne {
+	if v != nil {
+		_u.SetTupleHash(*v)
+	}
+	return _u
+}
+
+// ClearTupleHash clears the value of the "tupleHash" field.
+func (_u *UploadUpdateOne) ClearTupleHash() *UploadUpdateOne {
+	_u.mutation.ClearTupleHash()
+	return _u
+}
+
 // Mutation returns the UploadMutation object of the builder.
 func (_u *UploadUpdateOne) Mutation() *UploadMutation {
 	return _u.mutation
@@ -648,6 +699,11 @@ func (_u *UploadUpdateOne) check() error {
 			return &ValidationError{Name: "committedPartCount", err: fmt.Errorf(`ent: validator failed for field "Upload.committedPartCount": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.TupleHash(); ok {
+		if err := upload.TupleHashValidator(v); err != nil {
+			return &ValidationError{Name: "tupleHash", err: fmt.Errorf(`ent: validator failed for field "Upload.tupleHash": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -730,6 +786,12 @@ func (_u *UploadUpdateOne) sqlSave(ctx context.Context) (_node *Upload, err erro
 	}
 	if _u.mutation.CommittedPartCountCleared() {
 		_spec.ClearField(upload.FieldCommittedPartCount, field.TypeInt)
+	}
+	if value, ok := _u.mutation.TupleHash(); ok {
+		_spec.SetField(upload.FieldTupleHash, field.TypeString, value)
+	}
+	if _u.mutation.TupleHashCleared() {
+		_spec.ClearField(upload.FieldTupleHash, field.TypeString)
 	}
 	_node = &Upload{config: _u.config}
 	_spec.Assign = _node.assignValues

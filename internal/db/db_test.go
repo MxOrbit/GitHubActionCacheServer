@@ -103,6 +103,12 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 		_, err := sqlDB.ExecContext(ctx, stmt)
 		require.NoError(t, err)
 	}
+	_, err = sqlDB.ExecContext(ctx, `insert into uploads (
+		id, key, version, createdAt, folderName, scope, repoId
+	) values
+		(1, 'legacy-key', 'version', 1, 'legacy-1', 'scope', 'repo'),
+		(2, 'legacy-key', 'version', 2, 'legacy-2', 'scope', 'repo')`)
+	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
 
 	client, err := OpenAndMigrate(ctx, config.DBConfig{
@@ -126,6 +132,10 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "mergeLeaseToken"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "lastPartUploadedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "committedPartCount"))
+	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "tupleHash"))
+	var legacyUploads int
+	require.NoError(t, sqlDB.QueryRowContext(ctx, `select count(*) from uploads where tupleHash is null`).Scan(&legacyUploads))
+	require.Equal(t, 2, legacyUploads)
 	var storageDeletionsTable string
 	require.NoError(t, sqlDB.QueryRowContext(
 		ctx,
@@ -144,6 +154,7 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "last_part_uploaded_at"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_repo_scope_version_key"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_location_updated_at"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_uploads_tuple_hash"))
 }
 
 func TestUploadIDDoesNotRequireDatabaseIdentity(t *testing.T) {
@@ -168,7 +179,7 @@ func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 		"id", "scope", "expiresAt", "storageLocationId",
 	}, columnNames(migrate.StorageReaderLeasesColumns))
 	require.Equal(t, []string{
-		"id", "key", "version", "scope", "repoId", "createdAt", "lastPartUploadedAt", "startedPartUploadCount", "finishedPartUploadCount", "folderName", "committedPartCount",
+		"id", "key", "version", "scope", "repoId", "createdAt", "lastPartUploadedAt", "startedPartUploadCount", "finishedPartUploadCount", "folderName", "committedPartCount", "tupleHash",
 	}, columnNames(migrate.UploadsColumns))
 }
 
@@ -202,7 +213,15 @@ func TestGeneratedSchemaMatchesOriginalIndexNames(t *testing.T) {
 		"idx_uploads_key_version",
 		"idx_uploads_scope",
 		"idx_uploads_repoId",
-	}, indexNames(migrate.UploadsTable.Indexes[:3]))
+		"idx_uploads_tuple_hash",
+	}, indexNames(migrate.UploadsTable.Indexes))
+}
+
+func TestMySQLUploadUniqueIndexUsesFixedLengthTupleHash(t *testing.T) {
+	uniqueIndex := migrate.UploadsTable.Indexes[3]
+	require.True(t, uniqueIndex.Unique)
+	require.Equal(t, []string{"tupleHash"}, columnNames(uniqueIndex.Columns))
+	require.Equal(t, "varchar(64)", migrate.UploadsColumns[11].SchemaType[dialect.MySQL])
 }
 
 func TestCacheMatchIndexAnnotations(t *testing.T) {

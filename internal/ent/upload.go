@@ -36,7 +36,9 @@ type Upload struct {
 	FolderName string `json:"folderName,omitempty"`
 	// CommittedPartCount holds the value of the "committedPartCount" field.
 	CommittedPartCount *int `json:"committedPartCount,omitempty"`
-	selectValues       sql.SelectValues
+	// TupleHash holds the value of the "tupleHash" field.
+	TupleHash    *string `json:"tupleHash,omitempty"`
+	selectValues sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -46,7 +48,7 @@ func (*Upload) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case upload.FieldID, upload.FieldCreatedAt, upload.FieldLastPartUploadedAt, upload.FieldStartedPartUploadCount, upload.FieldFinishedPartUploadCount, upload.FieldCommittedPartCount:
 			values[i] = new(sql.NullInt64)
-		case upload.FieldKey, upload.FieldVersion, upload.FieldScope, upload.FieldRepoId, upload.FieldFolderName:
+		case upload.FieldKey, upload.FieldVersion, upload.FieldScope, upload.FieldRepoId, upload.FieldFolderName, upload.FieldTupleHash:
 			values[i] = new(sql.NullString)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -131,6 +133,13 @@ func (_m *Upload) assignValues(columns []string, values []any) error {
 				_m.CommittedPartCount = new(int)
 				*_m.CommittedPartCount = int(value.Int64)
 			}
+		case upload.FieldTupleHash:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field tupleHash", values[i])
+			} else if value.Valid {
+				_m.TupleHash = new(string)
+				*_m.TupleHash = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -199,6 +208,11 @@ func (_m *Upload) String() string {
 	if v := _m.CommittedPartCount; v != nil {
 		builder.WriteString("committedPartCount=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.TupleHash; v != nil {
+		builder.WriteString("tupleHash=")
+		builder.WriteString(*v)
 	}
 	builder.WriteByte(')')
 	return builder.String()

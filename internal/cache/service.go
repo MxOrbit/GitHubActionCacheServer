@@ -3,8 +3,10 @@ package cache
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -440,6 +442,7 @@ func ReadScopesByPermission(scope auth.CacheScope) []string {
 }
 
 func (s *Service) createUploadRecord(ctx context.Context, key, version, scope, repoID string) (int64, error) {
+	tupleHash := uploadTupleHash(key, version, scope, repoID)
 	for i := 0; i < 5; i++ {
 		id, err := randomPositiveInt64()
 		if err != nil {
@@ -455,6 +458,7 @@ func (s *Service) createUploadRecord(ctx context.Context, key, version, scope, r
 			SetVersion(version).
 			SetScope(scope).
 			SetRepoId(repoID).
+			SetTupleHash(tupleHash).
 			Save(ctx)
 		if err == nil {
 			return id, nil
@@ -542,6 +546,17 @@ func uploadTuple(key, version, scope, repoID string) []entpredicate.Upload {
 		upload.Scope(scope),
 		upload.RepoId(repoID),
 	}
+}
+
+func uploadTupleHash(key, version, scope, repoID string) string {
+	hash := sha256.New()
+	var encodedLength [8]byte
+	for _, value := range [...]string{key, version, scope, repoID} {
+		binary.BigEndian.PutUint64(encodedLength[:], uint64(len(value)))
+		_, _ = hash.Write(encodedLength[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func (s *Service) isUploadAbandoned(currentUpload *ent.Upload) bool {

@@ -31,6 +31,8 @@ const (
 	FieldFolderName = "folderName"
 	// FieldCommittedPartCount holds the string denoting the committedpartcount field in the database.
 	FieldCommittedPartCount = "committedPartCount"
+	// FieldTupleHash holds the string denoting the tuplehash field in the database.
+	FieldTupleHash = "tupleHash"
 	// Table holds the table name of the upload in the database.
 	Table = "uploads"
 )
@@ -48,6 +50,7 @@ var Columns = []string{
 	FieldFinishedPartUploadCount,
 	FieldFolderName,
 	FieldCommittedPartCount,
+	FieldTupleHash,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -81,6 +84,8 @@ var (
 	FolderNameValidator func(string) error
 	// CommittedPartCountValidator is a validator for the "committedPartCount" field. It is called by the builders before save.
 	CommittedPartCountValidator func(int) error
+	// TupleHashValidator is a validator for the "tupleHash" field. It is called by the builders before save.
+	TupleHashValidator func(string) error
 )
 
 // OrderOption defines the ordering options for the Upload queries.
@@ -139,4 +144,9 @@ func ByFolderName(opts ...sql.OrderTermOption) OrderOption {
 // ByCommittedPartCount orders the results by the committedPartCount field.
 func ByCommittedPartCount(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCommittedPartCount, opts...).ToFunc()
+}
+
+// ByTupleHash orders the results by the tupleHash field.
+func ByTupleHash(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTupleHash, opts...).ToFunc()
 }

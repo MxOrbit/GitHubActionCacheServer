@@ -3,6 +3,7 @@ package cache
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -303,6 +304,18 @@ func TestCreateUploadReservationIsAtomic(t *testing.T) {
 	count, err := client.Upload.Query().Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
+	currentUpload := client.Upload.Query().OnlyX(ctx)
+	require.NotNil(t, currentUpload.TupleHash)
+	require.Equal(t, uploadTupleHash("key", "version", scope.Scopes[0].Scope, scope.RepoID), *currentUpload.TupleHash)
+}
+
+func TestUploadTupleHashPreservesFieldBoundaries(t *testing.T) {
+	first := uploadTupleHash("ab", "c", "scope", "repo")
+	second := uploadTupleHash("a", "bc", "scope", "repo")
+
+	require.Len(t, first, sha256.Size*2)
+	require.Equal(t, first, uploadTupleHash("ab", "c", "scope", "repo"))
+	require.NotEqual(t, first, second)
 }
 
 func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {

@@ -102,6 +102,11 @@ func CommittedPartCount(v int) predicate.Upload {
 	return predicate.Upload(sql.FieldEQ(FieldCommittedPartCount, v))
 }
 
+// TupleHash applies equality check predicate on the "tupleHash" field. It's identical to TupleHashEQ.
+func TupleHash(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldEQ(FieldTupleHash, v))
+}
+
 // KeyEQ applies the EQ predicate on the "key" field.
 func KeyEQ(v string) predicate.Upload {
 	return predicate.Upload(sql.FieldEQ(FieldKey, v))
@@ -645,6 +650,81 @@ func CommittedPartCountIsNil() predicate.Upload {
 // CommittedPartCountNotNil applies the NotNil predicate on the "committedPartCount" field.
 func CommittedPartCountNotNil() predicate.Upload {
 	return predicate.Upload(sql.FieldNotNull(FieldCommittedPartCount))
+}
+
+// TupleHashEQ applies the EQ predicate on the "tupleHash" field.
+func TupleHashEQ(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldEQ(FieldTupleHash, v))
+}
+
+// TupleHashNEQ applies the NEQ predicate on the "tupleHash" field.
+func TupleHashNEQ(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldNEQ(FieldTupleHash, v))
+}
+
+// TupleHashIn applies the In predicate on the "tupleHash" field.
+func TupleHashIn(vs ...string) predicate.Upload {
+	return predicate.Upload(sql.FieldIn(FieldTupleHash, vs...))
+}
+
+// TupleHashNotIn applies the NotIn predicate on the "tupleHash" field.
+func TupleHashNotIn(vs ...string) predicate.Upload {
+	return predicate.Upload(sql.FieldNotIn(FieldTupleHash, vs...))
+}
+
+// TupleHashGT applies the GT predicate on the "tupleHash" field.
+func TupleHashGT(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldGT(FieldTupleHash, v))
+}
+
+// TupleHashGTE applies the GTE predicate on the "tupleHash" field.
+func TupleHashGTE(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldGTE(FieldTupleHash, v))
+}
+
+// TupleHashLT applies the LT predicate on the "tupleHash" field.
+func TupleHashLT(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldLT(FieldTupleHash, v))
+}
+
+// TupleHashLTE applies the LTE predicate on the "tupleHash" field.
+func TupleHashLTE(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldLTE(FieldTupleHash, v))
+}
+
+// TupleHashContains applies the Contains predicate on the "tupleHash" field.
+func TupleHashContains(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldContains(FieldTupleHash, v))
+}
+
+// TupleHashHasPrefix applies the HasPrefix predicate on the "tupleHash" field.
+func TupleHashHasPrefix(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldHasPrefix(FieldTupleHash, v))
+}
+
+// TupleHashHasSuffix applies the HasSuffix predicate on the "tupleHash" field.
+func TupleHashHasSuffix(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldHasSuffix(FieldTupleHash, v))
+}
+
+// TupleHashIsNil applies the IsNil predicate on the "tupleHash" field.
+func TupleHashIsNil() predicate.Upload {
+	return predicate.Upload(sql.FieldIsNull(FieldTupleHash))
+}
+
+// TupleHashNotNil applies the NotNil predicate on the "tupleHash" field.
+func TupleHashNotNil() predicate.Upload {
+	return predicate.Upload(sql.FieldNotNull(FieldTupleHash))
+}
+
+// TupleHashEqualFold applies the EqualFold predicate on the "tupleHash" field.
+func TupleHashEqualFold(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldEqualFold(FieldTupleHash, v))
+}
+
+// TupleHashContainsFold applies the ContainsFold predicate on the "tupleHash" field.
+func TupleHashContainsFold(v string) predicate.Upload {
+	return predicate.Upload(sql.FieldContainsFold(FieldTupleHash, v))
 }
 
 // And groups predicates with the AND operator between them.

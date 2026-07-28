@@ -45,6 +45,12 @@ func (Upload) Fields() []ent.Field {
 			Nillable().
 			NonNegative().
 			StorageKey("committedPartCount"),
+		field.String("tupleHash").
+			MaxLen(64).
+			Optional().
+			Nillable().
+			StorageKey("tupleHash").
+			SchemaType(originalBoundedStringColumnType(64)),
 	}
 }
 
@@ -53,6 +59,6 @@ func (Upload) Indexes() []ent.Index {
 		index.Fields("key", "version").StorageKey("idx_uploads_key_version"),
 		index.Fields("scope").StorageKey("idx_uploads_scope"),
 		index.Fields("repoId").StorageKey("idx_uploads_repoId"),
-		index.Fields("key", "version", "scope", "repoId").Unique(),
+		index.Fields("tupleHash").Unique().StorageKey("idx_uploads_tuple_hash"),
 	}
 }
