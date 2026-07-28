@@ -162,6 +162,15 @@ physical deletion waits for reader and materialization leases and for a
 10-minute compatibility grace period. This also protects direct URLs issued
 immediately before an upgrade to the lease-aware schema.
 
+Before returning either a local or S3 download URL, the server checks the
+selected representation's anchor object with one filesystem stat or S3 HEAD:
+`merged` for a completed materialization and `parts/0` otherwise. A confirmed
+missing object detaches the dangling cache entry through the same fenced
+deletion path and retries matching, allowing another restore key or scope to
+win. Storage probe errors preserve metadata and fail the lookup. This constant-
+cost check intentionally does not scan every part, so isolated external
+deletion of an interior part is detected only when that part is downloaded.
+
 Upgrades from versions without reader leases must be coordinated: drain the old
 server instances before enabling the new ones. Old binaries do not honor part
 reader leases, so running old and new cleanup workers concurrently is unsafe.

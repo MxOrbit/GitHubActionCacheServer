@@ -170,6 +170,25 @@ func (a *FilesystemAdapter) CreateDownloadStream(_ context.Context, objectName s
 	return file, nil
 }
 
+func (a *FilesystemAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	path, err := a.safePath(objectName)
+	if err != nil {
+		return false, err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat object: %w", err)
+	}
+	return info.Mode().IsRegular(), nil
+}
+
 func (a *FilesystemAdapter) DeleteFolder(_ context.Context, folderName string) error {
 	path, err := a.safePath(folderName)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -308,7 +309,9 @@ func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &directURLStorage{Adapter: filesystem}
 	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
-	createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	location := client.StorageLocation.GetX(ctx, entry.LocationId)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(location.FolderName, 0), bytes.NewBufferString("data")))
 
 	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
 		return "fallback"
@@ -317,7 +320,7 @@ func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, "direct://entry-id-folder/parts/0", result.DownloadURL)
 	require.Equal(t, "entry-id-folder/parts/0", adapter.objectName)
-	location := client.StorageLocation.GetX(ctx, result.CacheEntry.LocationId)
+	location = client.StorageLocation.GetX(ctx, result.CacheEntry.LocationId)
 	require.NotNil(t, location.LastDownloadedAt)
 	lease := client.StorageReaderLease.Query().OnlyX(ctx)
 	require.Equal(t, "parts", lease.Scope.String())
@@ -427,6 +430,8 @@ func TestLegacyMaterializedSinglePartUsesMergedObjectForDirectDownload(t *testin
 		SetMergedAt(time.Now().Add(-time.Hour).UnixMilli()).
 		SetPartsDeletedAt(time.Now().UnixMilli()).
 		ExecX(ctx)
+	location := client.StorageLocation.GetX(ctx, entry.LocationId)
+	require.NoError(t, filesystem.UploadStream(ctx, mergedObjectName(location.FolderName), bytes.NewBufferString("data")))
 
 	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
 		return "fallback"
@@ -435,6 +440,178 @@ func TestLegacyMaterializedSinglePartUsesMergedObjectForDirectDownload(t *testin
 	require.NotNil(t, result)
 	require.Equal(t, "direct://entry-id-folder/merged", result.DownloadURL)
 	require.Equal(t, "entry-id-folder/merged", adapter.objectName)
+}
+
+func TestLookupPurgesDanglingEntryAndFallsBackToRestoreKey(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	dangling := createMatchedCacheEntry(ctx, client, "dangling-entry", "primary-key")
+	valid := createMatchedCacheEntry(ctx, client, "valid-entry", "restore-key")
+	validLocation := client.StorageLocation.GetX(ctx, valid.LocationId)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(validLocation.FolderName, 0), bytes.NewBufferString("data")))
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"primary-key", "restore-key"}, "version", writableScope(), func(id string) string {
+		return "download://" + id
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, valid.ID, result.CacheEntry.ID)
+	require.Equal(t, "download://"+valid.ID, result.DownloadURL)
+	_, err = client.CacheEntry.Get(ctx, dangling.ID)
+	require.True(t, ent.IsNotFound(err))
+	require.NotNil(t, client.StorageLocation.GetX(ctx, dangling.LocationId).DeletionRequestedAt)
+}
+
+func TestLookupUsesConstantCostRepresentationAnchors(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	partsEntry := createMatchedCacheEntry(ctx, client, "parts-entry", "parts-key")
+	partsLocation := client.StorageLocation.GetX(ctx, partsEntry.LocationId)
+	client.StorageLocation.UpdateOneID(partsLocation.ID).SetPartCount(3).ExecX(ctx)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(partsLocation.FolderName, 0), bytes.NewBufferString("anchor")))
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"parts-key"}, "version", writableScope(), func(string) string { return "fallback" })
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{partObjectName(partsLocation.FolderName, 0)}, adapter.objectExistsCalls)
+	require.Zero(t, adapter.countCalls)
+
+	adapter.reset()
+	mergedEntry := createMatchedCacheEntry(ctx, client, "merged-entry", "merged-key")
+	mergedLocation := client.StorageLocation.GetX(ctx, mergedEntry.LocationId)
+	client.StorageLocation.UpdateOneID(mergedLocation.ID).SetMergedAt(time.Now().UnixMilli()).ExecX(ctx)
+	require.NoError(t, filesystem.UploadStream(ctx, mergedObjectName(mergedLocation.FolderName), bytes.NewBufferString("merged")))
+
+	result, err = service.GetCacheEntryWithDownloadURL(ctx, []string{"merged-key"}, "version", writableScope(), func(string) string { return "fallback" })
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, []string{mergedObjectName(mergedLocation.FolderName)}, adapter.objectExistsCalls)
+	require.Zero(t, adapter.countCalls)
+}
+
+func TestLookupTreatsPartsDeletedWithoutMergeAsDanglingWithoutStorageProbe(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	client.StorageLocation.UpdateOneID(entry.LocationId).SetPartsDeletedAt(time.Now().UnixMilli()).ExecX(ctx)
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string { return "fallback" })
+
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Empty(t, adapter.objectExistsCalls)
+	_, err = client.CacheEntry.Get(ctx, entry.ID)
+	require.True(t, ent.IsNotFound(err))
+}
+
+func TestLookupPreservesMetadataWhenStorageProbeFails(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &objectExistsErrorStorage{Adapter: filesystem, err: errInjectedStorageFailure}
+	service := NewService(Options{DB: client, Storage: adapter})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string { return "fallback" })
+
+	require.Nil(t, result)
+	require.ErrorIs(t, err, errInjectedStorageFailure)
+	require.Equal(t, entry.LocationId, client.CacheEntry.GetX(ctx, entry.ID).LocationId)
+	require.Nil(t, client.StorageLocation.GetX(ctx, entry.LocationId).DeletionRequestedAt)
+}
+
+func TestLookupDoesNotPresignDanglingDirectDownload(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &directURLStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string { return "fallback" })
+
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Empty(t, adapter.objectName)
+	_, err = client.CacheEntry.Get(ctx, entry.ID)
+	require.True(t, ent.IsNotFound(err))
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func TestLookupDoesNotDeleteConcurrentReplacement(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := newBlockingObjectExistsStorage(filesystem, "old-folder/parts/0")
+	service := NewService(Options{DB: client, Storage: adapter})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	oldLocation := client.StorageLocation.GetX(ctx, entry.LocationId)
+	client.StorageLocation.UpdateOneID(oldLocation.ID).SetFolderName("old-folder").ExecX(ctx)
+	newLocation := client.StorageLocation.Create().
+		SetID("new-location").
+		SetFolderName("new-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(newLocation.FolderName, 0), bytes.NewBufferString("replacement")))
+
+	type lookupResult struct {
+		match *MatchResult
+		err   error
+	}
+	lookupDone := make(chan lookupResult, 1)
+	go func() {
+		match, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string { return "fallback" })
+		lookupDone <- lookupResult{match: match, err: err}
+	}()
+	<-adapter.started
+	client.CacheEntry.UpdateOneID(entry.ID).SetLocation(newLocation).ExecX(ctx)
+	close(adapter.release)
+
+	lookup := <-lookupDone
+	require.NoError(t, lookup.err)
+	require.NotNil(t, lookup.match)
+	require.Equal(t, newLocation.ID, client.CacheEntry.GetX(ctx, entry.ID).LocationId)
+}
+
+func TestLookupRevalidatesRepresentationSelectedByDirectLease(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	oldLocation := client.StorageLocation.GetX(ctx, entry.LocationId)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(oldLocation.FolderName, 0), bytes.NewBufferString("old")))
+	newLocation := client.StorageLocation.Create().
+		SetID("new-location").
+		SetFolderName("new-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	hook := &afterObjectExistsStorage{
+		Adapter: filesystem,
+		after: func() {
+			client.CacheEntry.UpdateOneID(entry.ID).SetLocation(newLocation).ExecX(ctx)
+		},
+	}
+	direct := &directURLStorage{Adapter: hook}
+	service := NewService(Options{DB: client, Storage: direct, EnableDirectDownloads: true})
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string { return "fallback" })
+
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Empty(t, direct.objectName)
+	_, err = client.CacheEntry.Get(ctx, entry.ID)
+	require.True(t, ent.IsNotFound(err))
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func TestLookupBoundsDanglingPurgeAttempts(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	for index := 0; index < maxDanglingPurgeAttempts+1; index++ {
+		entry := createMatchedCacheEntry(ctx, client, fmt.Sprintf("entry-%02d", index), fmt.Sprintf("prefix-%02d", index))
+		client.CacheEntry.UpdateOneID(entry.ID).SetUpdatedAt(int64(index + 1)).ExecX(ctx)
+	}
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"prefix-"}, "version", writableScope(), func(string) string { return "fallback" })
+
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
 }
 
 func TestDirectDownloadsScheduleMaterializationAfterFinalize(t *testing.T) {
@@ -779,9 +956,10 @@ type copyTrackingStorage struct {
 
 type storageCallTrackingAdapter struct {
 	storage.Adapter
-	countCalls    int
-	downloadCalls int
-	countErr      error
+	countCalls        int
+	downloadCalls     int
+	objectExistsCalls []string
+	countErr          error
 }
 
 func (s *storageCallTrackingAdapter) CountFilesInFolder(ctx context.Context, folderName string) (int, error) {
@@ -797,9 +975,15 @@ func (s *storageCallTrackingAdapter) CreateDownloadStream(ctx context.Context, o
 	return s.Adapter.CreateDownloadStream(ctx, objectName)
 }
 
+func (s *storageCallTrackingAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+	s.objectExistsCalls = append(s.objectExistsCalls, objectName)
+	return s.Adapter.ObjectExists(ctx, objectName)
+}
+
 func (s *storageCallTrackingAdapter) reset() {
 	s.countCalls = 0
 	s.downloadCalls = 0
+	s.objectExistsCalls = nil
 }
 
 func (s *copyTrackingStorage) CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error {
@@ -845,6 +1029,59 @@ func (s *failDeleteStorage) DeleteFolder(context.Context, string) error {
 type directURLStorage struct {
 	storage.Adapter
 	objectName string
+}
+
+type objectExistsErrorStorage struct {
+	storage.Adapter
+	err error
+}
+
+func (s *objectExistsErrorStorage) ObjectExists(context.Context, string) (bool, error) {
+	return false, s.err
+}
+
+type blockingObjectExistsStorage struct {
+	storage.Adapter
+	objectName string
+	started    chan struct{}
+	release    chan struct{}
+	once       sync.Once
+}
+
+type afterObjectExistsStorage struct {
+	storage.Adapter
+	once  sync.Once
+	after func()
+}
+
+func (s *afterObjectExistsStorage) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+	exists, err := s.Adapter.ObjectExists(ctx, objectName)
+	if err == nil {
+		s.once.Do(s.after)
+	}
+	return exists, err
+}
+
+func newBlockingObjectExistsStorage(adapter storage.Adapter, objectName string) *blockingObjectExistsStorage {
+	return &blockingObjectExistsStorage{
+		Adapter:    adapter,
+		objectName: objectName,
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (s *blockingObjectExistsStorage) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+	if objectName == s.objectName {
+		s.once.Do(func() { close(s.started) })
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-s.release:
+			return false, nil
+		}
+	}
+	return s.Adapter.ObjectExists(ctx, objectName)
 }
 
 func (s *directURLStorage) CreateDownloadURL(_ context.Context, objectName string, _ time.Duration) (string, error) {

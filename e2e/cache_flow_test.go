@@ -158,6 +158,28 @@ func TestBlankRestoreKeysAreIgnored(t *testing.T) {
 	require.JSONEq(t, `{"ok":false}`, matchRec.Body.String())
 }
 
+func TestJSONLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	app := newTestApp(t)
+	token := actionsToken(t)
+	body := cacheBody("dangling-json-cache")
+	uploadURL := createCacheEntry(t, app.router, token, body)
+	uploadWholeCache(t, app.router, uploadURL, "data")
+	finalizeCacheEntry(t, app.router, token, body)
+	require.NoError(t, app.storage.Clear(context.Background()))
+
+	matchRec := postJSON(t, app.router, getCacheEntryDownloadPath, token, map[string]any{
+		"key":     "dangling-json-cache",
+		"version": defaultCacheEntryVersion,
+	})
+
+	require.Equal(t, http.StatusOK, matchRec.Code)
+	require.JSONEq(t, `{"ok":false}`, matchRec.Body.String())
+	require.Zero(t, app.db.CacheEntry.Query().CountX(context.Background()))
+	location := app.db.StorageLocation.Query().OnlyX(context.Background())
+	require.NotNil(t, location.DeletionRequestedAt)
+}
+
 func TestAbandonedUploadDoesNotBlockNewSave(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	app := newTestApp(t)

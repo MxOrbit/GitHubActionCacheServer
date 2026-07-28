@@ -33,6 +33,7 @@ const (
 	lastDownloadedAtUpdateInterval = 10 * time.Minute
 	abandonedUploadLifetime        = 24 * time.Hour
 	mergeCleanupTimeout            = 10 * time.Second
+	maxDanglingPurgeAttempts       = 10
 )
 
 var (
@@ -263,23 +264,62 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 		return nil, ErrCacheNotFound
 	}
 
-	cacheEntry, err := s.MatchCacheEntry(ctx, keys, version, scope)
-	if err != nil {
-		return nil, err
-	}
-	if cacheEntry == nil {
-		return nil, nil
-	}
+	direct, directDownloads := s.storage.(storage.DirectDownloadAdapter)
+	for attempt := 0; attempt < maxDanglingPurgeAttempts; attempt++ {
+		cacheEntry, err := s.MatchCacheEntry(ctx, keys, version, scope)
+		if err != nil {
+			return nil, err
+		}
+		if cacheEntry == nil {
+			return nil, nil
+		}
 
-	downloadURL := fallbackDownloadURL(cacheEntry.ID)
-	if s.enableDirectDownloads {
-		if direct, ok := s.storage.(storage.DirectDownloadAdapter); ok {
+		location, err := s.db.StorageLocation.Query().
+			Where(storagelocation.ID(cacheEntry.LocationId)).
+			Only(ctx)
+		if err != nil {
+			if !ent.IsNotFound(err) {
+				return nil, fmt.Errorf("query matched storage location: %w", err)
+			}
+			if _, purgeErr := s.lifecycle.PurgeDanglingCacheEntry(ctx, cacheEntry.ID, cacheEntry.LocationId); purgeErr != nil {
+				return nil, purgeErr
+			}
+			continue
+		}
+
+		validatedObjectName, representationAvailable := representationObjectName(location)
+		if representationAvailable {
+			representationAvailable, err = s.storage.ObjectExists(ctx, validatedObjectName)
+			if err != nil {
+				return nil, fmt.Errorf("validate cache storage representation: %w", err)
+			}
+		}
+		if !representationAvailable {
+			if _, err := s.lifecycle.PurgeDanglingCacheEntry(ctx, cacheEntry.ID, location.ID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		downloadURL := fallbackDownloadURL(cacheEntry.ID)
+		if s.enableDirectDownloads && directDownloads {
 			lease, leaseErr := s.lifecycle.AcquireReader(ctx, cacheEntry.ID, storagelifecycle.AcquireReaderOptions{Direct: true})
 			switch {
 			case leaseErr == nil:
-				directObjectName := mergedObjectName(lease.Location.FolderName)
-				if lease.Scope == storagereaderlease.ScopeParts {
-					directObjectName = partObjectName(lease.Location.FolderName, 0)
+				directObjectName := readerLeaseObjectName(lease)
+				if directObjectName != validatedObjectName {
+					exists, probeErr := s.storage.ObjectExists(ctx, directObjectName)
+					if probeErr != nil {
+						s.releaseReaderLease(lease.ID)
+						return nil, fmt.Errorf("validate direct-download storage representation: %w", probeErr)
+					}
+					if !exists {
+						s.releaseReaderLease(lease.ID)
+						if _, purgeErr := s.lifecycle.PurgeDanglingCacheEntry(ctx, cacheEntry.ID, lease.Location.ID); purgeErr != nil {
+							return nil, purgeErr
+						}
+						continue
+					}
 				}
 				url, signErr := direct.CreateDownloadURL(ctx, directObjectName, directDownloadTTL)
 				if signErr != nil {
@@ -293,23 +333,35 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 				s.touchStorageLocationIfStale(ctx, lease.Location)
 				downloadURL = url
 			case errors.Is(leaseErr, storagelifecycle.ErrDirectRepresentation):
-				location, queryErr := s.db.StorageLocation.Query().
-					Where(storagelocation.ID(cacheEntry.LocationId)).
-					Only(ctx)
-				if queryErr == nil {
-					s.tryStartMaterialization(location)
-				} else if !ent.IsNotFound(queryErr) {
-					return nil, fmt.Errorf("query storage location: %w", queryErr)
-				}
+				s.tryStartMaterialization(location)
 			case errors.Is(leaseErr, storagelifecycle.ErrLocationUnavailable):
-				return nil, ErrCacheNotFound
+				continue
 			default:
 				return nil, leaseErr
 			}
 		}
+
+		return &MatchResult{CacheEntry: cacheEntry, DownloadURL: downloadURL}, nil
 	}
 
-	return &MatchResult{CacheEntry: cacheEntry, DownloadURL: downloadURL}, nil
+	return nil, nil
+}
+
+func representationObjectName(location *ent.StorageLocation) (string, bool) {
+	if location.MergedAt != nil {
+		return mergedObjectName(location.FolderName), true
+	}
+	if location.PartsDeletedAt != nil || location.PartCount < 1 {
+		return "", false
+	}
+	return partObjectName(location.FolderName, 0), true
+}
+
+func readerLeaseObjectName(lease *storagelifecycle.ReaderLease) string {
+	if lease.Scope == storagereaderlease.ScopeStorage {
+		return mergedObjectName(lease.Location.FolderName)
+	}
+	return partObjectName(lease.Location.FolderName, 0)
 }
 
 func (s *Service) MatchCacheEntry(ctx context.Context, keys []string, version string, scope auth.CacheScope) (*ent.CacheEntry, error) {

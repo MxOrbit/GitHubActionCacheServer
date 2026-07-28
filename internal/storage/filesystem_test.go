@@ -72,6 +72,32 @@ func TestFilesystemAdapterReturnsObjectNotFound(t *testing.T) {
 	require.Equal(t, "missing", notFound.ObjectName)
 }
 
+func TestFilesystemAdapterObjectExists(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, adapter.UploadStream(ctx, "folder/object", strings.NewReader("data")))
+	require.NoError(t, os.MkdirAll(filepath.Join(adapter.root, "folder", "directory"), 0o755))
+
+	exists, err := adapter.ObjectExists(ctx, "folder/object")
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	exists, err = adapter.ObjectExists(ctx, "folder/missing")
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	exists, err = adapter.ObjectExists(ctx, "folder/directory")
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	exists, err = adapter.ObjectExists(canceled, "folder/object")
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, exists)
+}
+
 func TestFilesystemAdapterClear(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())

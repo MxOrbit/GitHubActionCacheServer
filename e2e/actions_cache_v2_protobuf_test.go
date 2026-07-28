@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -100,6 +101,37 @@ func TestSccacheCompatibleProtobufCacheMiss(t *testing.T) {
 	require.Equal(t, protobufMediaType, rec.Header().Get("Content-Type"))
 	_, ok := protobufVarintField(decodeProtobufFields(t, rec.Body.Bytes()), 1)
 	require.False(t, ok, "proto3 false is encoded as the absent default value")
+}
+
+func TestProtobufLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	app := newTestApp(t)
+	token := actionsToken(t)
+	key := "dangling-protobuf-cache"
+	createBody := cacheBody(key)
+	uploadURL := createCacheEntry(t, app.router, token, createBody)
+	uploadWholeCache(t, app.router, uploadURL, "data")
+	finalizeCacheEntry(t, app.router, token, createBody)
+	require.NoError(t, app.storage.Clear(context.Background()))
+
+	rec := postProtobuf(
+		t,
+		app.router,
+		getCacheEntryDownloadPath,
+		token,
+		protobufGetCacheEntryDownloadURLRequest(
+			protobufCacheMetadata(123, "refs/heads/main"),
+			key,
+			nil,
+			defaultCacheEntryVersion,
+		),
+	)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, protobufMediaType, rec.Header().Get("Content-Type"))
+	_, ok := protobufVarintField(decodeProtobufFields(t, rec.Body.Bytes()), 1)
+	require.False(t, ok)
+	require.Zero(t, app.db.CacheEntry.Query().CountX(context.Background()))
 }
 
 func TestProtobufFinalizeMissingUploadReachesDomainHandling(t *testing.T) {

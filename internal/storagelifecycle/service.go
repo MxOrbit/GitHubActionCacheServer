@@ -259,6 +259,42 @@ func (s *Service) ReleaseReader(ctx context.Context, leaseID string) error {
 	return nil
 }
 
+// PurgeDanglingCacheEntry removes an entry only if it still references the
+// storage location that was confirmed missing. The location is fenced only
+// after its final cache entry has been detached.
+func (s *Service) PurgeDanglingCacheEntry(ctx context.Context, cacheEntryID, locationID string) (bool, error) {
+	tx, err := s.db.Tx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("start dangling cache entry purge transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	deleted, err := tx.CacheEntry.Delete().
+		Where(
+			cacheentry.ID(cacheEntryID),
+			cacheentry.LocationId(locationID),
+		).
+		Exec(ctx)
+	if err != nil {
+		return false, fmt.Errorf("delete dangling cache entry: %w", err)
+	}
+	if deleted > 0 {
+		if _, err := s.FenceDetachedLocation(ctx, tx.Client(), locationID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit dangling cache entry purge: %w", err)
+	}
+	committed = true
+	return deleted > 0, nil
+}
+
 func (s *Service) RequestLocationDeletion(ctx context.Context, locationID string, deleteCacheEntries, requireOrphan bool) (DeletionResult, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {

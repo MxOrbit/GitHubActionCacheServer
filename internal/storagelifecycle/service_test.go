@@ -127,6 +127,60 @@ func TestDirectReaderLeaseProtectsFullSignedURLTTL(t *testing.T) {
 	require.True(t, result.Finalized)
 }
 
+func TestPurgeDanglingCacheEntryIsConditionalAndFencesOnlyChildlessLocation(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	location := createLifecycleEntry(ctx, client, "entry-a", "location", 1)
+	client.CacheEntry.Create().
+		SetID("entry-b").
+		SetKey("key-b").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(ctx)
+	replacement := client.StorageLocation.Create().
+		SetID("replacement").
+		SetFolderName("replacement-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+
+	client.CacheEntry.UpdateOneID("entry-a").SetLocation(replacement).ExecX(ctx)
+	deleted, err := service.PurgeDanglingCacheEntry(ctx, "entry-a", location.ID)
+	require.NoError(t, err)
+	require.False(t, deleted)
+	require.Equal(t, replacement.ID, client.CacheEntry.GetX(ctx, "entry-a").LocationId)
+
+	deleted, err = service.PurgeDanglingCacheEntry(ctx, "entry-b", location.ID)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	_, err = client.CacheEntry.Get(ctx, "entry-b")
+	require.True(t, ent.IsNotFound(err))
+	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+}
+
+func TestPurgeDanglingCacheEntryLeavesSharedLocationAvailable(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	location := createLifecycleEntry(ctx, client, "entry-a", "location", 1)
+	client.CacheEntry.Create().
+		SetID("entry-b").
+		SetKey("key-b").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(ctx)
+
+	deleted, err := service.PurgeDanglingCacheEntry(ctx, "entry-a", location.ID)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+	require.Equal(t, location.ID, client.CacheEntry.GetX(ctx, "entry-b").LocationId)
+}
+
 func TestPartsDeletionWaitsForPartsReadersButNotMergedReaders(t *testing.T) {
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	now := time.Now().Truncate(time.Millisecond)

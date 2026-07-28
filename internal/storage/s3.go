@@ -309,6 +309,20 @@ func (a *S3Adapter) CreateDownloadStream(ctx context.Context, objectName string)
 	return output.Body, nil
 }
 
+func (a *S3Adapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+	_, err := a.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(a.key(objectName)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("head s3 object: %w", err)
+	}
+	return true, nil
+}
+
 func (a *S3Adapter) DeleteFolder(ctx context.Context, folderName string) error {
 	return a.deleteByPrefix(ctx, a.key(folderName)+"/")
 }

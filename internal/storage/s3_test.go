@@ -248,6 +248,57 @@ func TestS3AdapterCreateDownloadStreamDoesNotTreatMissingBucketAsObjectNotFound(
 	require.Contains(t, err.Error(), "get s3 object")
 }
 
+func TestS3AdapterObjectExistsUsesHeadAndClassifiesErrors(t *testing.T) {
+	ctx := context.Background()
+	t.Run("exists", func(t *testing.T) {
+		fakeS3 := newFakeS3Server(t, fakeS3Options{objectSizes: map[string]int64{
+			"/cache-bucket/gh-actions-cache/folder/object": 4,
+		}})
+		defer fakeS3.Close()
+		adapter, err := newTestS3Adapter(t, fakeS3.URL)
+		require.NoError(t, err)
+
+		exists, err := adapter.ObjectExists(ctx, "folder/object")
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, []string{"/cache-bucket/gh-actions-cache/folder/object"}, fakeS3.headObjectPaths())
+	})
+
+	t.Run("missing object", func(t *testing.T) {
+		fakeS3 := newFakeS3Server(t, fakeS3Options{})
+		defer fakeS3.Close()
+		adapter, err := newTestS3Adapter(t, fakeS3.URL)
+		require.NoError(t, err)
+
+		exists, err := adapter.ObjectExists(ctx, "folder/missing")
+		require.NoError(t, err)
+		require.False(t, exists)
+	})
+
+	for _, tt := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "access denied", status: http.StatusForbidden, code: "AccessDenied"},
+		{name: "server failure", status: http.StatusInternalServerError, code: "InternalError"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeS3 := newFakeS3Server(t, fakeS3Options{
+				headObjectStatus:    tt.status,
+				headObjectErrorCode: tt.code,
+			})
+			defer fakeS3.Close()
+			adapter, err := newTestS3Adapter(t, fakeS3.URL)
+			require.NoError(t, err)
+
+			exists, err := adapter.ObjectExists(ctx, "folder/object")
+			require.Error(t, err)
+			require.False(t, exists)
+		})
+	}
+}
+
 func TestS3AdapterCopyObjectUsesServerSideCopy(t *testing.T) {
 	ctx := context.Background()
 	fakeS3 := newFakeS3Server(t, fakeS3Options{})
@@ -380,26 +431,30 @@ func TestS3DeleteErrorsError(t *testing.T) {
 }
 
 type fakeS3Options struct {
-	headBucketStatus   int
-	listObjectsStatus  int
-	getObjectStatus    int
-	getObjectErrorCode string
-	failPartNumber     int
-	onUploadPart       func(int)
-	onCopyPart         func(int)
-	objectSizes        map[string]int64
+	headBucketStatus    int
+	listObjectsStatus   int
+	headObjectStatus    int
+	headObjectErrorCode string
+	getObjectStatus     int
+	getObjectErrorCode  string
+	failPartNumber      int
+	onUploadPart        func(int)
+	onCopyPart          func(int)
+	objectSizes         map[string]int64
 }
 
 type fakeS3Server struct {
 	*httptest.Server
-	headBucketStatus   int
-	listObjectsStatus  int
-	getObjectStatus    int
-	getObjectErrorCode string
-	failPartNumber     int
-	onUploadPart       func(int)
-	onCopyPart         func(int)
-	objectSizes        map[string]int64
+	headBucketStatus    int
+	listObjectsStatus   int
+	headObjectStatus    int
+	headObjectErrorCode string
+	getObjectStatus     int
+	getObjectErrorCode  string
+	failPartNumber      int
+	onUploadPart        func(int)
+	onCopyPart          func(int)
+	objectSizes         map[string]int64
 
 	mu              sync.Mutex
 	requestCount    int
@@ -434,14 +489,16 @@ func newFakeS3Server(t testing.TB, options fakeS3Options) *fakeS3Server {
 		options.getObjectStatus = http.StatusOK
 	}
 	fakeS3 := &fakeS3Server{
-		headBucketStatus:   options.headBucketStatus,
-		listObjectsStatus:  options.listObjectsStatus,
-		getObjectStatus:    options.getObjectStatus,
-		getObjectErrorCode: options.getObjectErrorCode,
-		failPartNumber:     options.failPartNumber,
-		onUploadPart:       options.onUploadPart,
-		onCopyPart:         options.onCopyPart,
-		objectSizes:        options.objectSizes,
+		headBucketStatus:    options.headBucketStatus,
+		listObjectsStatus:   options.listObjectsStatus,
+		headObjectStatus:    options.headObjectStatus,
+		headObjectErrorCode: options.headObjectErrorCode,
+		getObjectStatus:     options.getObjectStatus,
+		getObjectErrorCode:  options.getObjectErrorCode,
+		failPartNumber:      options.failPartNumber,
+		onUploadPart:        options.onUploadPart,
+		onCopyPart:          options.onCopyPart,
+		objectSizes:         options.objectSizes,
 	}
 	fakeS3.Server = httptest.NewServer(http.HandlerFunc(fakeS3.handle))
 	return fakeS3
@@ -463,6 +520,15 @@ func (s *fakeS3Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.headObjects = append(s.headObjects, r.URL.Path)
 		size, ok := s.objectSizes[r.URL.Path]
 		s.mu.Unlock()
+		if s.headObjectStatus != 0 && s.headObjectStatus != http.StatusOK {
+			code := s.headObjectErrorCode
+			if code == "" {
+				code = "InternalError"
+			}
+			w.WriteHeader(s.headObjectStatus)
+			_, _ = fmt.Fprintf(w, `<Error><Code>%s</Code><Message>head failed</Message></Error>`, code)
+			return
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = fmt.Fprint(w, `<Error><Code>NoSuchKey</Code><Message>object not found</Message></Error>`)

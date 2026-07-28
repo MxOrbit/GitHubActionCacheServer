@@ -8,6 +8,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
@@ -82,6 +83,7 @@ func newTestRouter(t *testing.T) http.Handler {
 type testApp struct {
 	router    http.Handler
 	db        *ent.Client
+	storage   storage.Adapter
 	lifecycle *storagelifecycle.Service
 }
 
@@ -101,6 +103,7 @@ func newTestApp(t *testing.T) testApp {
 	return testApp{
 		router:    router,
 		db:        client,
+		storage:   storageAdapter,
 		lifecycle: lifecycle,
 	}
 }
