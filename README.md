@@ -18,7 +18,6 @@ Run locally with SQLite and filesystem storage:
 
 ```sh
 go mod download
-go generate ./internal/ent
 API_BASE_URL=http://localhost:3000 go run ./cmd/server
 ```
 
@@ -198,12 +197,8 @@ Endpoints:
 
 ## Development
 
-Generated Ent code is intentionally ignored by git. Generate it before building
-or testing from a clean checkout:
-
 ```sh
 go mod download
-go generate ./internal/ent
 go test ./...
 ```
 

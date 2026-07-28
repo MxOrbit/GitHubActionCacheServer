@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Release Cli
         uses: robinraju/release-downloader@v1.13
@@ -25,16 +25,12 @@ jobs:
           out-file-path: "./build/"
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
 
       - name: Download Go modules
         run: go mod download
-
-      - name: Generate ent code
-        run: go generate ./internal/ent
 
       - name: Build
         env:
@@ -42,8 +38,8 @@ jobs:
         run: |
           ./build/release ./cmd/server --extra-arches --output build/output \
             --name "$NAME" \
-            --ldflags="$LDFLAGS" \
-            -c tar.gz
+            -c tar.gz \
+            -j 1
 
       - name: Upload Release
         uses: softprops/action-gh-release@v3

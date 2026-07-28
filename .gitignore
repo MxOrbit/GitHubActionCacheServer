@@ -34,12 +34,6 @@ dist/
 coverage.txt
 coverage.out
 
-# Generated ent code. Keep schemas and generation entrypoint in git.
-internal/ent/*
-!internal/ent/generate.go
-!internal/ent/schema/
-!internal/ent/schema/**
-
 # Runtime data
 .data/
 *.db
