@@ -31,7 +31,15 @@ func (StorageLocation) Fields() []ent.Field {
 		field.Int("partCount").
 			NonNegative().
 			StorageKey("partCount"),
+		field.Int64("leaseVersion").Default(0).NonNegative().StorageKey("leaseVersion"),
+		field.Int64("deletionRequestedAt").Optional().Nillable().StorageKey("deletionRequestedAt"),
 		field.Int64("mergeStartedAt").Optional().Nillable().StorageKey("mergeStartedAt"),
+		field.String("mergeLeaseToken").
+			Optional().
+			Nillable().
+			StorageKey("mergeLeaseToken").
+			SchemaType(originalIDColumnType),
+		field.Int64("mergeLeaseExpiresAt").Optional().Nillable().StorageKey("mergeLeaseExpiresAt"),
 		field.Int64("mergedAt").Optional().Nillable().StorageKey("mergedAt"),
 		field.Int64("materializationUnsupportedAt").Optional().Nillable().StorageKey("materializationUnsupportedAt"),
 		field.Int64("partsDeletedAt").Optional().Nillable().StorageKey("partsDeletedAt"),
@@ -43,5 +51,7 @@ func (StorageLocation) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("cacheEntries", CacheEntry.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
+		edge.To("readerLeases", StorageReaderLease.Type).
+			Annotations(entsql.OnDelete(entsql.Restrict)),
 	}
 }

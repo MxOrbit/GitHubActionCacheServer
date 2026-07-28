@@ -8,11 +8,12 @@ import (
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 )
 
@@ -25,22 +26,29 @@ const (
 )
 
 type Service struct {
-	db      *ent.Client
-	storage storage.Adapter
-	config  config.CleanupConfig
+	db        *ent.Client
+	storage   storage.Adapter
+	config    config.CleanupConfig
+	lifecycle *storagelifecycle.Service
 }
 
 type Options struct {
-	DB      *ent.Client
-	Storage storage.Adapter
-	Config  config.CleanupConfig
+	DB        *ent.Client
+	Storage   storage.Adapter
+	Config    config.CleanupConfig
+	Lifecycle *storagelifecycle.Service
 }
 
 func NewService(options Options) *Service {
+	lifecycle := options.Lifecycle
+	if lifecycle == nil {
+		lifecycle = storagelifecycle.New(options.DB)
+	}
 	return &Service{
-		db:      options.DB,
-		storage: options.Storage,
-		config:  options.Config,
+		db:        options.DB,
+		storage:   options.Storage,
+		config:    options.Config,
+		lifecycle: lifecycle,
 	}
 }
 
@@ -81,7 +89,10 @@ func (s *Service) RunCacheEntries(ctx context.Context) (int, error) {
 
 	for {
 		locations, err := s.db.StorageLocation.Query().
-			Where(storagelocation.LastDownloadedAtLT(cutoff)).
+			Where(
+				storagelocation.LastDownloadedAtLT(cutoff),
+				storagelocation.DeletionRequestedAtIsNil(),
+			).
 			Limit(itemsPerPage).
 			All(ctx)
 		if err != nil {
@@ -105,7 +116,10 @@ func (s *Service) RunStorageLocations(ctx context.Context) (int, error) {
 
 	for {
 		locations, err := s.db.StorageLocation.Query().
-			Where(storagelocation.Not(storagelocation.HasCacheEntries())).
+			Where(
+				storagelocation.Not(storagelocation.HasCacheEntries()),
+				storagelocation.DeletionRequestedAtIsNil(),
+			).
 			Limit(itemsPerPage).
 			All(ctx)
 		if err != nil {
@@ -127,13 +141,20 @@ func (s *Service) RunStorageLocations(ctx context.Context) (int, error) {
 func (s *Service) RunParts(ctx context.Context) (int, error) {
 	cutoff := time.Now().Add(-materializedPartsRetention).UnixMilli()
 	deletedParts := 0
+	cursor := ""
 
 	for {
+		predicates := []predicate.StorageLocation{
+			storagelocation.MergedAtLT(cutoff),
+			storagelocation.PartsDeletedAtIsNil(),
+			storagelocation.DeletionRequestedAtIsNil(),
+		}
+		if cursor != "" {
+			predicates = append(predicates, storagelocation.IDGT(cursor))
+		}
 		locations, err := s.db.StorageLocation.Query().
-			Where(
-				storagelocation.MergedAtLT(cutoff),
-				storagelocation.PartsDeletedAtIsNil(),
-			).
+			Where(predicates...).
+			Order(storagelocation.ByID()).
 			Limit(itemsPerPage).
 			All(ctx)
 		if err != nil {
@@ -144,14 +165,58 @@ func (s *Service) RunParts(ctx context.Context) (int, error) {
 		}
 
 		for _, location := range locations {
-			task, err := s.schedulePartsDeletion(ctx, location)
+			cursor = location.ID
+			result, err := s.lifecycle.ClaimPartsDeletion(ctx, location.ID)
 			if err != nil {
 				return deletedParts, err
 			}
-			_ = storageoutbox.Process(ctx, s.db, s.storage, task)
-			deletedParts += location.PartCount
+			if result.Task != nil {
+				_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
+				deletedParts += result.PartCount
+			}
 		}
 	}
+}
+
+func (s *Service) RunPendingStorageLocations(ctx context.Context) (int, error) {
+	finalized := 0
+	cursor := ""
+
+	for {
+		predicates := []predicate.StorageLocation{storagelocation.DeletionRequestedAtNotNil()}
+		if cursor != "" {
+			predicates = append(predicates, storagelocation.IDGT(cursor))
+		}
+		locations, err := s.db.StorageLocation.Query().
+			Where(predicates...).
+			Order(storagelocation.ByID()).
+			Limit(itemsPerPage).
+			All(ctx)
+		if err != nil {
+			return finalized, fmt.Errorf("query pending storage locations: %w", err)
+		}
+		if len(locations) == 0 {
+			return finalized, nil
+		}
+
+		for _, location := range locations {
+			cursor = location.ID
+			result, err := s.lifecycle.RequestLocationDeletion(ctx, location.ID, false, true)
+			if err != nil {
+				return finalized, err
+			}
+			if result.Task != nil {
+				_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
+			}
+			if result.Finalized {
+				finalized++
+			}
+		}
+	}
+}
+
+func (s *Service) RunReaderLeases(ctx context.Context) (int, error) {
+	return s.lifecycle.PurgeExpiredReaderLeases(ctx)
 }
 
 func (s *Service) RunStorageDeletions(ctx context.Context) (int, error) {
@@ -243,71 +308,12 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 }
 
 func (s *Service) deleteStorageLocation(ctx context.Context, location *ent.StorageLocation, deleteCacheEntries bool) error {
-	tx, err := s.db.Tx(ctx)
-	if err != nil {
-		return fmt.Errorf("start cleanup transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if deleteCacheEntries {
-		if _, err := tx.CacheEntry.Delete().
-			Where(cacheentry.LocationId(location.ID)).
-			Exec(ctx); err != nil {
-			return fmt.Errorf("delete cache entries: %w", err)
-		}
-	}
-	task, err := storageoutbox.Enqueue(ctx, tx.Client(), location.FolderName)
+	result, err := s.lifecycle.RequestLocationDeletion(ctx, location.ID, deleteCacheEntries, !deleteCacheEntries)
 	if err != nil {
 		return err
 	}
-	if err := tx.StorageLocation.DeleteOneID(location.ID).Exec(ctx); err != nil {
-		if ent.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("delete storage location: %w", err)
+	if result.Task != nil {
+		_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit cleanup transaction: %w", err)
-	}
-	committed = true
-
-	_ = storageoutbox.Process(ctx, s.db, s.storage, task)
 	return nil
-}
-
-func (s *Service) schedulePartsDeletion(ctx context.Context, location *ent.StorageLocation) (*ent.StorageDeletion, error) {
-	tx, err := s.db.Tx(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("start parts cleanup transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	task, err := storageoutbox.Enqueue(ctx, tx.Client(), partsFolderName(location.FolderName))
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.StorageLocation.UpdateOneID(location.ID).
-		SetPartsDeletedAt(time.Now().UnixMilli()).
-		Exec(ctx); err != nil {
-		return nil, fmt.Errorf("mark parts deleted: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit parts cleanup: %w", err)
-	}
-	committed = true
-	return task, nil
-}
-
-func partsFolderName(folderName string) string {
-	return folderName + "/parts"
 }

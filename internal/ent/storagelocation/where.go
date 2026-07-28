@@ -73,9 +73,29 @@ func PartCount(v int) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldPartCount, v))
 }
 
+// LeaseVersion applies equality check predicate on the "leaseVersion" field. It's identical to LeaseVersionEQ.
+func LeaseVersion(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldLeaseVersion, v))
+}
+
+// DeletionRequestedAt applies equality check predicate on the "deletionRequestedAt" field. It's identical to DeletionRequestedAtEQ.
+func DeletionRequestedAt(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldDeletionRequestedAt, v))
+}
+
 // MergeStartedAt applies equality check predicate on the "mergeStartedAt" field. It's identical to MergeStartedAtEQ.
 func MergeStartedAt(v int64) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldMergeStartedAt, v))
+}
+
+// MergeLeaseToken applies equality check predicate on the "mergeLeaseToken" field. It's identical to MergeLeaseTokenEQ.
+func MergeLeaseToken(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseExpiresAt applies equality check predicate on the "mergeLeaseExpiresAt" field. It's identical to MergeLeaseExpiresAtEQ.
+func MergeLeaseExpiresAt(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldMergeLeaseExpiresAt, v))
 }
 
 // MergedAt applies equality check predicate on the "mergedAt" field. It's identical to MergedAtEQ.
@@ -203,6 +223,96 @@ func PartCountLTE(v int) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldLTE(FieldPartCount, v))
 }
 
+// LeaseVersionEQ applies the EQ predicate on the "leaseVersion" field.
+func LeaseVersionEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldLeaseVersion, v))
+}
+
+// LeaseVersionNEQ applies the NEQ predicate on the "leaseVersion" field.
+func LeaseVersionNEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNEQ(FieldLeaseVersion, v))
+}
+
+// LeaseVersionIn applies the In predicate on the "leaseVersion" field.
+func LeaseVersionIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIn(FieldLeaseVersion, vs...))
+}
+
+// LeaseVersionNotIn applies the NotIn predicate on the "leaseVersion" field.
+func LeaseVersionNotIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotIn(FieldLeaseVersion, vs...))
+}
+
+// LeaseVersionGT applies the GT predicate on the "leaseVersion" field.
+func LeaseVersionGT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGT(FieldLeaseVersion, v))
+}
+
+// LeaseVersionGTE applies the GTE predicate on the "leaseVersion" field.
+func LeaseVersionGTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGTE(FieldLeaseVersion, v))
+}
+
+// LeaseVersionLT applies the LT predicate on the "leaseVersion" field.
+func LeaseVersionLT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLT(FieldLeaseVersion, v))
+}
+
+// LeaseVersionLTE applies the LTE predicate on the "leaseVersion" field.
+func LeaseVersionLTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLTE(FieldLeaseVersion, v))
+}
+
+// DeletionRequestedAtEQ applies the EQ predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldDeletionRequestedAt, v))
+}
+
+// DeletionRequestedAtNEQ applies the NEQ predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtNEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNEQ(FieldDeletionRequestedAt, v))
+}
+
+// DeletionRequestedAtIn applies the In predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIn(FieldDeletionRequestedAt, vs...))
+}
+
+// DeletionRequestedAtNotIn applies the NotIn predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtNotIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotIn(FieldDeletionRequestedAt, vs...))
+}
+
+// DeletionRequestedAtGT applies the GT predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtGT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGT(FieldDeletionRequestedAt, v))
+}
+
+// DeletionRequestedAtGTE applies the GTE predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtGTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGTE(FieldDeletionRequestedAt, v))
+}
+
+// DeletionRequestedAtLT applies the LT predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtLT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLT(FieldDeletionRequestedAt, v))
+}
+
+// DeletionRequestedAtLTE applies the LTE predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtLTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLTE(FieldDeletionRequestedAt, v))
+}
+
+// DeletionRequestedAtIsNil applies the IsNil predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtIsNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIsNull(FieldDeletionRequestedAt))
+}
+
+// DeletionRequestedAtNotNil applies the NotNil predicate on the "deletionRequestedAt" field.
+func DeletionRequestedAtNotNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotNull(FieldDeletionRequestedAt))
+}
+
 // MergeStartedAtEQ applies the EQ predicate on the "mergeStartedAt" field.
 func MergeStartedAtEQ(v int64) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldMergeStartedAt, v))
@@ -251,6 +361,131 @@ func MergeStartedAtIsNil() predicate.StorageLocation {
 // MergeStartedAtNotNil applies the NotNil predicate on the "mergeStartedAt" field.
 func MergeStartedAtNotNil() predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldNotNull(FieldMergeStartedAt))
+}
+
+// MergeLeaseTokenEQ applies the EQ predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenEQ(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenNEQ applies the NEQ predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenNEQ(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNEQ(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenIn applies the In predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenIn(vs ...string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIn(FieldMergeLeaseToken, vs...))
+}
+
+// MergeLeaseTokenNotIn applies the NotIn predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenNotIn(vs ...string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotIn(FieldMergeLeaseToken, vs...))
+}
+
+// MergeLeaseTokenGT applies the GT predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenGT(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGT(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenGTE applies the GTE predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenGTE(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGTE(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenLT applies the LT predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenLT(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLT(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenLTE applies the LTE predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenLTE(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLTE(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenContains applies the Contains predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenContains(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldContains(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenHasPrefix applies the HasPrefix predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenHasPrefix(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldHasPrefix(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenHasSuffix applies the HasSuffix predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenHasSuffix(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldHasSuffix(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenIsNil applies the IsNil predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenIsNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIsNull(FieldMergeLeaseToken))
+}
+
+// MergeLeaseTokenNotNil applies the NotNil predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenNotNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotNull(FieldMergeLeaseToken))
+}
+
+// MergeLeaseTokenEqualFold applies the EqualFold predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenEqualFold(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEqualFold(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseTokenContainsFold applies the ContainsFold predicate on the "mergeLeaseToken" field.
+func MergeLeaseTokenContainsFold(v string) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldContainsFold(FieldMergeLeaseToken, v))
+}
+
+// MergeLeaseExpiresAtEQ applies the EQ predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldMergeLeaseExpiresAt, v))
+}
+
+// MergeLeaseExpiresAtNEQ applies the NEQ predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtNEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNEQ(FieldMergeLeaseExpiresAt, v))
+}
+
+// MergeLeaseExpiresAtIn applies the In predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIn(FieldMergeLeaseExpiresAt, vs...))
+}
+
+// MergeLeaseExpiresAtNotIn applies the NotIn predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtNotIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotIn(FieldMergeLeaseExpiresAt, vs...))
+}
+
+// MergeLeaseExpiresAtGT applies the GT predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtGT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGT(FieldMergeLeaseExpiresAt, v))
+}
+
+// MergeLeaseExpiresAtGTE applies the GTE predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtGTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGTE(FieldMergeLeaseExpiresAt, v))
+}
+
+// MergeLeaseExpiresAtLT applies the LT predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtLT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLT(FieldMergeLeaseExpiresAt, v))
+}
+
+// MergeLeaseExpiresAtLTE applies the LTE predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtLTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLTE(FieldMergeLeaseExpiresAt, v))
+}
+
+// MergeLeaseExpiresAtIsNil applies the IsNil predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtIsNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIsNull(FieldMergeLeaseExpiresAt))
+}
+
+// MergeLeaseExpiresAtNotNil applies the NotNil predicate on the "mergeLeaseExpiresAt" field.
+func MergeLeaseExpiresAtNotNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotNull(FieldMergeLeaseExpiresAt))
 }
 
 // MergedAtEQ applies the EQ predicate on the "mergedAt" field.
@@ -468,6 +703,29 @@ func HasCacheEntries() predicate.StorageLocation {
 func HasCacheEntriesWith(preds ...predicate.CacheEntry) predicate.StorageLocation {
 	return predicate.StorageLocation(func(s *sql.Selector) {
 		step := newCacheEntriesStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasReaderLeases applies the HasEdge predicate on the "readerLeases" edge.
+func HasReaderLeases() predicate.StorageLocation {
+	return predicate.StorageLocation(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, ReaderLeasesTable, ReaderLeasesColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasReaderLeasesWith applies the HasEdge predicate on the "readerLeases" edge with a given conditions (other predicates).
+func HasReaderLeasesWith(preds ...predicate.StorageReaderLease) predicate.StorageLocation {
+	return predicate.StorageLocation(func(s *sql.Selector) {
+		step := newReaderLeasesStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

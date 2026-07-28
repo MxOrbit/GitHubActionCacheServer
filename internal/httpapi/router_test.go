@@ -299,7 +299,7 @@ func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 	require.Equal(t, "body-tail", rec.Body.String())
 	require.Eventually(t, func() bool {
 		current := client.StorageLocation.GetX(ctx, location.ID)
-		return current.MergeStartedAt == nil && current.MergedAt == nil
+		return current.MergeStartedAt == nil && current.MergeLeaseToken == nil && current.MergeLeaseExpiresAt == nil && current.MergedAt == nil
 	}, time.Second, 10*time.Millisecond)
 }
 

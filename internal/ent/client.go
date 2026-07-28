@@ -18,6 +18,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 )
 
@@ -32,6 +33,8 @@ type Client struct {
 	StorageDeletion *StorageDeletionClient
 	// StorageLocation is the client for interacting with the StorageLocation builders.
 	StorageLocation *StorageLocationClient
+	// StorageReaderLease is the client for interacting with the StorageReaderLease builders.
+	StorageReaderLease *StorageReaderLeaseClient
 	// Upload is the client for interacting with the Upload builders.
 	Upload *UploadClient
 }
@@ -48,6 +51,7 @@ func (c *Client) init() {
 	c.CacheEntry = NewCacheEntryClient(c.config)
 	c.StorageDeletion = NewStorageDeletionClient(c.config)
 	c.StorageLocation = NewStorageLocationClient(c.config)
+	c.StorageReaderLease = NewStorageReaderLeaseClient(c.config)
 	c.Upload = NewUploadClient(c.config)
 }
 
@@ -139,12 +143,13 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 	cfg := c.config
 	cfg.driver = tx
 	return &Tx{
-		ctx:             ctx,
-		config:          cfg,
-		CacheEntry:      NewCacheEntryClient(cfg),
-		StorageDeletion: NewStorageDeletionClient(cfg),
-		StorageLocation: NewStorageLocationClient(cfg),
-		Upload:          NewUploadClient(cfg),
+		ctx:                ctx,
+		config:             cfg,
+		CacheEntry:         NewCacheEntryClient(cfg),
+		StorageDeletion:    NewStorageDeletionClient(cfg),
+		StorageLocation:    NewStorageLocationClient(cfg),
+		StorageReaderLease: NewStorageReaderLeaseClient(cfg),
+		Upload:             NewUploadClient(cfg),
 	}, nil
 }
 
@@ -162,12 +167,13 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 	cfg := c.config
 	cfg.driver = &txDriver{tx: tx, drv: c.driver}
 	return &Tx{
-		ctx:             ctx,
-		config:          cfg,
-		CacheEntry:      NewCacheEntryClient(cfg),
-		StorageDeletion: NewStorageDeletionClient(cfg),
-		StorageLocation: NewStorageLocationClient(cfg),
-		Upload:          NewUploadClient(cfg),
+		ctx:                ctx,
+		config:             cfg,
+		CacheEntry:         NewCacheEntryClient(cfg),
+		StorageDeletion:    NewStorageDeletionClient(cfg),
+		StorageLocation:    NewStorageLocationClient(cfg),
+		StorageReaderLease: NewStorageReaderLeaseClient(cfg),
+		Upload:             NewUploadClient(cfg),
 	}, nil
 }
 
@@ -199,6 +205,7 @@ func (c *Client) Use(hooks ...Hook) {
 	c.CacheEntry.Use(hooks...)
 	c.StorageDeletion.Use(hooks...)
 	c.StorageLocation.Use(hooks...)
+	c.StorageReaderLease.Use(hooks...)
 	c.Upload.Use(hooks...)
 }
 
@@ -208,6 +215,7 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 	c.CacheEntry.Intercept(interceptors...)
 	c.StorageDeletion.Intercept(interceptors...)
 	c.StorageLocation.Intercept(interceptors...)
+	c.StorageReaderLease.Intercept(interceptors...)
 	c.Upload.Intercept(interceptors...)
 }
 
@@ -220,6 +228,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.StorageDeletion.mutate(ctx, m)
 	case *StorageLocationMutation:
 		return c.StorageLocation.mutate(ctx, m)
+	case *StorageReaderLeaseMutation:
+		return c.StorageReaderLease.mutate(ctx, m)
 	case *UploadMutation:
 		return c.Upload.mutate(ctx, m)
 	default:
@@ -633,6 +643,22 @@ func (c *StorageLocationClient) QueryCacheEntries(_m *StorageLocation) *CacheEnt
 	return query
 }
 
+// QueryReaderLeases queries the readerLeases edge of a StorageLocation.
+func (c *StorageLocationClient) QueryReaderLeases(_m *StorageLocation) *StorageReaderLeaseQuery {
+	query := (&StorageReaderLeaseClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(storagelocation.Table, storagelocation.FieldID, id),
+			sqlgraph.To(storagereaderlease.Table, storagereaderlease.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, storagelocation.ReaderLeasesTable, storagelocation.ReaderLeasesColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *StorageLocationClient) Hooks() []Hook {
 	return c.hooks.StorageLocation
@@ -655,6 +681,155 @@ func (c *StorageLocationClient) mutate(ctx context.Context, m *StorageLocationMu
 		return (&StorageLocationDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown StorageLocation mutation op: %q", m.Op())
+	}
+}
+
+// StorageReaderLeaseClient is a client for the StorageReaderLease schema.
+type StorageReaderLeaseClient struct {
+	config
+}
+
+// NewStorageReaderLeaseClient returns a client for the StorageReaderLease from the given config.
+func NewStorageReaderLeaseClient(c config) *StorageReaderLeaseClient {
+	return &StorageReaderLeaseClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `storagereaderlease.Hooks(f(g(h())))`.
+func (c *StorageReaderLeaseClient) Use(hooks ...Hook) {
+	c.hooks.StorageReaderLease = append(c.hooks.StorageReaderLease, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `storagereaderlease.Intercept(f(g(h())))`.
+func (c *StorageReaderLeaseClient) Intercept(interceptors ...Interceptor) {
+	c.inters.StorageReaderLease = append(c.inters.StorageReaderLease, interceptors...)
+}
+
+// Create returns a builder for creating a StorageReaderLease entity.
+func (c *StorageReaderLeaseClient) Create() *StorageReaderLeaseCreate {
+	mutation := newStorageReaderLeaseMutation(c.config, OpCreate)
+	return &StorageReaderLeaseCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of StorageReaderLease entities.
+func (c *StorageReaderLeaseClient) CreateBulk(builders ...*StorageReaderLeaseCreate) *StorageReaderLeaseCreateBulk {
+	return &StorageReaderLeaseCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *StorageReaderLeaseClient) MapCreateBulk(slice any, setFunc func(*StorageReaderLeaseCreate, int)) *StorageReaderLeaseCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &StorageReaderLeaseCreateBulk{err: fmt.Errorf("calling to StorageReaderLeaseClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*StorageReaderLeaseCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &StorageReaderLeaseCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for StorageReaderLease.
+func (c *StorageReaderLeaseClient) Update() *StorageReaderLeaseUpdate {
+	mutation := newStorageReaderLeaseMutation(c.config, OpUpdate)
+	return &StorageReaderLeaseUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *StorageReaderLeaseClient) UpdateOne(_m *StorageReaderLease) *StorageReaderLeaseUpdateOne {
+	mutation := newStorageReaderLeaseMutation(c.config, OpUpdateOne, withStorageReaderLease(_m))
+	return &StorageReaderLeaseUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *StorageReaderLeaseClient) UpdateOneID(id string) *StorageReaderLeaseUpdateOne {
+	mutation := newStorageReaderLeaseMutation(c.config, OpUpdateOne, withStorageReaderLeaseID(id))
+	return &StorageReaderLeaseUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for StorageReaderLease.
+func (c *StorageReaderLeaseClient) Delete() *StorageReaderLeaseDelete {
+	mutation := newStorageReaderLeaseMutation(c.config, OpDelete)
+	return &StorageReaderLeaseDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *StorageReaderLeaseClient) DeleteOne(_m *StorageReaderLease) *StorageReaderLeaseDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *StorageReaderLeaseClient) DeleteOneID(id string) *StorageReaderLeaseDeleteOne {
+	builder := c.Delete().Where(storagereaderlease.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &StorageReaderLeaseDeleteOne{builder}
+}
+
+// Query returns a query builder for StorageReaderLease.
+func (c *StorageReaderLeaseClient) Query() *StorageReaderLeaseQuery {
+	return &StorageReaderLeaseQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeStorageReaderLease},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a StorageReaderLease entity by its id.
+func (c *StorageReaderLeaseClient) Get(ctx context.Context, id string) (*StorageReaderLease, error) {
+	return c.Query().Where(storagereaderlease.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *StorageReaderLeaseClient) GetX(ctx context.Context, id string) *StorageReaderLease {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryStorageLocation queries the storageLocation edge of a StorageReaderLease.
+func (c *StorageReaderLeaseClient) QueryStorageLocation(_m *StorageReaderLease) *StorageLocationQuery {
+	query := (&StorageLocationClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(storagereaderlease.Table, storagereaderlease.FieldID, id),
+			sqlgraph.To(storagelocation.Table, storagelocation.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, storagereaderlease.StorageLocationTable, storagereaderlease.StorageLocationColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *StorageReaderLeaseClient) Hooks() []Hook {
+	return c.hooks.StorageReaderLease
+}
+
+// Interceptors returns the client interceptors.
+func (c *StorageReaderLeaseClient) Interceptors() []Interceptor {
+	return c.inters.StorageReaderLease
+}
+
+func (c *StorageReaderLeaseClient) mutate(ctx context.Context, m *StorageReaderLeaseMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&StorageReaderLeaseCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&StorageReaderLeaseUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&StorageReaderLeaseUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&StorageReaderLeaseDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown StorageReaderLease mutation op: %q", m.Op())
 	}
 }
 
@@ -794,9 +969,11 @@ func (c *UploadClient) mutate(ctx context.Context, m *UploadMutation) (Value, er
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		CacheEntry, StorageDeletion, StorageLocation, Upload []ent.Hook
+		CacheEntry, StorageDeletion, StorageLocation, StorageReaderLease,
+		Upload []ent.Hook
 	}
 	inters struct {
-		CacheEntry, StorageDeletion, StorageLocation, Upload []ent.Interceptor
+		CacheEntry, StorageDeletion, StorageLocation, StorageReaderLease,
+		Upload []ent.Interceptor
 	}
 )

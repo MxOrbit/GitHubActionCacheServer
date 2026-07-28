@@ -159,14 +159,11 @@ func (h *Handler) managementRPCDeleteCacheEntries(c *gin.Context, input map[stri
 		return
 	}
 
-	locationIDs := cacheEntryLocationIDs(entries)
-	_, err = h.db.CacheEntry.Delete().Where(cacheEntryIDs(entries)...).Exec(c.Request.Context())
-	if err != nil {
+	if err := h.deleteManagementCacheEntries(c.Request.Context(), cacheEntryIDs(entries)); err != nil {
 		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
 		return
 	}
 
-	h.cleanupOrphanStorageLocations(c, locationIDs)
 	managementRPCUndefined(c)
 }
 
@@ -178,7 +175,10 @@ func (h *Handler) managementRPCGetStorageLocation(c *gin.Context, input map[stri
 	}
 
 	location, err := h.db.StorageLocation.Query().
-		Where(storagelocation.ID(id)).
+		Where(
+			storagelocation.ID(id),
+			storagelocation.DeletionRequestedAtIsNil(),
+		).
 		Only(c.Request.Context())
 	if err != nil {
 		if ent.IsNotFound(err) {

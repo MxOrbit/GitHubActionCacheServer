@@ -16,8 +16,16 @@ const (
 	FieldFolderName = "folderName"
 	// FieldPartCount holds the string denoting the partcount field in the database.
 	FieldPartCount = "partCount"
+	// FieldLeaseVersion holds the string denoting the leaseversion field in the database.
+	FieldLeaseVersion = "leaseVersion"
+	// FieldDeletionRequestedAt holds the string denoting the deletionrequestedat field in the database.
+	FieldDeletionRequestedAt = "deletionRequestedAt"
 	// FieldMergeStartedAt holds the string denoting the mergestartedat field in the database.
 	FieldMergeStartedAt = "mergeStartedAt"
+	// FieldMergeLeaseToken holds the string denoting the mergeleasetoken field in the database.
+	FieldMergeLeaseToken = "mergeLeaseToken"
+	// FieldMergeLeaseExpiresAt holds the string denoting the mergeleaseexpiresat field in the database.
+	FieldMergeLeaseExpiresAt = "mergeLeaseExpiresAt"
 	// FieldMergedAt holds the string denoting the mergedat field in the database.
 	FieldMergedAt = "mergedAt"
 	// FieldMaterializationUnsupportedAt holds the string denoting the materializationunsupportedat field in the database.
@@ -28,6 +36,8 @@ const (
 	FieldLastDownloadedAt = "lastDownloadedAt"
 	// EdgeCacheEntries holds the string denoting the cacheentries edge name in mutations.
 	EdgeCacheEntries = "cacheEntries"
+	// EdgeReaderLeases holds the string denoting the readerleases edge name in mutations.
+	EdgeReaderLeases = "readerLeases"
 	// Table holds the table name of the storagelocation in the database.
 	Table = "storage_locations"
 	// CacheEntriesTable is the table that holds the cacheEntries relation/edge.
@@ -37,6 +47,13 @@ const (
 	CacheEntriesInverseTable = "cache_entries"
 	// CacheEntriesColumn is the table column denoting the cacheEntries relation/edge.
 	CacheEntriesColumn = "locationId"
+	// ReaderLeasesTable is the table that holds the readerLeases relation/edge.
+	ReaderLeasesTable = "storage_reader_leases"
+	// ReaderLeasesInverseTable is the table name for the StorageReaderLease entity.
+	// It exists in this package in order to avoid circular dependency with the "storagereaderlease" package.
+	ReaderLeasesInverseTable = "storage_reader_leases"
+	// ReaderLeasesColumn is the table column denoting the readerLeases relation/edge.
+	ReaderLeasesColumn = "storageLocationId"
 )
 
 // Columns holds all SQL columns for storagelocation fields.
@@ -44,7 +61,11 @@ var Columns = []string{
 	FieldID,
 	FieldFolderName,
 	FieldPartCount,
+	FieldLeaseVersion,
+	FieldDeletionRequestedAt,
 	FieldMergeStartedAt,
+	FieldMergeLeaseToken,
+	FieldMergeLeaseExpiresAt,
 	FieldMergedAt,
 	FieldMaterializationUnsupportedAt,
 	FieldPartsDeletedAt,
@@ -66,6 +87,10 @@ var (
 	FolderNameValidator func(string) error
 	// PartCountValidator is a validator for the "partCount" field. It is called by the builders before save.
 	PartCountValidator func(int) error
+	// DefaultLeaseVersion holds the default value on creation for the "leaseVersion" field.
+	DefaultLeaseVersion int64
+	// LeaseVersionValidator is a validator for the "leaseVersion" field. It is called by the builders before save.
+	LeaseVersionValidator func(int64) error
 )
 
 // OrderOption defines the ordering options for the StorageLocation queries.
@@ -86,9 +111,29 @@ func ByPartCount(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPartCount, opts...).ToFunc()
 }
 
+// ByLeaseVersion orders the results by the leaseVersion field.
+func ByLeaseVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLeaseVersion, opts...).ToFunc()
+}
+
+// ByDeletionRequestedAt orders the results by the deletionRequestedAt field.
+func ByDeletionRequestedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionRequestedAt, opts...).ToFunc()
+}
+
 // ByMergeStartedAt orders the results by the mergeStartedAt field.
 func ByMergeStartedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMergeStartedAt, opts...).ToFunc()
+}
+
+// ByMergeLeaseToken orders the results by the mergeLeaseToken field.
+func ByMergeLeaseToken(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMergeLeaseToken, opts...).ToFunc()
+}
+
+// ByMergeLeaseExpiresAt orders the results by the mergeLeaseExpiresAt field.
+func ByMergeLeaseExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMergeLeaseExpiresAt, opts...).ToFunc()
 }
 
 // ByMergedAt orders the results by the mergedAt field.
@@ -124,10 +169,31 @@ func ByCacheEntries(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newCacheEntriesStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByReaderLeasesCount orders the results by readerLeases count.
+func ByReaderLeasesCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newReaderLeasesStep(), opts...)
+	}
+}
+
+// ByReaderLeases orders the results by readerLeases terms.
+func ByReaderLeases(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newReaderLeasesStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newCacheEntriesStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(CacheEntriesInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, CacheEntriesTable, CacheEntriesColumn),
+	)
+}
+func newReaderLeasesStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(ReaderLeasesInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, ReaderLeasesTable, ReaderLeasesColumn),
 	)
 }

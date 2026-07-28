@@ -14,6 +14,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 )
 
@@ -26,10 +27,11 @@ const (
 	OpUpdateOne = ent.OpUpdateOne
 
 	// Node types.
-	TypeCacheEntry      = "CacheEntry"
-	TypeStorageDeletion = "StorageDeletion"
-	TypeStorageLocation = "StorageLocation"
-	TypeUpload          = "Upload"
+	TypeCacheEntry         = "CacheEntry"
+	TypeStorageDeletion    = "StorageDeletion"
+	TypeStorageLocation    = "StorageLocation"
+	TypeStorageReaderLease = "StorageReaderLease"
+	TypeUpload             = "Upload"
 )
 
 // CacheEntryMutation represents an operation that mutates the CacheEntry nodes in the graph.
@@ -1438,8 +1440,15 @@ type StorageLocationMutation struct {
 	folderName                      *string
 	partCount                       *int
 	addpartCount                    *int
+	leaseVersion                    *int64
+	addleaseVersion                 *int64
+	deletionRequestedAt             *int64
+	adddeletionRequestedAt          *int64
 	mergeStartedAt                  *int64
 	addmergeStartedAt               *int64
+	mergeLeaseToken                 *string
+	mergeLeaseExpiresAt             *int64
+	addmergeLeaseExpiresAt          *int64
 	mergedAt                        *int64
 	addmergedAt                     *int64
 	materializationUnsupportedAt    *int64
@@ -1452,6 +1461,9 @@ type StorageLocationMutation struct {
 	cacheEntries                    map[string]struct{}
 	removedcacheEntries             map[string]struct{}
 	clearedcacheEntries             bool
+	readerLeases                    map[string]struct{}
+	removedreaderLeases             map[string]struct{}
+	clearedreaderLeases             bool
 	done                            bool
 	oldValue                        func(context.Context) (*StorageLocation, error)
 	predicates                      []predicate.StorageLocation
@@ -1653,6 +1665,132 @@ func (m *StorageLocationMutation) ResetPartCount() {
 	m.addpartCount = nil
 }
 
+// SetLeaseVersion sets the "leaseVersion" field.
+func (m *StorageLocationMutation) SetLeaseVersion(i int64) {
+	m.leaseVersion = &i
+	m.addleaseVersion = nil
+}
+
+// LeaseVersion returns the value of the "leaseVersion" field in the mutation.
+func (m *StorageLocationMutation) LeaseVersion() (r int64, exists bool) {
+	v := m.leaseVersion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseVersion returns the old "leaseVersion" field's value of the StorageLocation entity.
+// If the StorageLocation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageLocationMutation) OldLeaseVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseVersion: %w", err)
+	}
+	return oldValue.LeaseVersion, nil
+}
+
+// AddLeaseVersion adds i to the "leaseVersion" field.
+func (m *StorageLocationMutation) AddLeaseVersion(i int64) {
+	if m.addleaseVersion != nil {
+		*m.addleaseVersion += i
+	} else {
+		m.addleaseVersion = &i
+	}
+}
+
+// AddedLeaseVersion returns the value that was added to the "leaseVersion" field in this mutation.
+func (m *StorageLocationMutation) AddedLeaseVersion() (r int64, exists bool) {
+	v := m.addleaseVersion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetLeaseVersion resets all changes to the "leaseVersion" field.
+func (m *StorageLocationMutation) ResetLeaseVersion() {
+	m.leaseVersion = nil
+	m.addleaseVersion = nil
+}
+
+// SetDeletionRequestedAt sets the "deletionRequestedAt" field.
+func (m *StorageLocationMutation) SetDeletionRequestedAt(i int64) {
+	m.deletionRequestedAt = &i
+	m.adddeletionRequestedAt = nil
+}
+
+// DeletionRequestedAt returns the value of the "deletionRequestedAt" field in the mutation.
+func (m *StorageLocationMutation) DeletionRequestedAt() (r int64, exists bool) {
+	v := m.deletionRequestedAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionRequestedAt returns the old "deletionRequestedAt" field's value of the StorageLocation entity.
+// If the StorageLocation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageLocationMutation) OldDeletionRequestedAt(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionRequestedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionRequestedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionRequestedAt: %w", err)
+	}
+	return oldValue.DeletionRequestedAt, nil
+}
+
+// AddDeletionRequestedAt adds i to the "deletionRequestedAt" field.
+func (m *StorageLocationMutation) AddDeletionRequestedAt(i int64) {
+	if m.adddeletionRequestedAt != nil {
+		*m.adddeletionRequestedAt += i
+	} else {
+		m.adddeletionRequestedAt = &i
+	}
+}
+
+// AddedDeletionRequestedAt returns the value that was added to the "deletionRequestedAt" field in this mutation.
+func (m *StorageLocationMutation) AddedDeletionRequestedAt() (r int64, exists bool) {
+	v := m.adddeletionRequestedAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearDeletionRequestedAt clears the value of the "deletionRequestedAt" field.
+func (m *StorageLocationMutation) ClearDeletionRequestedAt() {
+	m.deletionRequestedAt = nil
+	m.adddeletionRequestedAt = nil
+	m.clearedFields[storagelocation.FieldDeletionRequestedAt] = struct{}{}
+}
+
+// DeletionRequestedAtCleared returns if the "deletionRequestedAt" field was cleared in this mutation.
+func (m *StorageLocationMutation) DeletionRequestedAtCleared() bool {
+	_, ok := m.clearedFields[storagelocation.FieldDeletionRequestedAt]
+	return ok
+}
+
+// ResetDeletionRequestedAt resets all changes to the "deletionRequestedAt" field.
+func (m *StorageLocationMutation) ResetDeletionRequestedAt() {
+	m.deletionRequestedAt = nil
+	m.adddeletionRequestedAt = nil
+	delete(m.clearedFields, storagelocation.FieldDeletionRequestedAt)
+}
+
 // SetMergeStartedAt sets the "mergeStartedAt" field.
 func (m *StorageLocationMutation) SetMergeStartedAt(i int64) {
 	m.mergeStartedAt = &i
@@ -1721,6 +1859,125 @@ func (m *StorageLocationMutation) ResetMergeStartedAt() {
 	m.mergeStartedAt = nil
 	m.addmergeStartedAt = nil
 	delete(m.clearedFields, storagelocation.FieldMergeStartedAt)
+}
+
+// SetMergeLeaseToken sets the "mergeLeaseToken" field.
+func (m *StorageLocationMutation) SetMergeLeaseToken(s string) {
+	m.mergeLeaseToken = &s
+}
+
+// MergeLeaseToken returns the value of the "mergeLeaseToken" field in the mutation.
+func (m *StorageLocationMutation) MergeLeaseToken() (r string, exists bool) {
+	v := m.mergeLeaseToken
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMergeLeaseToken returns the old "mergeLeaseToken" field's value of the StorageLocation entity.
+// If the StorageLocation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageLocationMutation) OldMergeLeaseToken(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMergeLeaseToken is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMergeLeaseToken requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMergeLeaseToken: %w", err)
+	}
+	return oldValue.MergeLeaseToken, nil
+}
+
+// ClearMergeLeaseToken clears the value of the "mergeLeaseToken" field.
+func (m *StorageLocationMutation) ClearMergeLeaseToken() {
+	m.mergeLeaseToken = nil
+	m.clearedFields[storagelocation.FieldMergeLeaseToken] = struct{}{}
+}
+
+// MergeLeaseTokenCleared returns if the "mergeLeaseToken" field was cleared in this mutation.
+func (m *StorageLocationMutation) MergeLeaseTokenCleared() bool {
+	_, ok := m.clearedFields[storagelocation.FieldMergeLeaseToken]
+	return ok
+}
+
+// ResetMergeLeaseToken resets all changes to the "mergeLeaseToken" field.
+func (m *StorageLocationMutation) ResetMergeLeaseToken() {
+	m.mergeLeaseToken = nil
+	delete(m.clearedFields, storagelocation.FieldMergeLeaseToken)
+}
+
+// SetMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field.
+func (m *StorageLocationMutation) SetMergeLeaseExpiresAt(i int64) {
+	m.mergeLeaseExpiresAt = &i
+	m.addmergeLeaseExpiresAt = nil
+}
+
+// MergeLeaseExpiresAt returns the value of the "mergeLeaseExpiresAt" field in the mutation.
+func (m *StorageLocationMutation) MergeLeaseExpiresAt() (r int64, exists bool) {
+	v := m.mergeLeaseExpiresAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMergeLeaseExpiresAt returns the old "mergeLeaseExpiresAt" field's value of the StorageLocation entity.
+// If the StorageLocation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageLocationMutation) OldMergeLeaseExpiresAt(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMergeLeaseExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMergeLeaseExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMergeLeaseExpiresAt: %w", err)
+	}
+	return oldValue.MergeLeaseExpiresAt, nil
+}
+
+// AddMergeLeaseExpiresAt adds i to the "mergeLeaseExpiresAt" field.
+func (m *StorageLocationMutation) AddMergeLeaseExpiresAt(i int64) {
+	if m.addmergeLeaseExpiresAt != nil {
+		*m.addmergeLeaseExpiresAt += i
+	} else {
+		m.addmergeLeaseExpiresAt = &i
+	}
+}
+
+// AddedMergeLeaseExpiresAt returns the value that was added to the "mergeLeaseExpiresAt" field in this mutation.
+func (m *StorageLocationMutation) AddedMergeLeaseExpiresAt() (r int64, exists bool) {
+	v := m.addmergeLeaseExpiresAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearMergeLeaseExpiresAt clears the value of the "mergeLeaseExpiresAt" field.
+func (m *StorageLocationMutation) ClearMergeLeaseExpiresAt() {
+	m.mergeLeaseExpiresAt = nil
+	m.addmergeLeaseExpiresAt = nil
+	m.clearedFields[storagelocation.FieldMergeLeaseExpiresAt] = struct{}{}
+}
+
+// MergeLeaseExpiresAtCleared returns if the "mergeLeaseExpiresAt" field was cleared in this mutation.
+func (m *StorageLocationMutation) MergeLeaseExpiresAtCleared() bool {
+	_, ok := m.clearedFields[storagelocation.FieldMergeLeaseExpiresAt]
+	return ok
+}
+
+// ResetMergeLeaseExpiresAt resets all changes to the "mergeLeaseExpiresAt" field.
+func (m *StorageLocationMutation) ResetMergeLeaseExpiresAt() {
+	m.mergeLeaseExpiresAt = nil
+	m.addmergeLeaseExpiresAt = nil
+	delete(m.clearedFields, storagelocation.FieldMergeLeaseExpiresAt)
 }
 
 // SetMergedAt sets the "mergedAt" field.
@@ -2057,6 +2314,60 @@ func (m *StorageLocationMutation) ResetCacheEntries() {
 	m.removedcacheEntries = nil
 }
 
+// AddReaderLeaseIDs adds the "readerLeases" edge to the StorageReaderLease entity by ids.
+func (m *StorageLocationMutation) AddReaderLeaseIDs(ids ...string) {
+	if m.readerLeases == nil {
+		m.readerLeases = make(map[string]struct{})
+	}
+	for i := range ids {
+		m.readerLeases[ids[i]] = struct{}{}
+	}
+}
+
+// ClearReaderLeases clears the "readerLeases" edge to the StorageReaderLease entity.
+func (m *StorageLocationMutation) ClearReaderLeases() {
+	m.clearedreaderLeases = true
+}
+
+// ReaderLeasesCleared reports if the "readerLeases" edge to the StorageReaderLease entity was cleared.
+func (m *StorageLocationMutation) ReaderLeasesCleared() bool {
+	return m.clearedreaderLeases
+}
+
+// RemoveReaderLeaseIDs removes the "readerLeases" edge to the StorageReaderLease entity by IDs.
+func (m *StorageLocationMutation) RemoveReaderLeaseIDs(ids ...string) {
+	if m.removedreaderLeases == nil {
+		m.removedreaderLeases = make(map[string]struct{})
+	}
+	for i := range ids {
+		delete(m.readerLeases, ids[i])
+		m.removedreaderLeases[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedReaderLeases returns the removed IDs of the "readerLeases" edge to the StorageReaderLease entity.
+func (m *StorageLocationMutation) RemovedReaderLeasesIDs() (ids []string) {
+	for id := range m.removedreaderLeases {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ReaderLeasesIDs returns the "readerLeases" edge IDs in the mutation.
+func (m *StorageLocationMutation) ReaderLeasesIDs() (ids []string) {
+	for id := range m.readerLeases {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetReaderLeases resets all changes to the "readerLeases" edge.
+func (m *StorageLocationMutation) ResetReaderLeases() {
+	m.readerLeases = nil
+	m.clearedreaderLeases = false
+	m.removedreaderLeases = nil
+}
+
 // Where appends a list predicates to the StorageLocationMutation builder.
 func (m *StorageLocationMutation) Where(ps ...predicate.StorageLocation) {
 	m.predicates = append(m.predicates, ps...)
@@ -2091,15 +2402,27 @@ func (m *StorageLocationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *StorageLocationMutation) Fields() []string {
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 11)
 	if m.folderName != nil {
 		fields = append(fields, storagelocation.FieldFolderName)
 	}
 	if m.partCount != nil {
 		fields = append(fields, storagelocation.FieldPartCount)
 	}
+	if m.leaseVersion != nil {
+		fields = append(fields, storagelocation.FieldLeaseVersion)
+	}
+	if m.deletionRequestedAt != nil {
+		fields = append(fields, storagelocation.FieldDeletionRequestedAt)
+	}
 	if m.mergeStartedAt != nil {
 		fields = append(fields, storagelocation.FieldMergeStartedAt)
+	}
+	if m.mergeLeaseToken != nil {
+		fields = append(fields, storagelocation.FieldMergeLeaseToken)
+	}
+	if m.mergeLeaseExpiresAt != nil {
+		fields = append(fields, storagelocation.FieldMergeLeaseExpiresAt)
 	}
 	if m.mergedAt != nil {
 		fields = append(fields, storagelocation.FieldMergedAt)
@@ -2125,8 +2448,16 @@ func (m *StorageLocationMutation) Field(name string) (ent.Value, bool) {
 		return m.FolderName()
 	case storagelocation.FieldPartCount:
 		return m.PartCount()
+	case storagelocation.FieldLeaseVersion:
+		return m.LeaseVersion()
+	case storagelocation.FieldDeletionRequestedAt:
+		return m.DeletionRequestedAt()
 	case storagelocation.FieldMergeStartedAt:
 		return m.MergeStartedAt()
+	case storagelocation.FieldMergeLeaseToken:
+		return m.MergeLeaseToken()
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		return m.MergeLeaseExpiresAt()
 	case storagelocation.FieldMergedAt:
 		return m.MergedAt()
 	case storagelocation.FieldMaterializationUnsupportedAt:
@@ -2148,8 +2479,16 @@ func (m *StorageLocationMutation) OldField(ctx context.Context, name string) (en
 		return m.OldFolderName(ctx)
 	case storagelocation.FieldPartCount:
 		return m.OldPartCount(ctx)
+	case storagelocation.FieldLeaseVersion:
+		return m.OldLeaseVersion(ctx)
+	case storagelocation.FieldDeletionRequestedAt:
+		return m.OldDeletionRequestedAt(ctx)
 	case storagelocation.FieldMergeStartedAt:
 		return m.OldMergeStartedAt(ctx)
+	case storagelocation.FieldMergeLeaseToken:
+		return m.OldMergeLeaseToken(ctx)
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		return m.OldMergeLeaseExpiresAt(ctx)
 	case storagelocation.FieldMergedAt:
 		return m.OldMergedAt(ctx)
 	case storagelocation.FieldMaterializationUnsupportedAt:
@@ -2181,12 +2520,40 @@ func (m *StorageLocationMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetPartCount(v)
 		return nil
+	case storagelocation.FieldLeaseVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseVersion(v)
+		return nil
+	case storagelocation.FieldDeletionRequestedAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionRequestedAt(v)
+		return nil
 	case storagelocation.FieldMergeStartedAt:
 		v, ok := value.(int64)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetMergeStartedAt(v)
+		return nil
+	case storagelocation.FieldMergeLeaseToken:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMergeLeaseToken(v)
+		return nil
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMergeLeaseExpiresAt(v)
 		return nil
 	case storagelocation.FieldMergedAt:
 		v, ok := value.(int64)
@@ -2227,8 +2594,17 @@ func (m *StorageLocationMutation) AddedFields() []string {
 	if m.addpartCount != nil {
 		fields = append(fields, storagelocation.FieldPartCount)
 	}
+	if m.addleaseVersion != nil {
+		fields = append(fields, storagelocation.FieldLeaseVersion)
+	}
+	if m.adddeletionRequestedAt != nil {
+		fields = append(fields, storagelocation.FieldDeletionRequestedAt)
+	}
 	if m.addmergeStartedAt != nil {
 		fields = append(fields, storagelocation.FieldMergeStartedAt)
+	}
+	if m.addmergeLeaseExpiresAt != nil {
+		fields = append(fields, storagelocation.FieldMergeLeaseExpiresAt)
 	}
 	if m.addmergedAt != nil {
 		fields = append(fields, storagelocation.FieldMergedAt)
@@ -2252,8 +2628,14 @@ func (m *StorageLocationMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case storagelocation.FieldPartCount:
 		return m.AddedPartCount()
+	case storagelocation.FieldLeaseVersion:
+		return m.AddedLeaseVersion()
+	case storagelocation.FieldDeletionRequestedAt:
+		return m.AddedDeletionRequestedAt()
 	case storagelocation.FieldMergeStartedAt:
 		return m.AddedMergeStartedAt()
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		return m.AddedMergeLeaseExpiresAt()
 	case storagelocation.FieldMergedAt:
 		return m.AddedMergedAt()
 	case storagelocation.FieldMaterializationUnsupportedAt:
@@ -2278,12 +2660,33 @@ func (m *StorageLocationMutation) AddField(name string, value ent.Value) error {
 		}
 		m.AddPartCount(v)
 		return nil
+	case storagelocation.FieldLeaseVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddLeaseVersion(v)
+		return nil
+	case storagelocation.FieldDeletionRequestedAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDeletionRequestedAt(v)
+		return nil
 	case storagelocation.FieldMergeStartedAt:
 		v, ok := value.(int64)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddMergeStartedAt(v)
+		return nil
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMergeLeaseExpiresAt(v)
 		return nil
 	case storagelocation.FieldMergedAt:
 		v, ok := value.(int64)
@@ -2321,8 +2724,17 @@ func (m *StorageLocationMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *StorageLocationMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(storagelocation.FieldDeletionRequestedAt) {
+		fields = append(fields, storagelocation.FieldDeletionRequestedAt)
+	}
 	if m.FieldCleared(storagelocation.FieldMergeStartedAt) {
 		fields = append(fields, storagelocation.FieldMergeStartedAt)
+	}
+	if m.FieldCleared(storagelocation.FieldMergeLeaseToken) {
+		fields = append(fields, storagelocation.FieldMergeLeaseToken)
+	}
+	if m.FieldCleared(storagelocation.FieldMergeLeaseExpiresAt) {
+		fields = append(fields, storagelocation.FieldMergeLeaseExpiresAt)
 	}
 	if m.FieldCleared(storagelocation.FieldMergedAt) {
 		fields = append(fields, storagelocation.FieldMergedAt)
@@ -2350,8 +2762,17 @@ func (m *StorageLocationMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *StorageLocationMutation) ClearField(name string) error {
 	switch name {
+	case storagelocation.FieldDeletionRequestedAt:
+		m.ClearDeletionRequestedAt()
+		return nil
 	case storagelocation.FieldMergeStartedAt:
 		m.ClearMergeStartedAt()
+		return nil
+	case storagelocation.FieldMergeLeaseToken:
+		m.ClearMergeLeaseToken()
+		return nil
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		m.ClearMergeLeaseExpiresAt()
 		return nil
 	case storagelocation.FieldMergedAt:
 		m.ClearMergedAt()
@@ -2379,8 +2800,20 @@ func (m *StorageLocationMutation) ResetField(name string) error {
 	case storagelocation.FieldPartCount:
 		m.ResetPartCount()
 		return nil
+	case storagelocation.FieldLeaseVersion:
+		m.ResetLeaseVersion()
+		return nil
+	case storagelocation.FieldDeletionRequestedAt:
+		m.ResetDeletionRequestedAt()
+		return nil
 	case storagelocation.FieldMergeStartedAt:
 		m.ResetMergeStartedAt()
+		return nil
+	case storagelocation.FieldMergeLeaseToken:
+		m.ResetMergeLeaseToken()
+		return nil
+	case storagelocation.FieldMergeLeaseExpiresAt:
+		m.ResetMergeLeaseExpiresAt()
 		return nil
 	case storagelocation.FieldMergedAt:
 		m.ResetMergedAt()
@@ -2400,9 +2833,12 @@ func (m *StorageLocationMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *StorageLocationMutation) AddedEdges() []string {
-	edges := make([]string, 0, 1)
+	edges := make([]string, 0, 2)
 	if m.cacheEntries != nil {
 		edges = append(edges, storagelocation.EdgeCacheEntries)
+	}
+	if m.readerLeases != nil {
+		edges = append(edges, storagelocation.EdgeReaderLeases)
 	}
 	return edges
 }
@@ -2417,15 +2853,24 @@ func (m *StorageLocationMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case storagelocation.EdgeReaderLeases:
+		ids := make([]ent.Value, 0, len(m.readerLeases))
+		for id := range m.readerLeases {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *StorageLocationMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 1)
+	edges := make([]string, 0, 2)
 	if m.removedcacheEntries != nil {
 		edges = append(edges, storagelocation.EdgeCacheEntries)
+	}
+	if m.removedreaderLeases != nil {
+		edges = append(edges, storagelocation.EdgeReaderLeases)
 	}
 	return edges
 }
@@ -2440,15 +2885,24 @@ func (m *StorageLocationMutation) RemovedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case storagelocation.EdgeReaderLeases:
+		ids := make([]ent.Value, 0, len(m.removedreaderLeases))
+		for id := range m.removedreaderLeases {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *StorageLocationMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 1)
+	edges := make([]string, 0, 2)
 	if m.clearedcacheEntries {
 		edges = append(edges, storagelocation.EdgeCacheEntries)
+	}
+	if m.clearedreaderLeases {
+		edges = append(edges, storagelocation.EdgeReaderLeases)
 	}
 	return edges
 }
@@ -2459,6 +2913,8 @@ func (m *StorageLocationMutation) EdgeCleared(name string) bool {
 	switch name {
 	case storagelocation.EdgeCacheEntries:
 		return m.clearedcacheEntries
+	case storagelocation.EdgeReaderLeases:
+		return m.clearedreaderLeases
 	}
 	return false
 }
@@ -2478,8 +2934,554 @@ func (m *StorageLocationMutation) ResetEdge(name string) error {
 	case storagelocation.EdgeCacheEntries:
 		m.ResetCacheEntries()
 		return nil
+	case storagelocation.EdgeReaderLeases:
+		m.ResetReaderLeases()
+		return nil
 	}
 	return fmt.Errorf("unknown StorageLocation edge %s", name)
+}
+
+// StorageReaderLeaseMutation represents an operation that mutates the StorageReaderLease nodes in the graph.
+type StorageReaderLeaseMutation struct {
+	config
+	op                     Op
+	typ                    string
+	id                     *string
+	scope                  *storagereaderlease.Scope
+	expiresAt              *int64
+	addexpiresAt           *int64
+	clearedFields          map[string]struct{}
+	storageLocation        *string
+	clearedstorageLocation bool
+	done                   bool
+	oldValue               func(context.Context) (*StorageReaderLease, error)
+	predicates             []predicate.StorageReaderLease
+}
+
+var _ ent.Mutation = (*StorageReaderLeaseMutation)(nil)
+
+// storagereaderleaseOption allows management of the mutation configuration using functional options.
+type storagereaderleaseOption func(*StorageReaderLeaseMutation)
+
+// newStorageReaderLeaseMutation creates new mutation for the StorageReaderLease entity.
+func newStorageReaderLeaseMutation(c config, op Op, opts ...storagereaderleaseOption) *StorageReaderLeaseMutation {
+	m := &StorageReaderLeaseMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeStorageReaderLease,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withStorageReaderLeaseID sets the ID field of the mutation.
+func withStorageReaderLeaseID(id string) storagereaderleaseOption {
+	return func(m *StorageReaderLeaseMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *StorageReaderLease
+		)
+		m.oldValue = func(ctx context.Context) (*StorageReaderLease, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().StorageReaderLease.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withStorageReaderLease sets the old StorageReaderLease of the mutation.
+func withStorageReaderLease(node *StorageReaderLease) storagereaderleaseOption {
+	return func(m *StorageReaderLeaseMutation) {
+		m.oldValue = func(context.Context) (*StorageReaderLease, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m StorageReaderLeaseMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m StorageReaderLeaseMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of StorageReaderLease entities.
+func (m *StorageReaderLeaseMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *StorageReaderLeaseMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *StorageReaderLeaseMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().StorageReaderLease.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetStorageLocationId sets the "storageLocationId" field.
+func (m *StorageReaderLeaseMutation) SetStorageLocationId(s string) {
+	m.storageLocation = &s
+}
+
+// StorageLocationId returns the value of the "storageLocationId" field in the mutation.
+func (m *StorageReaderLeaseMutation) StorageLocationId() (r string, exists bool) {
+	v := m.storageLocation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStorageLocationId returns the old "storageLocationId" field's value of the StorageReaderLease entity.
+// If the StorageReaderLease object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageReaderLeaseMutation) OldStorageLocationId(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStorageLocationId is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStorageLocationId requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStorageLocationId: %w", err)
+	}
+	return oldValue.StorageLocationId, nil
+}
+
+// ResetStorageLocationId resets all changes to the "storageLocationId" field.
+func (m *StorageReaderLeaseMutation) ResetStorageLocationId() {
+	m.storageLocation = nil
+}
+
+// SetScope sets the "scope" field.
+func (m *StorageReaderLeaseMutation) SetScope(s storagereaderlease.Scope) {
+	m.scope = &s
+}
+
+// Scope returns the value of the "scope" field in the mutation.
+func (m *StorageReaderLeaseMutation) Scope() (r storagereaderlease.Scope, exists bool) {
+	v := m.scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScope returns the old "scope" field's value of the StorageReaderLease entity.
+// If the StorageReaderLease object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageReaderLeaseMutation) OldScope(ctx context.Context) (v storagereaderlease.Scope, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScope: %w", err)
+	}
+	return oldValue.Scope, nil
+}
+
+// ResetScope resets all changes to the "scope" field.
+func (m *StorageReaderLeaseMutation) ResetScope() {
+	m.scope = nil
+}
+
+// SetExpiresAt sets the "expiresAt" field.
+func (m *StorageReaderLeaseMutation) SetExpiresAt(i int64) {
+	m.expiresAt = &i
+	m.addexpiresAt = nil
+}
+
+// ExpiresAt returns the value of the "expiresAt" field in the mutation.
+func (m *StorageReaderLeaseMutation) ExpiresAt() (r int64, exists bool) {
+	v := m.expiresAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expiresAt" field's value of the StorageReaderLease entity.
+// If the StorageReaderLease object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageReaderLeaseMutation) OldExpiresAt(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// AddExpiresAt adds i to the "expiresAt" field.
+func (m *StorageReaderLeaseMutation) AddExpiresAt(i int64) {
+	if m.addexpiresAt != nil {
+		*m.addexpiresAt += i
+	} else {
+		m.addexpiresAt = &i
+	}
+}
+
+// AddedExpiresAt returns the value that was added to the "expiresAt" field in this mutation.
+func (m *StorageReaderLeaseMutation) AddedExpiresAt() (r int64, exists bool) {
+	v := m.addexpiresAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetExpiresAt resets all changes to the "expiresAt" field.
+func (m *StorageReaderLeaseMutation) ResetExpiresAt() {
+	m.expiresAt = nil
+	m.addexpiresAt = nil
+}
+
+// SetStorageLocationID sets the "storageLocation" edge to the StorageLocation entity by id.
+func (m *StorageReaderLeaseMutation) SetStorageLocationID(id string) {
+	m.storageLocation = &id
+}
+
+// ClearStorageLocation clears the "storageLocation" edge to the StorageLocation entity.
+func (m *StorageReaderLeaseMutation) ClearStorageLocation() {
+	m.clearedstorageLocation = true
+	m.clearedFields[storagereaderlease.FieldStorageLocationId] = struct{}{}
+}
+
+// StorageLocationCleared reports if the "storageLocation" edge to the StorageLocation entity was cleared.
+func (m *StorageReaderLeaseMutation) StorageLocationCleared() bool {
+	return m.clearedstorageLocation
+}
+
+// StorageLocationID returns the "storageLocation" edge ID in the mutation.
+func (m *StorageReaderLeaseMutation) StorageLocationID() (id string, exists bool) {
+	if m.storageLocation != nil {
+		return *m.storageLocation, true
+	}
+	return
+}
+
+// StorageLocationIDs returns the "storageLocation" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// StorageLocationID instead. It exists only for internal usage by the builders.
+func (m *StorageReaderLeaseMutation) StorageLocationIDs() (ids []string) {
+	if id := m.storageLocation; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetStorageLocation resets all changes to the "storageLocation" edge.
+func (m *StorageReaderLeaseMutation) ResetStorageLocation() {
+	m.storageLocation = nil
+	m.clearedstorageLocation = false
+}
+
+// Where appends a list predicates to the StorageReaderLeaseMutation builder.
+func (m *StorageReaderLeaseMutation) Where(ps ...predicate.StorageReaderLease) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the StorageReaderLeaseMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *StorageReaderLeaseMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.StorageReaderLease, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *StorageReaderLeaseMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *StorageReaderLeaseMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (StorageReaderLease).
+func (m *StorageReaderLeaseMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *StorageReaderLeaseMutation) Fields() []string {
+	fields := make([]string, 0, 3)
+	if m.storageLocation != nil {
+		fields = append(fields, storagereaderlease.FieldStorageLocationId)
+	}
+	if m.scope != nil {
+		fields = append(fields, storagereaderlease.FieldScope)
+	}
+	if m.expiresAt != nil {
+		fields = append(fields, storagereaderlease.FieldExpiresAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *StorageReaderLeaseMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case storagereaderlease.FieldStorageLocationId:
+		return m.StorageLocationId()
+	case storagereaderlease.FieldScope:
+		return m.Scope()
+	case storagereaderlease.FieldExpiresAt:
+		return m.ExpiresAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *StorageReaderLeaseMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case storagereaderlease.FieldStorageLocationId:
+		return m.OldStorageLocationId(ctx)
+	case storagereaderlease.FieldScope:
+		return m.OldScope(ctx)
+	case storagereaderlease.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown StorageReaderLease field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *StorageReaderLeaseMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case storagereaderlease.FieldStorageLocationId:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStorageLocationId(v)
+		return nil
+	case storagereaderlease.FieldScope:
+		v, ok := value.(storagereaderlease.Scope)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScope(v)
+		return nil
+	case storagereaderlease.FieldExpiresAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown StorageReaderLease field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *StorageReaderLeaseMutation) AddedFields() []string {
+	var fields []string
+	if m.addexpiresAt != nil {
+		fields = append(fields, storagereaderlease.FieldExpiresAt)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *StorageReaderLeaseMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case storagereaderlease.FieldExpiresAt:
+		return m.AddedExpiresAt()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *StorageReaderLeaseMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case storagereaderlease.FieldExpiresAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddExpiresAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown StorageReaderLease numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *StorageReaderLeaseMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *StorageReaderLeaseMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *StorageReaderLeaseMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown StorageReaderLease nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *StorageReaderLeaseMutation) ResetField(name string) error {
+	switch name {
+	case storagereaderlease.FieldStorageLocationId:
+		m.ResetStorageLocationId()
+		return nil
+	case storagereaderlease.FieldScope:
+		m.ResetScope()
+		return nil
+	case storagereaderlease.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown StorageReaderLease field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *StorageReaderLeaseMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.storageLocation != nil {
+		edges = append(edges, storagereaderlease.EdgeStorageLocation)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *StorageReaderLeaseMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case storagereaderlease.EdgeStorageLocation:
+		if id := m.storageLocation; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *StorageReaderLeaseMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *StorageReaderLeaseMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *StorageReaderLeaseMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedstorageLocation {
+		edges = append(edges, storagereaderlease.EdgeStorageLocation)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *StorageReaderLeaseMutation) EdgeCleared(name string) bool {
+	switch name {
+	case storagereaderlease.EdgeStorageLocation:
+		return m.clearedstorageLocation
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *StorageReaderLeaseMutation) ClearEdge(name string) error {
+	switch name {
+	case storagereaderlease.EdgeStorageLocation:
+		m.ClearStorageLocation()
+		return nil
+	}
+	return fmt.Errorf("unknown StorageReaderLease unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *StorageReaderLeaseMutation) ResetEdge(name string) error {
+	switch name {
+	case storagereaderlease.EdgeStorageLocation:
+		m.ResetStorageLocation()
+		return nil
+	}
+	return fmt.Errorf("unknown StorageReaderLease edge %s", name)
 }
 
 // UploadMutation represents an operation that mutates the Upload nodes in the graph.

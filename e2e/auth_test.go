@@ -8,6 +8,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog"
@@ -79,8 +80,9 @@ func newTestRouter(t *testing.T) http.Handler {
 }
 
 type testApp struct {
-	router http.Handler
-	db     *ent.Client
+	router    http.Handler
+	db        *ent.Client
+	lifecycle *storagelifecycle.Service
 }
 
 func newTestApp(t *testing.T) testApp {
@@ -89,13 +91,16 @@ func newTestApp(t *testing.T) testApp {
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
 	cfg, err := config.Load()
 	require.NoError(t, err)
+	lifecycle := storagelifecycle.New(client)
 	router := httpapi.NewRouter(zerolog.Nop(), cfg, httpapi.Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
+		DB:        client,
+		Storage:   storageAdapter,
+		Lifecycle: lifecycle,
 	})
 
 	return testApp{
-		router: router,
-		db:     client,
+		router:    router,
+		db:        client,
+		lifecycle: lifecycle,
 	}
 }

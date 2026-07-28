@@ -13,6 +13,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -318,6 +319,60 @@ func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
 	require.Equal(t, "entry-id-folder/parts/0", adapter.objectName)
 	location := client.StorageLocation.GetX(ctx, result.CacheEntry.LocationId)
 	require.NotNil(t, location.LastDownloadedAt)
+	lease := client.StorageReaderLease.Query().OnlyX(ctx)
+	require.Equal(t, "parts", lease.Scope.String())
+	require.WithinDuration(t, time.Now().Add(storagelifecycle.DirectDownloadLeaseDuration), time.UnixMilli(lease.ExpiresAt), time.Second)
+}
+
+func TestReplacementFencesOldLocationUntilLazyReaderCloses(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	require.NoError(t, filesystem.UploadStream(ctx, "old/parts/0", bytes.NewBufferString("hello ")))
+	require.NoError(t, filesystem.UploadStream(ctx, "old/parts/1", bytes.NewBufferString("world")))
+	oldLocation := client.StorageLocation.Create().
+		SetID("old-location").
+		SetFolderName("old").
+		SetPartCount(2).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("entry-id").
+		SetKey("key").
+		SetVersion("version").
+		SetScope(scope.Scopes[0].Scope).
+		SetRepoId(scope.RepoID).
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(oldLocation).
+		SaveX(ctx)
+
+	oldStream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	firstPart := make([]byte, len("hello "))
+	_, err = io.ReadFull(oldStream, firstPart)
+	require.NoError(t, err)
+	require.Equal(t, "hello ", string(firstPart))
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("replacement")))
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+
+	pendingOld := client.StorageLocation.GetX(ctx, oldLocation.ID)
+	require.NotNil(t, pendingOld.DeletionRequestedAt)
+	require.Equal(t, 1, client.StorageReaderLease.Query().CountX(ctx))
+	remainder, err := io.ReadAll(oldStream)
+	require.NoError(t, err)
+	require.Equal(t, "world", string(remainder))
+	require.NoError(t, oldStream.Close())
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+
+	newStream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	newBody, err := io.ReadAll(newStream)
+	require.NoError(t, err)
+	require.NoError(t, newStream.Close())
+	require.Equal(t, "replacement", string(newBody))
 }
 
 func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
@@ -452,7 +507,7 @@ func TestStalePartsLocationDoesNotRestartCompletedMaterialization(t *testing.T) 
 	require.Equal(t, mergedAt, *current.MergedAt)
 }
 
-func TestStalledMaterializationCanBeRescheduledByRequest(t *testing.T) {
+func TestExpiredMaterializationLeaseCanBeRescheduledByRequest(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &trackingComposeStorage{Adapter: filesystem}
 	service := NewService(Options{DB: client, Storage: adapter})
@@ -460,7 +515,9 @@ func TestStalledMaterializationCanBeRescheduledByRequest(t *testing.T) {
 	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("b")))
 	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
 	client.StorageLocation.UpdateOneID(location.ID).
-		SetMergeStartedAt(time.Now().Add(-stalledMaterializationLifetime - time.Minute).UnixMilli()).
+		SetMergeStartedAt(time.Now().Add(-time.Hour).UnixMilli()).
+		SetMergeLeaseToken("expired-owner").
+		SetMergeLeaseExpiresAt(time.Now().Add(-time.Minute).UnixMilli()).
 		ExecX(ctx)
 
 	stream, err := service.Download(ctx, "entry-id")
@@ -473,26 +530,27 @@ func TestStalledMaterializationCanBeRescheduledByRequest(t *testing.T) {
 	require.Equal(t, 1, adapter.callCount())
 }
 
-func TestFailedMergeCleanupDoesNotClearCompletedMerge(t *testing.T) {
+func TestLostMaterializationOwnerCannotClearSuccessorLease(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
 	mergeStartedAt := time.Now().UnixMilli()
-	mergedAt := mergeStartedAt + 1
 	location := client.StorageLocation.Create().
 		SetID("location-id").
 		SetFolderName("folder").
-		SetPartCount(1).
+		SetPartCount(2).
 		SetMergeStartedAt(mergeStartedAt).
-		SetMergedAt(mergedAt).
+		SetMergeLeaseToken("successor").
+		SetMergeLeaseExpiresAt(time.Now().Add(time.Minute).UnixMilli()).
 		SaveX(ctx)
 
-	require.NoError(t, service.clearOwnMergeStart(ctx, location.ID, mergeStartedAt))
+	require.NoError(t, service.lifecycle.ReleaseMaterialization(ctx, location.ID, "old-owner"))
 
 	current := client.StorageLocation.GetX(ctx, location.ID)
 	require.NotNil(t, current.MergeStartedAt)
-	require.NotNil(t, current.MergedAt)
+	require.NotNil(t, current.MergeLeaseToken)
+	require.NotNil(t, current.MergeLeaseExpiresAt)
 	require.Equal(t, mergeStartedAt, *current.MergeStartedAt)
-	require.Equal(t, mergedAt, *current.MergedAt)
+	require.Equal(t, "successor", *current.MergeLeaseToken)
 }
 
 func TestDownloadIsIndependentFromBackgroundMaterialization(t *testing.T) {
@@ -546,7 +604,7 @@ func TestUnsupportedMaterializationIsPersisted(t *testing.T) {
 	require.NoError(t, stream.Close())
 	require.Eventually(t, func() bool {
 		current := client.StorageLocation.GetX(ctx, location.ID)
-		return current.MaterializationUnsupportedAt != nil && current.MergeStartedAt == nil
+		return current.MaterializationUnsupportedAt != nil && current.MergeStartedAt == nil && current.MergeLeaseToken == nil && current.MergeLeaseExpiresAt == nil
 	}, time.Second, 10*time.Millisecond)
 	require.Equal(t, 1, adapter.callCount())
 
@@ -569,7 +627,7 @@ func TestTransientMaterializationFailureCanRetry(t *testing.T) {
 	require.NoError(t, stream.Close())
 	require.Eventually(t, func() bool {
 		current := client.StorageLocation.GetX(ctx, location.ID)
-		return adapter.callCount() == 1 && current.MergeStartedAt == nil
+		return adapter.callCount() == 1 && current.MergeStartedAt == nil && current.MergeLeaseToken == nil && current.MergeLeaseExpiresAt == nil
 	}, time.Second, 10*time.Millisecond)
 
 	stream, err = service.Download(ctx, "entry-id")
@@ -635,7 +693,44 @@ func TestBackgroundMaterializationsRespectConcurrencyLimit(t *testing.T) {
 	require.Equal(t, 1, adapter.maxActive())
 }
 
-func TestWaitForMergesCancelsInFlightMergeAndClearsMergeStart(t *testing.T) {
+func TestLongMaterializationRenewsOwnershipAcrossServiceInstances(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := newBlockingComposeStorage(filesystem)
+	lifecycleOptions := storagelifecycle.Options{
+		MaterializationLeaseDuration: 80 * time.Millisecond,
+		LeaseRenewalInterval:         20 * time.Millisecond,
+	}
+	firstLifecycle := storagelifecycle.NewWithOptions(client, lifecycleOptions)
+	secondLifecycle := storagelifecycle.NewWithOptions(client, lifecycleOptions)
+	first := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1, Lifecycle: firstLifecycle})
+	second := NewService(Options{DB: client, Storage: adapter, MergeConcurrency: 1, Lifecycle: secondLifecycle})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("hello ")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("world")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+
+	stream, err := first.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	adapter.waitStarted(t)
+	time.Sleep(140 * time.Millisecond)
+	second.tryStartMaterialization(client.StorageLocation.GetX(ctx, location.ID))
+
+	select {
+	case <-adapter.started:
+		t.Fatal("a renewed materialization lease was taken over by another service")
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	adapter.releaseOne()
+	require.NoError(t, first.WaitForMerges(ctx))
+	require.NoError(t, second.WaitForMerges(ctx))
+	require.NoError(t, stream.Close())
+	current := client.StorageLocation.GetX(ctx, location.ID)
+	require.NotNil(t, current.MergedAt)
+	require.Nil(t, current.MergeLeaseToken)
+	require.Nil(t, current.MergeLeaseExpiresAt)
+}
+
+func TestWaitForMergesCancelsInFlightMergeAndReleasesLease(t *testing.T) {
 	fixture := startBlockingMaterializationDownload(t, "hello", " world")
 
 	fixture.service.StopAcceptingMerges()
@@ -647,7 +742,7 @@ func TestWaitForMergesCancelsInFlightMergeAndClearsMergeStart(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		current := fixture.client.StorageLocation.GetX(fixture.ctx, fixture.location.ID)
-		return current.MergeStartedAt == nil && current.MergedAt == nil
+		return current.MergeStartedAt == nil && current.MergeLeaseToken == nil && current.MergeLeaseExpiresAt == nil && current.MergedAt == nil
 	}, time.Second, 10*time.Millisecond)
 
 	_, err = fixture.filesystem.CreateDownloadStream(fixture.ctx, "folder/merged")

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,11 +119,22 @@ func TestManagementCacheEntries(t *testing.T) {
 func TestManagementStorageLocations(t *testing.T) {
 	t.Setenv("MANAGEMENT_API_KEY", "secret")
 	app := newTestApp(t)
-	app.db.StorageLocation.Create().
+	location := app.db.StorageLocation.Create().
 		SetID("location-id").
 		SetFolderName("folder").
 		SetPartCount(1).
 		SaveX(context.Background())
+	app.db.CacheEntry.Create().
+		SetID("entry-id").
+		SetKey("key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(context.Background())
+	lease, err := app.lifecycle.AcquireReader(context.Background(), "entry-id", storagelifecycle.AcquireReaderOptions{})
+	require.NoError(t, err)
 
 	getRec := managementRequest(app.router, http.MethodGet, "/management-api/storage-locations/location-id", "secret")
 	require.Equal(t, http.StatusOK, getRec.Code)
@@ -132,6 +144,10 @@ func TestManagementStorageLocations(t *testing.T) {
 
 	getDeletedRec := managementRequest(app.router, http.MethodGet, "/management-api/storage-locations/location-id", "secret")
 	require.Equal(t, http.StatusNotFound, getDeletedRec.Code)
+	require.NotNil(t, app.db.StorageLocation.GetX(context.Background(), "location-id").DeletionRequestedAt)
+	require.Zero(t, app.db.CacheEntry.Query().CountX(context.Background()))
+	require.Equal(t, 1, app.db.StorageReaderLease.Query().CountX(context.Background()))
+	require.NoError(t, app.lifecycle.ReleaseReader(context.Background(), lease.ID))
 }
 
 func managementRequest(router http.Handler, method string, path string, apiKey string) *httptest.ResponseRecorder {

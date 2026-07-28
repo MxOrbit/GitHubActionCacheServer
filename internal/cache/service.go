@@ -20,18 +20,19 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 	"github.com/google/uuid"
 )
 
 const (
-	directDownloadTTL              = 10 * time.Minute
+	directDownloadTTL              = storagelifecycle.DirectDownloadLeaseDuration
 	lastDownloadedAtUpdateInterval = 10 * time.Minute
 	abandonedUploadLifetime        = 24 * time.Hour
 	mergeCleanupTimeout            = 10 * time.Second
-	stalledMaterializationLifetime = 15 * time.Minute
 )
 
 var (
@@ -41,13 +42,13 @@ var (
 	ErrNoPartsUploaded     = errors.New("no parts have been uploaded")
 	ErrPartCountMismatch   = errors.New("uploaded part count does not match actual part count in storage")
 	ErrCacheNotFound       = errors.New("cache not found")
-	errMergeAlreadyStarted = errors.New("merge already started")
 )
 
 type Service struct {
 	db                    *ent.Client
 	storage               storage.Adapter
 	composer              storage.ComposeAdapter
+	lifecycle             *storagelifecycle.Service
 	enableDirectDownloads bool
 	mergeCtx              context.Context
 	mergeCancel           context.CancelFunc
@@ -62,6 +63,7 @@ type Options struct {
 	Storage               storage.Adapter
 	EnableDirectDownloads bool
 	MergeConcurrency      int
+	Lifecycle             *storagelifecycle.Service
 }
 
 type CreateUploadResult struct {
@@ -83,11 +85,16 @@ func NewService(options Options) *Service {
 	}
 	mergeCtx, mergeCancel := context.WithCancel(context.Background())
 	composer, _ := options.Storage.(storage.ComposeAdapter)
+	lifecycle := options.Lifecycle
+	if lifecycle == nil {
+		lifecycle = storagelifecycle.New(options.DB)
+	}
 
 	return &Service{
 		db:                    options.DB,
 		storage:               options.Storage,
 		composer:              composer,
+		lifecycle:             lifecycle,
 		enableDirectDownloads: options.EnableDirectDownloads,
 		mergeCtx:              mergeCtx,
 		mergeCancel:           mergeCancel,
@@ -267,28 +274,37 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 	downloadURL := fallbackDownloadURL(cacheEntry.ID)
 	if s.enableDirectDownloads {
 		if direct, ok := s.storage.(storage.DirectDownloadAdapter); ok {
-			location, err := s.db.StorageLocation.Query().
-				Where(storagelocation.ID(cacheEntry.LocationId)).
-				Only(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("query storage location: %w", err)
-			}
-			directObjectName := ""
+			lease, leaseErr := s.lifecycle.AcquireReader(ctx, cacheEntry.ID, storagelifecycle.AcquireReaderOptions{Direct: true})
 			switch {
-			case location.MergedAt != nil:
-				directObjectName = mergedObjectName(location.FolderName)
-			case location.PartCount == 1:
-				directObjectName = partObjectName(location.FolderName, 0)
-			default:
-				s.tryStartMaterialization(location)
-			}
-			if directObjectName != "" {
-				url, err := direct.CreateDownloadURL(ctx, directObjectName, directDownloadTTL)
-				if err != nil {
-					return nil, err
+			case leaseErr == nil:
+				directObjectName := mergedObjectName(lease.Location.FolderName)
+				if lease.Scope == storagereaderlease.ScopeParts {
+					directObjectName = partObjectName(lease.Location.FolderName, 0)
 				}
-				s.touchStorageLocationIfStale(ctx, location)
+				url, signErr := direct.CreateDownloadURL(ctx, directObjectName, directDownloadTTL)
+				if signErr != nil {
+					s.releaseReaderLease(lease.ID)
+					return nil, signErr
+				}
+				if extendErr := s.lifecycle.ExtendDirectReader(ctx, lease.ID); extendErr != nil {
+					s.releaseReaderLease(lease.ID)
+					return nil, extendErr
+				}
+				s.touchStorageLocationIfStale(ctx, lease.Location)
 				downloadURL = url
+			case errors.Is(leaseErr, storagelifecycle.ErrDirectRepresentation):
+				location, queryErr := s.db.StorageLocation.Query().
+					Where(storagelocation.ID(cacheEntry.LocationId)).
+					Only(ctx)
+				if queryErr == nil {
+					s.tryStartMaterialization(location)
+				} else if !ent.IsNotFound(queryErr) {
+					return nil, fmt.Errorf("query storage location: %w", queryErr)
+				}
+			case errors.Is(leaseErr, storagelifecycle.ErrLocationUnavailable):
+				return nil, ErrCacheNotFound
+			default:
+				return nil, leaseErr
 			}
 		}
 	}
@@ -322,28 +338,29 @@ func (s *Service) MatchCacheEntry(ctx context.Context, keys []string, version st
 }
 
 func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadCloser, error) {
-	cacheEntry, err := s.db.CacheEntry.Query().
-		Where(cacheentry.ID(cacheEntryID)).
-		WithLocation().
-		Only(ctx)
+	lease, err := s.lifecycle.AcquireReader(ctx, cacheEntryID, storagelifecycle.AcquireReaderOptions{})
 	if err != nil {
-		if ent.IsNotFound(err) {
+		if errors.Is(err, storagelifecycle.ErrLocationUnavailable) {
 			return nil, ErrCacheNotFound
 		}
-		return nil, fmt.Errorf("query cache entry: %w", err)
+		return nil, err
 	}
-	location := cacheEntry.Edges.Location
-	if location == nil {
-		return nil, ErrCacheNotFound
-	}
+	location := lease.Location
 
 	s.touchStorageLocationIfStale(ctx, location)
 
-	if location.MergedAt != nil {
-		return s.openMerged(ctx, location)
+	var stream io.ReadCloser
+	if lease.Scope == storagereaderlease.ScopeStorage {
+		stream, err = s.openMerged(ctx, location)
+	} else {
+		s.tryStartMaterialization(location)
+		stream, err = s.openParts(ctx, location)
 	}
-	s.tryStartMaterialization(location)
-	return s.openParts(ctx, location)
+	if err != nil {
+		s.releaseReaderLease(lease.ID)
+		return nil, err
+	}
+	return newLeasedReadCloser(stream, s.lifecycle, lease), nil
 }
 
 func WriteScope(scope auth.CacheScope) (string, bool) {
@@ -545,11 +562,6 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 	}
 
 	if existingCacheEntry != nil {
-		if existingCacheEntry.Edges.Location != nil {
-			if _, err := storageoutbox.Enqueue(ctx, tx.Client(), existingCacheEntry.Edges.Location.FolderName); err != nil {
-				return nil, err
-			}
-		}
 		if _, err := tx.CacheEntry.UpdateOneID(existingCacheEntry.ID).
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
@@ -557,8 +569,8 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 			return nil, fmt.Errorf("update cache entry: %w", err)
 		}
 		if existingCacheEntry.LocationId != "" {
-			if err := tx.StorageLocation.DeleteOneID(existingCacheEntry.LocationId).Exec(ctx); err != nil {
-				return nil, fmt.Errorf("delete old storage location: %w", err)
+			if _, err := s.lifecycle.FenceDetachedLocation(ctx, tx.Client(), existingCacheEntry.LocationId); err != nil {
+				return nil, err
 			}
 		}
 	} else {
@@ -695,37 +707,77 @@ func (s *Service) tryStartMaterialization(location *ent.StorageLocation) {
 		return
 	}
 
-	mergeStartedAt, err := s.markMergeStarted(s.mergeCtx, location.ID)
+	lease, err := s.lifecycle.AcquireMaterialization(s.mergeCtx, location.ID)
 	if err != nil {
 		s.finishReservedMerge()
 		return
 	}
 
-	go s.materializeLocationInBackground(location, mergeStartedAt)
+	go s.materializeLocationInBackground(lease)
 }
 
-func (s *Service) materializeLocationInBackground(location *ent.StorageLocation, mergeStartedAt int64) {
+func (s *Service) materializeLocationInBackground(lease *storagelifecycle.MaterializationLease) {
 	defer s.finishReservedMerge()
+	location := lease.Location
 
 	sources := make([]string, location.PartCount)
 	for index := range sources {
 		sources[index] = partObjectName(location.FolderName, index)
 	}
-	if err := s.composer.ComposeObjects(s.mergeCtx, mergedObjectName(location.FolderName), sources); err != nil {
-		if errors.Is(err, storage.ErrComposeUnsupported) {
-			if markErr := s.markMaterializationUnsupported(location.ID, mergeStartedAt); markErr != nil {
-				s.rollbackMergeStart(location.ID, mergeStartedAt)
+
+	materializationCtx, cancel := context.WithCancel(s.mergeCtx)
+	renewalDone := make(chan error, 1)
+	go s.renewMaterializationLease(materializationCtx, cancel, lease, renewalDone)
+	composeErr := s.composer.ComposeObjects(materializationCtx, mergedObjectName(location.FolderName), sources)
+	cancel()
+	renewalErr := <-renewalDone
+	if renewalErr != nil {
+		s.releaseMaterializationLease(location.ID, lease.Token)
+		return
+	}
+	if composeErr != nil {
+		if errors.Is(composeErr, storage.ErrComposeUnsupported) {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
+			defer cleanupCancel()
+			if markErr := s.lifecycle.MarkMaterializationUnsupported(cleanupCtx, location.ID, lease.Token); markErr != nil {
+				s.releaseMaterializationLease(location.ID, lease.Token)
 			}
 		} else {
-			s.rollbackMergeStart(location.ID, mergeStartedAt)
+			s.releaseMaterializationLease(location.ID, lease.Token)
 		}
 		return
 	}
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
-	if err := s.markMergeFinished(cleanupCtx, location.ID, mergeStartedAt); err != nil {
-		s.rollbackMergeStart(location.ID, mergeStartedAt)
+	if err := s.lifecycle.FinishMaterialization(cleanupCtx, location.ID, lease.Token); err != nil {
+		s.releaseMaterializationLease(location.ID, lease.Token)
+	}
+}
+
+func (s *Service) renewMaterializationLease(ctx context.Context, cancel context.CancelFunc, lease *storagelifecycle.MaterializationLease, done chan<- error) {
+	ticker := time.NewTicker(lease.RenewAfter)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			done <- nil
+			return
+		case <-ticker.C:
+			renewCtx, renewCancel := context.WithTimeout(ctx, mergeCleanupTimeout)
+			err := s.lifecycle.RenewMaterialization(renewCtx, lease.Location.ID, lease.Token)
+			renewCancel()
+			if err != nil {
+				if ctx.Err() != nil {
+					done <- nil
+					return
+				}
+				cancel()
+				done <- err
+				return
+			}
+		}
 	}
 }
 
@@ -751,90 +803,16 @@ func (s *Service) finishReservedMerge() {
 	s.mergeWG.Done()
 }
 
-func (s *Service) rollbackMergeStart(locationID string, mergeStartedAt int64) {
+func (s *Service) releaseReaderLease(leaseID string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
-	_ = s.clearOwnMergeStart(cleanupCtx, locationID, mergeStartedAt)
+	_ = s.lifecycle.ReleaseReader(cleanupCtx, leaseID)
 }
 
-func (s *Service) markMergeStarted(ctx context.Context, locationID string) (int64, error) {
-	mergeStartedAt := time.Now().UnixMilli()
-	stalledBefore := time.Now().Add(-stalledMaterializationLifetime).UnixMilli()
-	affected, err := s.db.StorageLocation.Update().
-		Where(
-			storagelocation.ID(locationID),
-			storagelocation.Or(
-				storagelocation.MergeStartedAtIsNil(),
-				storagelocation.MergeStartedAtLT(stalledBefore),
-			),
-			storagelocation.MergedAtIsNil(),
-			storagelocation.MaterializationUnsupportedAtIsNil(),
-			storagelocation.PartsDeletedAtIsNil(),
-		).
-		SetMergeStartedAt(mergeStartedAt).
-		Save(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("mark merge started: %w", err)
-	}
-	if affected == 0 {
-		return 0, errMergeAlreadyStarted
-	}
-	return mergeStartedAt, nil
-}
-
-func (s *Service) markMaterializationUnsupported(locationID string, mergeStartedAt int64) error {
+func (s *Service) releaseMaterializationLease(locationID, token string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
-
-	affected, err := s.db.StorageLocation.Update().
-		Where(
-			storagelocation.ID(locationID),
-			storagelocation.MergeStartedAt(mergeStartedAt),
-			storagelocation.MergedAtIsNil(),
-		).
-		SetMaterializationUnsupportedAt(time.Now().UnixMilli()).
-		ClearMergeStartedAt().
-		Save(cleanupCtx)
-	if err != nil {
-		return fmt.Errorf("mark materialization unsupported: %w", err)
-	}
-	if affected == 0 {
-		return errMergeAlreadyStarted
-	}
-	return nil
-}
-
-func (s *Service) markMergeFinished(ctx context.Context, locationID string, mergeStartedAt int64) error {
-	affected, err := s.db.StorageLocation.Update().
-		Where(
-			storagelocation.ID(locationID),
-			storagelocation.MergeStartedAt(mergeStartedAt),
-			storagelocation.MergedAtIsNil(),
-		).
-		SetMergedAt(time.Now().UnixMilli()).
-		Save(ctx)
-	if err != nil {
-		return fmt.Errorf("mark merge finished: %w", err)
-	}
-	if affected == 0 {
-		return errMergeAlreadyStarted
-	}
-	return nil
-}
-
-func (s *Service) clearOwnMergeStart(ctx context.Context, locationID string, mergeStartedAt int64) error {
-	_, err := s.db.StorageLocation.Update().
-		Where(
-			storagelocation.ID(locationID),
-			storagelocation.MergeStartedAt(mergeStartedAt),
-			storagelocation.MergedAtIsNil(),
-		).
-		ClearMergeStartedAt().
-		Save(ctx)
-	if err != nil {
-		return fmt.Errorf("clear failed merge start: %w", err)
-	}
-	return nil
+	_ = s.lifecycle.ReleaseMaterialization(cleanupCtx, locationID, token)
 }
 
 func randomPositiveInt64() (int64, error) {

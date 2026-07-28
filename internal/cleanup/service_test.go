@@ -10,6 +10,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -115,7 +116,9 @@ func TestStorageDeletionRetryBackoff(t *testing.T) {
 
 func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
-	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}})
+	now := time.Now()
+	lifecycle := storagelifecycle.NewWithOptions(client, storagelifecycle.Options{Now: func() time.Time { return now }})
+	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}, Lifecycle: lifecycle})
 	old := time.Now().Add(-31 * 24 * time.Hour).UnixMilli()
 
 	require.NoError(t, filesystem.UploadStream(ctx, "expired/parts/0", bytes.NewBufferString("data")))
@@ -142,14 +145,66 @@ func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
 	entryCount, err := client.CacheEntry.Query().Count(ctx)
 	require.NoError(t, err)
 	require.Zero(t, entryCount)
+	pending := client.StorageLocation.GetX(ctx, location.ID)
+	require.NotNil(t, pending.DeletionRequestedAt)
+
+	now = now.Add(storagelifecycle.DeletionGracePeriod + time.Second)
+	finalized, err := service.RunPendingStorageLocations(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, finalized)
 	locationCount, err := client.StorageLocation.Query().Count(ctx)
 	require.NoError(t, err)
 	require.Zero(t, locationCount)
 }
 
+func TestRunCacheEntriesFencesActiveReaderBeforePhysicalDeletion(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now()
+	lifecycle := storagelifecycle.NewWithOptions(client, storagelifecycle.Options{Now: func() time.Time { return now }})
+	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 30}, Lifecycle: lifecycle})
+	require.NoError(t, filesystem.UploadStream(ctx, "active-reader/parts/0", bytes.NewBufferString("data")))
+	location := client.StorageLocation.Create().
+		SetID("active-reader-location").
+		SetFolderName("active-reader").
+		SetPartCount(1).
+		SetLastDownloadedAt(time.Now().Add(-31 * 24 * time.Hour).UnixMilli()).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("active-reader-entry").
+		SetKey("key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(ctx)
+	lease, err := lifecycle.AcquireReader(ctx, "active-reader-entry", storagelifecycle.AcquireReaderOptions{})
+	require.NoError(t, err)
+
+	deleted, err := service.RunCacheEntries(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+	count, err := filesystem.CountFilesInFolder(ctx, "active-reader/parts")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	require.NoError(t, lifecycle.ReleaseReader(ctx, lease.ID))
+	now = now.Add(storagelifecycle.DeletionGracePeriod + time.Second)
+	finalized, err := service.RunPendingStorageLocations(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, finalized)
+	count, err = filesystem.CountFilesInFolder(ctx, "active-reader/parts")
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
 func TestRunStorageLocationsDeletesOrphans(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
-	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
+	now := time.Now()
+	lifecycle := storagelifecycle.NewWithOptions(client, storagelifecycle.Options{Now: func() time.Time { return now }})
+	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}, Lifecycle: lifecycle})
 
 	require.NoError(t, filesystem.UploadStream(ctx, "orphan/parts/0", bytes.NewBufferString("data")))
 	client.StorageLocation.Create().
@@ -161,7 +216,13 @@ func TestRunStorageLocationsDeletesOrphans(t *testing.T) {
 	deleted, err := service.RunStorageLocations(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, deleted)
+	pending := client.StorageLocation.Query().OnlyX(ctx)
+	require.NotNil(t, pending.DeletionRequestedAt)
 
+	now = now.Add(storagelifecycle.DeletionGracePeriod + time.Second)
+	finalized, err := service.RunPendingStorageLocations(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, finalized)
 	locationCount, err := client.StorageLocation.Query().Count(ctx)
 	require.NoError(t, err)
 	require.Zero(t, locationCount)

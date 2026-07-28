@@ -110,6 +110,12 @@ func init() {
 	storagelocationDescPartCount := storagelocationFields[2].Descriptor()
 	// storagelocation.PartCountValidator is a validator for the "partCount" field. It is called by the builders before save.
 	storagelocation.PartCountValidator = storagelocationDescPartCount.Validators[0].(func(int) error)
+	// storagelocationDescLeaseVersion is the schema descriptor for leaseVersion field.
+	storagelocationDescLeaseVersion := storagelocationFields[3].Descriptor()
+	// storagelocation.DefaultLeaseVersion holds the default value on creation for the leaseVersion field.
+	storagelocation.DefaultLeaseVersion = storagelocationDescLeaseVersion.Default.(int64)
+	// storagelocation.LeaseVersionValidator is a validator for the "leaseVersion" field. It is called by the builders before save.
+	storagelocation.LeaseVersionValidator = storagelocationDescLeaseVersion.Validators[0].(func(int64) error)
 	uploadFields := schema.Upload{}.Fields()
 	_ = uploadFields
 	// uploadDescKey is the schema descriptor for key field.

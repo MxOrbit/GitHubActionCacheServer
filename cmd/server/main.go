@@ -15,6 +15,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/rs/zerolog"
 )
 
@@ -45,27 +46,31 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("storage initialization failed")
 	}
+	lifecycleService := storagelifecycle.New(dbClient)
 	cacheService := cache.NewService(cache.Options{
 		DB:                    dbClient,
 		Storage:               storageAdapter,
 		EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
 		MergeConcurrency:      cfg.Cache.MergeConcurrency,
+		Lifecycle:             lifecycleService,
 	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
 	cleanup.NewRunner(cleanup.NewService(cleanup.Options{
-		DB:      dbClient,
-		Storage: storageAdapter,
-		Config:  cfg.Cleanup,
+		DB:        dbClient,
+		Storage:   storageAdapter,
+		Config:    cfg.Cleanup,
+		Lifecycle: lifecycleService,
 	}), logger).Start(cleanupCtx)
 
 	server := &http.Server{
 		Addr: cfg.Server.Addr,
 		Handler: httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
-			DB:      dbClient,
-			Storage: storageAdapter,
-			Cache:   cacheService,
+			DB:        dbClient,
+			Storage:   storageAdapter,
+			Cache:     cacheService,
+			Lifecycle: lifecycleService,
 		}),
 	}
 

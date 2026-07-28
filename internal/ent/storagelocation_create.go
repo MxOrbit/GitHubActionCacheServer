@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 )
 
 // StorageLocationCreate is the builder for creating a StorageLocation entity.
@@ -32,6 +33,34 @@ func (_c *StorageLocationCreate) SetPartCount(v int) *StorageLocationCreate {
 	return _c
 }
 
+// SetLeaseVersion sets the "leaseVersion" field.
+func (_c *StorageLocationCreate) SetLeaseVersion(v int64) *StorageLocationCreate {
+	_c.mutation.SetLeaseVersion(v)
+	return _c
+}
+
+// SetNillableLeaseVersion sets the "leaseVersion" field if the given value is not nil.
+func (_c *StorageLocationCreate) SetNillableLeaseVersion(v *int64) *StorageLocationCreate {
+	if v != nil {
+		_c.SetLeaseVersion(*v)
+	}
+	return _c
+}
+
+// SetDeletionRequestedAt sets the "deletionRequestedAt" field.
+func (_c *StorageLocationCreate) SetDeletionRequestedAt(v int64) *StorageLocationCreate {
+	_c.mutation.SetDeletionRequestedAt(v)
+	return _c
+}
+
+// SetNillableDeletionRequestedAt sets the "deletionRequestedAt" field if the given value is not nil.
+func (_c *StorageLocationCreate) SetNillableDeletionRequestedAt(v *int64) *StorageLocationCreate {
+	if v != nil {
+		_c.SetDeletionRequestedAt(*v)
+	}
+	return _c
+}
+
 // SetMergeStartedAt sets the "mergeStartedAt" field.
 func (_c *StorageLocationCreate) SetMergeStartedAt(v int64) *StorageLocationCreate {
 	_c.mutation.SetMergeStartedAt(v)
@@ -42,6 +71,34 @@ func (_c *StorageLocationCreate) SetMergeStartedAt(v int64) *StorageLocationCrea
 func (_c *StorageLocationCreate) SetNillableMergeStartedAt(v *int64) *StorageLocationCreate {
 	if v != nil {
 		_c.SetMergeStartedAt(*v)
+	}
+	return _c
+}
+
+// SetMergeLeaseToken sets the "mergeLeaseToken" field.
+func (_c *StorageLocationCreate) SetMergeLeaseToken(v string) *StorageLocationCreate {
+	_c.mutation.SetMergeLeaseToken(v)
+	return _c
+}
+
+// SetNillableMergeLeaseToken sets the "mergeLeaseToken" field if the given value is not nil.
+func (_c *StorageLocationCreate) SetNillableMergeLeaseToken(v *string) *StorageLocationCreate {
+	if v != nil {
+		_c.SetMergeLeaseToken(*v)
+	}
+	return _c
+}
+
+// SetMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field.
+func (_c *StorageLocationCreate) SetMergeLeaseExpiresAt(v int64) *StorageLocationCreate {
+	_c.mutation.SetMergeLeaseExpiresAt(v)
+	return _c
+}
+
+// SetNillableMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field if the given value is not nil.
+func (_c *StorageLocationCreate) SetNillableMergeLeaseExpiresAt(v *int64) *StorageLocationCreate {
+	if v != nil {
+		_c.SetMergeLeaseExpiresAt(*v)
 	}
 	return _c
 }
@@ -123,6 +180,21 @@ func (_c *StorageLocationCreate) AddCacheEntries(v ...*CacheEntry) *StorageLocat
 	return _c.AddCacheEntryIDs(ids...)
 }
 
+// AddReaderLeaseIDs adds the "readerLeases" edge to the StorageReaderLease entity by IDs.
+func (_c *StorageLocationCreate) AddReaderLeaseIDs(ids ...string) *StorageLocationCreate {
+	_c.mutation.AddReaderLeaseIDs(ids...)
+	return _c
+}
+
+// AddReaderLeases adds the "readerLeases" edges to the StorageReaderLease entity.
+func (_c *StorageLocationCreate) AddReaderLeases(v ...*StorageReaderLease) *StorageLocationCreate {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddReaderLeaseIDs(ids...)
+}
+
 // Mutation returns the StorageLocationMutation object of the builder.
 func (_c *StorageLocationCreate) Mutation() *StorageLocationMutation {
 	return _c.mutation
@@ -130,6 +202,7 @@ func (_c *StorageLocationCreate) Mutation() *StorageLocationMutation {
 
 // Save creates the StorageLocation in the database.
 func (_c *StorageLocationCreate) Save(ctx context.Context) (*StorageLocation, error) {
+	_c.defaults()
 	return withHooks(ctx, _c.sqlSave, _c.mutation, _c.hooks)
 }
 
@@ -155,6 +228,14 @@ func (_c *StorageLocationCreate) ExecX(ctx context.Context) {
 	}
 }
 
+// defaults sets the default values of the builder before save.
+func (_c *StorageLocationCreate) defaults() {
+	if _, ok := _c.mutation.LeaseVersion(); !ok {
+		v := storagelocation.DefaultLeaseVersion
+		_c.mutation.SetLeaseVersion(v)
+	}
+}
+
 // check runs all checks and user-defined validators on the builder.
 func (_c *StorageLocationCreate) check() error {
 	if _, ok := _c.mutation.FolderName(); !ok {
@@ -171,6 +252,14 @@ func (_c *StorageLocationCreate) check() error {
 	if v, ok := _c.mutation.PartCount(); ok {
 		if err := storagelocation.PartCountValidator(v); err != nil {
 			return &ValidationError{Name: "partCount", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.partCount": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.LeaseVersion(); !ok {
+		return &ValidationError{Name: "leaseVersion", err: errors.New(`ent: missing required field "StorageLocation.leaseVersion"`)}
+	}
+	if v, ok := _c.mutation.LeaseVersion(); ok {
+		if err := storagelocation.LeaseVersionValidator(v); err != nil {
+			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
 		}
 	}
 	return nil
@@ -216,9 +305,25 @@ func (_c *StorageLocationCreate) createSpec() (*StorageLocation, *sqlgraph.Creat
 		_spec.SetField(storagelocation.FieldPartCount, field.TypeInt, value)
 		_node.PartCount = value
 	}
+	if value, ok := _c.mutation.LeaseVersion(); ok {
+		_spec.SetField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)
+		_node.LeaseVersion = value
+	}
+	if value, ok := _c.mutation.DeletionRequestedAt(); ok {
+		_spec.SetField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64, value)
+		_node.DeletionRequestedAt = &value
+	}
 	if value, ok := _c.mutation.MergeStartedAt(); ok {
 		_spec.SetField(storagelocation.FieldMergeStartedAt, field.TypeInt64, value)
 		_node.MergeStartedAt = &value
+	}
+	if value, ok := _c.mutation.MergeLeaseToken(); ok {
+		_spec.SetField(storagelocation.FieldMergeLeaseToken, field.TypeString, value)
+		_node.MergeLeaseToken = &value
+	}
+	if value, ok := _c.mutation.MergeLeaseExpiresAt(); ok {
+		_spec.SetField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64, value)
+		_node.MergeLeaseExpiresAt = &value
 	}
 	if value, ok := _c.mutation.MergedAt(); ok {
 		_spec.SetField(storagelocation.FieldMergedAt, field.TypeInt64, value)
@@ -252,6 +357,22 @@ func (_c *StorageLocationCreate) createSpec() (*StorageLocation, *sqlgraph.Creat
 		}
 		_spec.Edges = append(_spec.Edges, edge)
 	}
+	if nodes := _c.mutation.ReaderLeasesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
 	return _node, _spec
 }
 
@@ -273,6 +394,7 @@ func (_c *StorageLocationCreateBulk) Save(ctx context.Context) ([]*StorageLocati
 	for i := range _c.builders {
 		func(i int, root context.Context) {
 			builder := _c.builders[i]
+			builder.defaults()
 			var mut Mutator = MutateFunc(func(ctx context.Context, m Mutation) (Value, error) {
 				mutation, ok := m.(*StorageLocationMutation)
 				if !ok {

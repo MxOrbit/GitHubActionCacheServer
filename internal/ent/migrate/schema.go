@@ -89,7 +89,11 @@ var (
 		{Name: "id", Type: field.TypeString, Unique: true, SchemaType: map[string]string{"mysql": "varchar(36)", "postgres": "text", "sqlite3": "text"}},
 		{Name: "folderName", Type: field.TypeString, SchemaType: map[string]string{"mysql": "text", "postgres": "text", "sqlite3": "text"}},
 		{Name: "partCount", Type: field.TypeInt},
+		{Name: "leaseVersion", Type: field.TypeInt64, Default: 0},
+		{Name: "deletionRequestedAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "mergeStartedAt", Type: field.TypeInt64, Nullable: true},
+		{Name: "mergeLeaseToken", Type: field.TypeString, Nullable: true, SchemaType: map[string]string{"mysql": "varchar(36)", "postgres": "text", "sqlite3": "text"}},
+		{Name: "mergeLeaseExpiresAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "mergedAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "materializationUnsupportedAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "partsDeletedAt", Type: field.TypeInt64, Nullable: true},
@@ -100,6 +104,34 @@ var (
 		Name:       "storage_locations",
 		Columns:    StorageLocationsColumns,
 		PrimaryKey: []*schema.Column{StorageLocationsColumns[0]},
+	}
+	// StorageReaderLeasesColumns holds the columns for the "storage_reader_leases" table.
+	StorageReaderLeasesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString, Unique: true, SchemaType: map[string]string{"mysql": "varchar(36)", "postgres": "text", "sqlite3": "text"}},
+		{Name: "scope", Type: field.TypeEnum, Enums: []string{"parts", "storage"}},
+		{Name: "expiresAt", Type: field.TypeInt64},
+		{Name: "storageLocationId", Type: field.TypeString, SchemaType: map[string]string{"mysql": "varchar(36)", "postgres": "text", "sqlite3": "text"}},
+	}
+	// StorageReaderLeasesTable holds the schema information for the "storage_reader_leases" table.
+	StorageReaderLeasesTable = &schema.Table{
+		Name:       "storage_reader_leases",
+		Columns:    StorageReaderLeasesColumns,
+		PrimaryKey: []*schema.Column{StorageReaderLeasesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "storage_reader_leases_storage_locations_readerLeases",
+				Columns:    []*schema.Column{StorageReaderLeasesColumns[3]},
+				RefColumns: []*schema.Column{StorageLocationsColumns[0]},
+				OnDelete:   schema.Restrict,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_storage_reader_leases_location_scope_expiry",
+				Unique:  false,
+				Columns: []*schema.Column{StorageReaderLeasesColumns[3], StorageReaderLeasesColumns[1], StorageReaderLeasesColumns[2]},
+			},
+		},
 	}
 	// UploadsColumns holds the columns for the "uploads" table.
 	UploadsColumns = []*schema.Column{
@@ -148,6 +180,7 @@ var (
 		CacheEntriesTable,
 		StorageDeletionsTable,
 		StorageLocationsTable,
+		StorageReaderLeasesTable,
 		UploadsTable,
 	}
 )
@@ -162,6 +195,10 @@ func init() {
 	}
 	StorageLocationsTable.Annotation = &entsql.Annotation{
 		Table: "storage_locations",
+	}
+	StorageReaderLeasesTable.ForeignKeys[0].RefTable = StorageLocationsTable
+	StorageReaderLeasesTable.Annotation = &entsql.Annotation{
+		Table: "storage_reader_leases",
 	}
 	UploadsTable.Annotation = &entsql.Annotation{
 		Table: "uploads",

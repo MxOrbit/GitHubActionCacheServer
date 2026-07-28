@@ -15,6 +15,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 )
 
@@ -76,10 +77,11 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
-			cacheentry.Table:      cacheentry.ValidColumn,
-			storagedeletion.Table: storagedeletion.ValidColumn,
-			storagelocation.Table: storagelocation.ValidColumn,
-			upload.Table:          upload.ValidColumn,
+			cacheentry.Table:         cacheentry.ValidColumn,
+			storagedeletion.Table:    storagedeletion.ValidColumn,
+			storagelocation.Table:    storagelocation.ValidColumn,
+			storagereaderlease.Table: storagereaderlease.ValidColumn,
+			upload.Table:             upload.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

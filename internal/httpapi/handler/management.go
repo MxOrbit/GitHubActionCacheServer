@@ -12,7 +12,6 @@ import (
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 	"github.com/gin-gonic/gin"
 )
 
@@ -58,14 +57,11 @@ func (h *Handler) DeleteCacheEntries(c *gin.Context) {
 		return
 	}
 
-	locationIDs := cacheEntryLocationIDs(entries)
-	_, err = h.db.CacheEntry.Delete().Where(cacheEntryIDs(entries)...).Exec(c.Request.Context())
-	if err != nil {
+	if err := h.deleteManagementCacheEntries(c.Request.Context(), cacheEntryIDs(entries)); err != nil {
 		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
 		return
 	}
 
-	h.cleanupOrphanStorageLocations(c, locationIDs)
 	c.Status(http.StatusNoContent)
 }
 
@@ -120,7 +116,10 @@ func (h *Handler) DeleteCacheEntry(c *gin.Context) {
 
 func (h *Handler) GetStorageLocation(c *gin.Context) {
 	location, err := h.db.StorageLocation.Query().
-		Where(storagelocation.ID(c.Param("id"))).
+		Where(
+			storagelocation.ID(c.Param("id")),
+			storagelocation.DeletionRequestedAtIsNil(),
+		).
 		Only(c.Request.Context())
 	if err != nil {
 		if ent.IsNotFound(err) {
@@ -213,79 +212,18 @@ func (h *Handler) listManagementCacheEntries(c *gin.Context, filters []entpredic
 }
 
 func (h *Handler) deleteManagementCacheEntry(c *gin.Context, id string) error {
-	return deleteManagementEntity(
-		func() (*ent.CacheEntry, error) {
-			return h.db.CacheEntry.Query().
-				Where(cacheentry.ID(id)).
-				Only(c.Request.Context())
-		},
-		func(entry *ent.CacheEntry) error {
-			return h.db.CacheEntry.DeleteOneID(entry.ID).Exec(c.Request.Context())
-		},
-		func(entry *ent.CacheEntry) {
-			h.cleanupOrphanStorageLocations(c, []string{entry.LocationId})
-		},
-	)
+	return h.deleteManagementCacheEntries(c.Request.Context(), []entpredicate.CacheEntry{cacheentry.ID(id)})
 }
 
 func (h *Handler) deleteManagementStorageLocation(c *gin.Context, id string) error {
-	return deleteManagementEntity(
-		func() (*ent.StorageLocation, error) {
-			return h.db.StorageLocation.Query().
-				Where(storagelocation.ID(id)).
-				Only(c.Request.Context())
-		},
-		func(location *ent.StorageLocation) error {
-			return h.scheduleManagementStorageLocationDeletion(c.Request.Context(), location.ID, false)
-		},
-		nil,
-	)
+	_, err := h.lifecycle.RequestLocationDeletion(c.Request.Context(), id, true, false)
+	return err
 }
 
-func deleteManagementEntity[T any](load func() (*T, error), deleteEntity func(*T) error, afterDelete func(*T)) error {
-	entity, err := load()
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	if entity == nil {
-		return nil
-	}
-
-	if err := deleteEntity(entity); err != nil {
-		return err
-	}
-	if afterDelete != nil {
-		afterDelete(entity)
-	}
-	return nil
-}
-
-func (h *Handler) cleanupOrphanStorageLocations(c *gin.Context, locationIDs []string) {
-	if len(locationIDs) == 0 {
-		return
-	}
-
-	locations, err := h.db.StorageLocation.Query().
-		Where(
-			storagelocation.IDIn(locationIDs...),
-			storagelocation.Not(storagelocation.HasCacheEntries()),
-		).
-		All(c.Request.Context())
-	if err != nil {
-		return
-	}
-	for _, location := range locations {
-		_ = h.scheduleManagementStorageLocationDeletion(c.Request.Context(), location.ID, true)
-	}
-}
-
-func (h *Handler) scheduleManagementStorageLocationDeletion(ctx context.Context, locationID string, requireOrphan bool) error {
+func (h *Handler) deleteManagementCacheEntries(ctx context.Context, predicates []entpredicate.CacheEntry) error {
 	tx, err := h.db.Tx(ctx)
 	if err != nil {
-		return fmt.Errorf("start storage location deletion transaction: %w", err)
+		return fmt.Errorf("start management cache deletion transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -294,26 +232,27 @@ func (h *Handler) scheduleManagementStorageLocationDeletion(ctx context.Context,
 		}
 	}()
 
-	predicates := []entpredicate.StorageLocation{storagelocation.ID(locationID)}
-	if requireOrphan {
-		predicates = append(predicates, storagelocation.Not(storagelocation.HasCacheEntries()))
-	}
-	location, err := tx.StorageLocation.Query().Where(predicates...).Only(ctx)
+	entries, err := tx.CacheEntry.Query().Where(predicates...).All(ctx)
 	if err != nil {
-		if ent.IsNotFound(err) {
-			return nil
+		return fmt.Errorf("query management cache entries for deletion: %w", err)
+	}
+	if len(entries) == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit empty management cache deletion: %w", err)
 		}
-		return fmt.Errorf("query storage location for deletion: %w", err)
+		committed = true
+		return nil
 	}
-
-	if _, err := storageoutbox.Enqueue(ctx, tx.Client(), location.FolderName); err != nil {
-		return err
+	if _, err := tx.CacheEntry.Delete().Where(cacheEntryIDs(entries)...).Exec(ctx); err != nil {
+		return fmt.Errorf("delete management cache entries: %w", err)
 	}
-	if err := tx.StorageLocation.DeleteOneID(location.ID).Exec(ctx); err != nil {
-		return fmt.Errorf("delete storage location: %w", err)
+	for _, locationID := range cacheEntryLocationIDs(entries) {
+		if _, err := h.lifecycle.FenceDetachedLocation(ctx, tx.Client(), locationID); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit storage location deletion: %w", err)
+		return fmt.Errorf("commit management cache deletion: %w", err)
 	}
 	committed = true
 	return nil

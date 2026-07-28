@@ -18,6 +18,8 @@ type Tx struct {
 	StorageDeletion *StorageDeletionClient
 	// StorageLocation is the client for interacting with the StorageLocation builders.
 	StorageLocation *StorageLocationClient
+	// StorageReaderLease is the client for interacting with the StorageReaderLease builders.
+	StorageReaderLease *StorageReaderLeaseClient
 	// Upload is the client for interacting with the Upload builders.
 	Upload *UploadClient
 
@@ -154,6 +156,7 @@ func (tx *Tx) init() {
 	tx.CacheEntry = NewCacheEntryClient(tx.config)
 	tx.StorageDeletion = NewStorageDeletionClient(tx.config)
 	tx.StorageLocation = NewStorageLocationClient(tx.config)
+	tx.StorageReaderLease = NewStorageReaderLeaseClient(tx.config)
 	tx.Upload = NewUploadClient(tx.config)
 }
 

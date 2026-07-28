@@ -15,6 +15,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 )
 
 // StorageLocationQuery is the builder for querying StorageLocation entities.
@@ -25,6 +26,7 @@ type StorageLocationQuery struct {
 	inters           []Interceptor
 	predicates       []predicate.StorageLocation
 	withCacheEntries *CacheEntryQuery
+	withReaderLeases *StorageReaderLeaseQuery
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -76,6 +78,28 @@ func (_q *StorageLocationQuery) QueryCacheEntries() *CacheEntryQuery {
 			sqlgraph.From(storagelocation.Table, storagelocation.FieldID, selector),
 			sqlgraph.To(cacheentry.Table, cacheentry.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, false, storagelocation.CacheEntriesTable, storagelocation.CacheEntriesColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryReaderLeases chains the current query on the "readerLeases" edge.
+func (_q *StorageLocationQuery) QueryReaderLeases() *StorageReaderLeaseQuery {
+	query := (&StorageReaderLeaseClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(storagelocation.Table, storagelocation.FieldID, selector),
+			sqlgraph.To(storagereaderlease.Table, storagereaderlease.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, storagelocation.ReaderLeasesTable, storagelocation.ReaderLeasesColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -276,6 +300,7 @@ func (_q *StorageLocationQuery) Clone() *StorageLocationQuery {
 		inters:           append([]Interceptor{}, _q.inters...),
 		predicates:       append([]predicate.StorageLocation{}, _q.predicates...),
 		withCacheEntries: _q.withCacheEntries.Clone(),
+		withReaderLeases: _q.withReaderLeases.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -290,6 +315,17 @@ func (_q *StorageLocationQuery) WithCacheEntries(opts ...func(*CacheEntryQuery))
 		opt(query)
 	}
 	_q.withCacheEntries = query
+	return _q
+}
+
+// WithReaderLeases tells the query-builder to eager-load the nodes that are connected to
+// the "readerLeases" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *StorageLocationQuery) WithReaderLeases(opts ...func(*StorageReaderLeaseQuery)) *StorageLocationQuery {
+	query := (&StorageReaderLeaseClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withReaderLeases = query
 	return _q
 }
 
@@ -371,8 +407,9 @@ func (_q *StorageLocationQuery) sqlAll(ctx context.Context, hooks ...queryHook) 
 	var (
 		nodes       = []*StorageLocation{}
 		_spec       = _q.querySpec()
-		loadedTypes = [1]bool{
+		loadedTypes = [2]bool{
 			_q.withCacheEntries != nil,
+			_q.withReaderLeases != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -397,6 +434,15 @@ func (_q *StorageLocationQuery) sqlAll(ctx context.Context, hooks ...queryHook) 
 		if err := _q.loadCacheEntries(ctx, query, nodes,
 			func(n *StorageLocation) { n.Edges.CacheEntries = []*CacheEntry{} },
 			func(n *StorageLocation, e *CacheEntry) { n.Edges.CacheEntries = append(n.Edges.CacheEntries, e) }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withReaderLeases; query != nil {
+		if err := _q.loadReaderLeases(ctx, query, nodes,
+			func(n *StorageLocation) { n.Edges.ReaderLeases = []*StorageReaderLease{} },
+			func(n *StorageLocation, e *StorageReaderLease) {
+				n.Edges.ReaderLeases = append(n.Edges.ReaderLeases, e)
+			}); err != nil {
 			return nil, err
 		}
 	}
@@ -428,6 +474,36 @@ func (_q *StorageLocationQuery) loadCacheEntries(ctx context.Context, query *Cac
 		node, ok := nodeids[fk]
 		if !ok {
 			return fmt.Errorf(`unexpected referenced foreign-key "locationId" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *StorageLocationQuery) loadReaderLeases(ctx context.Context, query *StorageReaderLeaseQuery, nodes []*StorageLocation, init func(*StorageLocation), assign func(*StorageLocation, *StorageReaderLease)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[string]*StorageLocation)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(storagereaderlease.FieldStorageLocationId)
+	}
+	query.Where(predicate.StorageReaderLease(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(storagelocation.ReaderLeasesColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.StorageLocationId
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "storageLocationId" returned %v for node %v`, fk, n.ID)
 		}
 		assign(node, n)
 	}

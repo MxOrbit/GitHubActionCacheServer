@@ -122,6 +122,8 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "repoId"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folderName"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "materializationUnsupportedAt"))
+	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "deletionRequestedAt"))
+	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "mergeLeaseToken"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "lastPartUploadedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "committedPartCount"))
 	var storageDeletionsTable string
@@ -130,6 +132,12 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 		`select name from sqlite_master where type = 'table' and name = 'storage_deletions'`,
 	).Scan(&storageDeletionsTable))
 	require.Equal(t, "storage_deletions", storageDeletionsTable)
+	var storageReaderLeasesTable string
+	require.NoError(t, sqlDB.QueryRowContext(
+		ctx,
+		`select name from sqlite_master where type = 'table' and name = 'storage_reader_leases'`,
+	).Scan(&storageReaderLeasesTable))
+	require.Equal(t, "storage_reader_leases", storageReaderLeasesTable)
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "updated_at"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "cache_entries", "repo_id"))
 	require.False(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "folder_name"))
@@ -153,8 +161,11 @@ func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 		"id", "folderName", "createdAt", "attemptCount", "lastAttemptedAt", "lastError",
 	}, columnNames(migrate.StorageDeletionsColumns))
 	require.Equal(t, []string{
-		"id", "folderName", "partCount", "mergeStartedAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt",
+		"id", "folderName", "partCount", "leaseVersion", "deletionRequestedAt", "mergeStartedAt", "mergeLeaseToken", "mergeLeaseExpiresAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt",
 	}, columnNames(migrate.StorageLocationsColumns))
+	require.Equal(t, []string{
+		"id", "scope", "expiresAt", "storageLocationId",
+	}, columnNames(migrate.StorageReaderLeasesColumns))
 	require.Equal(t, []string{
 		"id", "key", "version", "scope", "repoId", "createdAt", "lastPartUploadedAt", "startedPartUploadCount", "finishedPartUploadCount", "folderName", "committedPartCount",
 	}, columnNames(migrate.UploadsColumns))

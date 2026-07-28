@@ -16,6 +16,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -116,6 +117,8 @@ func clearExternalDB(t *testing.T, ctx context.Context, client *ent.Client) {
 	require.NoError(t, err)
 	_, err = client.CacheEntry.Delete().Exec(ctx)
 	require.NoError(t, err)
+	_, err = client.StorageReaderLease.Delete().Exec(ctx)
+	require.NoError(t, err)
 	_, err = client.StorageLocation.Delete().Exec(ctx)
 	require.NoError(t, err)
 }
@@ -127,10 +130,12 @@ func newExternalRouter(t *testing.T, client *ent.Client, storageAdapter storage.
 	require.NoError(t, err)
 	cfg.Auth.SkipTokenValidation = true
 	cfg.Cache.DownloadURLSigningSecret = "integration-test-secret"
+	lifecycle := storagelifecycle.New(client)
 	cacheService := cache.NewService(cache.Options{
 		DB:               client,
 		Storage:          storageAdapter,
 		MergeConcurrency: cfg.Cache.MergeConcurrency,
+		Lifecycle:        lifecycle,
 	})
 	t.Cleanup(func() {
 		cacheService.StopAcceptingMerges()
@@ -140,9 +145,10 @@ func newExternalRouter(t *testing.T, client *ent.Client, storageAdapter storage.
 	})
 
 	return httpapi.NewRouter(zerolog.Nop(), cfg, httpapi.Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
-		Cache:   cacheService,
+		DB:        client,
+		Storage:   storageAdapter,
+		Cache:     cacheService,
+		Lifecycle: lifecycle,
 	})
 }
 

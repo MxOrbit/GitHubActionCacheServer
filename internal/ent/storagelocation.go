@@ -20,8 +20,16 @@ type StorageLocation struct {
 	FolderName string `json:"folderName,omitempty"`
 	// PartCount holds the value of the "partCount" field.
 	PartCount int `json:"partCount,omitempty"`
+	// LeaseVersion holds the value of the "leaseVersion" field.
+	LeaseVersion int64 `json:"leaseVersion,omitempty"`
+	// DeletionRequestedAt holds the value of the "deletionRequestedAt" field.
+	DeletionRequestedAt *int64 `json:"deletionRequestedAt,omitempty"`
 	// MergeStartedAt holds the value of the "mergeStartedAt" field.
 	MergeStartedAt *int64 `json:"mergeStartedAt,omitempty"`
+	// MergeLeaseToken holds the value of the "mergeLeaseToken" field.
+	MergeLeaseToken *string `json:"mergeLeaseToken,omitempty"`
+	// MergeLeaseExpiresAt holds the value of the "mergeLeaseExpiresAt" field.
+	MergeLeaseExpiresAt *int64 `json:"mergeLeaseExpiresAt,omitempty"`
 	// MergedAt holds the value of the "mergedAt" field.
 	MergedAt *int64 `json:"mergedAt,omitempty"`
 	// MaterializationUnsupportedAt holds the value of the "materializationUnsupportedAt" field.
@@ -40,9 +48,11 @@ type StorageLocation struct {
 type StorageLocationEdges struct {
 	// CacheEntries holds the value of the cacheEntries edge.
 	CacheEntries []*CacheEntry `json:"cacheEntries,omitempty"`
+	// ReaderLeases holds the value of the readerLeases edge.
+	ReaderLeases []*StorageReaderLease `json:"readerLeases,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [1]bool
+	loadedTypes [2]bool
 }
 
 // CacheEntriesOrErr returns the CacheEntries value or an error if the edge
@@ -54,14 +64,23 @@ func (e StorageLocationEdges) CacheEntriesOrErr() ([]*CacheEntry, error) {
 	return nil, &NotLoadedError{edge: "cacheEntries"}
 }
 
+// ReaderLeasesOrErr returns the ReaderLeases value or an error if the edge
+// was not loaded in eager-loading.
+func (e StorageLocationEdges) ReaderLeasesOrErr() ([]*StorageReaderLease, error) {
+	if e.loadedTypes[1] {
+		return e.ReaderLeases, nil
+	}
+	return nil, &NotLoadedError{edge: "readerLeases"}
+}
+
 // scanValues returns the types for scanning values from sql.Rows.
 func (*StorageLocation) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case storagelocation.FieldPartCount, storagelocation.FieldMergeStartedAt, storagelocation.FieldMergedAt, storagelocation.FieldMaterializationUnsupportedAt, storagelocation.FieldPartsDeletedAt, storagelocation.FieldLastDownloadedAt:
+		case storagelocation.FieldPartCount, storagelocation.FieldLeaseVersion, storagelocation.FieldDeletionRequestedAt, storagelocation.FieldMergeStartedAt, storagelocation.FieldMergeLeaseExpiresAt, storagelocation.FieldMergedAt, storagelocation.FieldMaterializationUnsupportedAt, storagelocation.FieldPartsDeletedAt, storagelocation.FieldLastDownloadedAt:
 			values[i] = new(sql.NullInt64)
-		case storagelocation.FieldID, storagelocation.FieldFolderName:
+		case storagelocation.FieldID, storagelocation.FieldFolderName, storagelocation.FieldMergeLeaseToken:
 			values[i] = new(sql.NullString)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -96,12 +115,39 @@ func (_m *StorageLocation) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.PartCount = int(value.Int64)
 			}
+		case storagelocation.FieldLeaseVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field leaseVersion", values[i])
+			} else if value.Valid {
+				_m.LeaseVersion = value.Int64
+			}
+		case storagelocation.FieldDeletionRequestedAt:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field deletionRequestedAt", values[i])
+			} else if value.Valid {
+				_m.DeletionRequestedAt = new(int64)
+				*_m.DeletionRequestedAt = value.Int64
+			}
 		case storagelocation.FieldMergeStartedAt:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
 				return fmt.Errorf("unexpected type %T for field mergeStartedAt", values[i])
 			} else if value.Valid {
 				_m.MergeStartedAt = new(int64)
 				*_m.MergeStartedAt = value.Int64
+			}
+		case storagelocation.FieldMergeLeaseToken:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field mergeLeaseToken", values[i])
+			} else if value.Valid {
+				_m.MergeLeaseToken = new(string)
+				*_m.MergeLeaseToken = value.String
+			}
+		case storagelocation.FieldMergeLeaseExpiresAt:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field mergeLeaseExpiresAt", values[i])
+			} else if value.Valid {
+				_m.MergeLeaseExpiresAt = new(int64)
+				*_m.MergeLeaseExpiresAt = value.Int64
 			}
 		case storagelocation.FieldMergedAt:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -149,6 +195,11 @@ func (_m *StorageLocation) QueryCacheEntries() *CacheEntryQuery {
 	return NewStorageLocationClient(_m.config).QueryCacheEntries(_m)
 }
 
+// QueryReaderLeases queries the "readerLeases" edge of the StorageLocation entity.
+func (_m *StorageLocation) QueryReaderLeases() *StorageReaderLeaseQuery {
+	return NewStorageLocationClient(_m.config).QueryReaderLeases(_m)
+}
+
 // Update returns a builder for updating this StorageLocation.
 // Note that you need to call StorageLocation.Unwrap() before calling this method if this StorageLocation
 // was returned from a transaction, and the transaction was committed or rolled back.
@@ -178,8 +229,26 @@ func (_m *StorageLocation) String() string {
 	builder.WriteString("partCount=")
 	builder.WriteString(fmt.Sprintf("%v", _m.PartCount))
 	builder.WriteString(", ")
+	builder.WriteString("leaseVersion=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LeaseVersion))
+	builder.WriteString(", ")
+	if v := _m.DeletionRequestedAt; v != nil {
+		builder.WriteString("deletionRequestedAt=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
 	if v := _m.MergeStartedAt; v != nil {
 		builder.WriteString("mergeStartedAt=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.MergeLeaseToken; v != nil {
+		builder.WriteString("mergeLeaseToken=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.MergeLeaseExpiresAt; v != nil {
+		builder.WriteString("mergeLeaseExpiresAt=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
 	builder.WriteString(", ")

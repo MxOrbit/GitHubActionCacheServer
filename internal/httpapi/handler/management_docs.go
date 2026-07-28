@@ -124,15 +124,20 @@ func managementOpenAPISchemas() map[string]any {
 		},
 		"StorageLocation": map[string]any{
 			"type":     "object",
-			"required": []string{"id", "folderName", "partCount"},
+			"required": []string{"id", "folderName", "partCount", "leaseVersion"},
 			"properties": map[string]any{
-				"id":               map[string]string{"type": "string"},
-				"folderName":       map[string]string{"type": "string"},
-				"partCount":        map[string]string{"type": "integer"},
-				"mergeStartedAt":   nullableInt64Schema(),
-				"mergedAt":         nullableInt64Schema(),
-				"partsDeletedAt":   nullableInt64Schema(),
-				"lastDownloadedAt": nullableInt64Schema(),
+				"id":                           map[string]string{"type": "string"},
+				"folderName":                   map[string]string{"type": "string"},
+				"partCount":                    map[string]string{"type": "integer"},
+				"leaseVersion":                 map[string]string{"type": "integer", "format": "int64"},
+				"deletionRequestedAt":          nullableInt64Schema(),
+				"mergeStartedAt":               nullableInt64Schema(),
+				"mergeLeaseToken":              nullableStringSchema(),
+				"mergeLeaseExpiresAt":          nullableInt64Schema(),
+				"mergedAt":                     nullableInt64Schema(),
+				"materializationUnsupportedAt": nullableInt64Schema(),
+				"partsDeletedAt":               nullableInt64Schema(),
+				"lastDownloadedAt":             nullableInt64Schema(),
 			},
 		},
 		"CacheEntryList": map[string]any{
@@ -345,6 +350,13 @@ func nullableInt64Schema() map[string]any {
 	return map[string]any{
 		"type":     "integer",
 		"format":   "int64",
+		"nullable": true,
+	}
+}
+
+func nullableStringSchema() map[string]any {
+	return map[string]any{
+		"type":     "string",
 		"nullable": true,
 	}
 }

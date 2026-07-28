@@ -11,14 +11,16 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/handler"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
 
 type Dependencies struct {
-	DB      *ent.Client
-	Storage storage.Adapter
-	Cache   *cache.Service
+	DB        *ent.Client
+	Storage   storage.Adapter
+	Cache     *cache.Service
+	Lifecycle *storagelifecycle.Service
 }
 
 func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http.Handler {
@@ -26,6 +28,10 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 
 	router := gin.New()
 	router.Use(requestLogger(logger), gin.Recovery())
+	lifecycle := deps.Lifecycle
+	if lifecycle == nil {
+		lifecycle = storagelifecycle.New(deps.DB)
+	}
 
 	cacheSvc := deps.Cache
 	if cacheSvc == nil {
@@ -34,14 +40,16 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 			Storage:               deps.Storage,
 			EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
 			MergeConcurrency:      cfg.Cache.MergeConcurrency,
+			Lifecycle:             lifecycle,
 		})
 	}
 
 	handlers := handler.New(handler.Options{
-		Config:  cfg,
-		Cache:   cacheSvc,
-		DB:      deps.DB,
-		Storage: deps.Storage,
+		Config:    cfg,
+		Cache:     cacheSvc,
+		DB:        deps.DB,
+		Storage:   deps.Storage,
+		Lifecycle: lifecycle,
 	})
 
 	router.GET("/", handler.Root)

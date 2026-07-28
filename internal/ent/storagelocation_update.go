@@ -13,6 +13,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 )
 
 // StorageLocationUpdate is the builder for updating StorageLocation entities.
@@ -63,6 +64,54 @@ func (_u *StorageLocationUpdate) AddPartCount(v int) *StorageLocationUpdate {
 	return _u
 }
 
+// SetLeaseVersion sets the "leaseVersion" field.
+func (_u *StorageLocationUpdate) SetLeaseVersion(v int64) *StorageLocationUpdate {
+	_u.mutation.ResetLeaseVersion()
+	_u.mutation.SetLeaseVersion(v)
+	return _u
+}
+
+// SetNillableLeaseVersion sets the "leaseVersion" field if the given value is not nil.
+func (_u *StorageLocationUpdate) SetNillableLeaseVersion(v *int64) *StorageLocationUpdate {
+	if v != nil {
+		_u.SetLeaseVersion(*v)
+	}
+	return _u
+}
+
+// AddLeaseVersion adds value to the "leaseVersion" field.
+func (_u *StorageLocationUpdate) AddLeaseVersion(v int64) *StorageLocationUpdate {
+	_u.mutation.AddLeaseVersion(v)
+	return _u
+}
+
+// SetDeletionRequestedAt sets the "deletionRequestedAt" field.
+func (_u *StorageLocationUpdate) SetDeletionRequestedAt(v int64) *StorageLocationUpdate {
+	_u.mutation.ResetDeletionRequestedAt()
+	_u.mutation.SetDeletionRequestedAt(v)
+	return _u
+}
+
+// SetNillableDeletionRequestedAt sets the "deletionRequestedAt" field if the given value is not nil.
+func (_u *StorageLocationUpdate) SetNillableDeletionRequestedAt(v *int64) *StorageLocationUpdate {
+	if v != nil {
+		_u.SetDeletionRequestedAt(*v)
+	}
+	return _u
+}
+
+// AddDeletionRequestedAt adds value to the "deletionRequestedAt" field.
+func (_u *StorageLocationUpdate) AddDeletionRequestedAt(v int64) *StorageLocationUpdate {
+	_u.mutation.AddDeletionRequestedAt(v)
+	return _u
+}
+
+// ClearDeletionRequestedAt clears the value of the "deletionRequestedAt" field.
+func (_u *StorageLocationUpdate) ClearDeletionRequestedAt() *StorageLocationUpdate {
+	_u.mutation.ClearDeletionRequestedAt()
+	return _u
+}
+
 // SetMergeStartedAt sets the "mergeStartedAt" field.
 func (_u *StorageLocationUpdate) SetMergeStartedAt(v int64) *StorageLocationUpdate {
 	_u.mutation.ResetMergeStartedAt()
@@ -87,6 +136,53 @@ func (_u *StorageLocationUpdate) AddMergeStartedAt(v int64) *StorageLocationUpda
 // ClearMergeStartedAt clears the value of the "mergeStartedAt" field.
 func (_u *StorageLocationUpdate) ClearMergeStartedAt() *StorageLocationUpdate {
 	_u.mutation.ClearMergeStartedAt()
+	return _u
+}
+
+// SetMergeLeaseToken sets the "mergeLeaseToken" field.
+func (_u *StorageLocationUpdate) SetMergeLeaseToken(v string) *StorageLocationUpdate {
+	_u.mutation.SetMergeLeaseToken(v)
+	return _u
+}
+
+// SetNillableMergeLeaseToken sets the "mergeLeaseToken" field if the given value is not nil.
+func (_u *StorageLocationUpdate) SetNillableMergeLeaseToken(v *string) *StorageLocationUpdate {
+	if v != nil {
+		_u.SetMergeLeaseToken(*v)
+	}
+	return _u
+}
+
+// ClearMergeLeaseToken clears the value of the "mergeLeaseToken" field.
+func (_u *StorageLocationUpdate) ClearMergeLeaseToken() *StorageLocationUpdate {
+	_u.mutation.ClearMergeLeaseToken()
+	return _u
+}
+
+// SetMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field.
+func (_u *StorageLocationUpdate) SetMergeLeaseExpiresAt(v int64) *StorageLocationUpdate {
+	_u.mutation.ResetMergeLeaseExpiresAt()
+	_u.mutation.SetMergeLeaseExpiresAt(v)
+	return _u
+}
+
+// SetNillableMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field if the given value is not nil.
+func (_u *StorageLocationUpdate) SetNillableMergeLeaseExpiresAt(v *int64) *StorageLocationUpdate {
+	if v != nil {
+		_u.SetMergeLeaseExpiresAt(*v)
+	}
+	return _u
+}
+
+// AddMergeLeaseExpiresAt adds value to the "mergeLeaseExpiresAt" field.
+func (_u *StorageLocationUpdate) AddMergeLeaseExpiresAt(v int64) *StorageLocationUpdate {
+	_u.mutation.AddMergeLeaseExpiresAt(v)
+	return _u
+}
+
+// ClearMergeLeaseExpiresAt clears the value of the "mergeLeaseExpiresAt" field.
+func (_u *StorageLocationUpdate) ClearMergeLeaseExpiresAt() *StorageLocationUpdate {
+	_u.mutation.ClearMergeLeaseExpiresAt()
 	return _u
 }
 
@@ -213,6 +309,21 @@ func (_u *StorageLocationUpdate) AddCacheEntries(v ...*CacheEntry) *StorageLocat
 	return _u.AddCacheEntryIDs(ids...)
 }
 
+// AddReaderLeaseIDs adds the "readerLeases" edge to the StorageReaderLease entity by IDs.
+func (_u *StorageLocationUpdate) AddReaderLeaseIDs(ids ...string) *StorageLocationUpdate {
+	_u.mutation.AddReaderLeaseIDs(ids...)
+	return _u
+}
+
+// AddReaderLeases adds the "readerLeases" edges to the StorageReaderLease entity.
+func (_u *StorageLocationUpdate) AddReaderLeases(v ...*StorageReaderLease) *StorageLocationUpdate {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddReaderLeaseIDs(ids...)
+}
+
 // Mutation returns the StorageLocationMutation object of the builder.
 func (_u *StorageLocationUpdate) Mutation() *StorageLocationMutation {
 	return _u.mutation
@@ -237,6 +348,27 @@ func (_u *StorageLocationUpdate) RemoveCacheEntries(v ...*CacheEntry) *StorageLo
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveCacheEntryIDs(ids...)
+}
+
+// ClearReaderLeases clears all "readerLeases" edges to the StorageReaderLease entity.
+func (_u *StorageLocationUpdate) ClearReaderLeases() *StorageLocationUpdate {
+	_u.mutation.ClearReaderLeases()
+	return _u
+}
+
+// RemoveReaderLeaseIDs removes the "readerLeases" edge to StorageReaderLease entities by IDs.
+func (_u *StorageLocationUpdate) RemoveReaderLeaseIDs(ids ...string) *StorageLocationUpdate {
+	_u.mutation.RemoveReaderLeaseIDs(ids...)
+	return _u
+}
+
+// RemoveReaderLeases removes "readerLeases" edges to StorageReaderLease entities.
+func (_u *StorageLocationUpdate) RemoveReaderLeases(v ...*StorageReaderLease) *StorageLocationUpdate {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveReaderLeaseIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -278,6 +410,11 @@ func (_u *StorageLocationUpdate) check() error {
 			return &ValidationError{Name: "partCount", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.partCount": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.LeaseVersion(); ok {
+		if err := storagelocation.LeaseVersionValidator(v); err != nil {
+			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -302,6 +439,21 @@ func (_u *StorageLocationUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if value, ok := _u.mutation.AddedPartCount(); ok {
 		_spec.AddField(storagelocation.FieldPartCount, field.TypeInt, value)
 	}
+	if value, ok := _u.mutation.LeaseVersion(); ok {
+		_spec.SetField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedLeaseVersion(); ok {
+		_spec.AddField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.DeletionRequestedAt(); ok {
+		_spec.SetField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedDeletionRequestedAt(); ok {
+		_spec.AddField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64, value)
+	}
+	if _u.mutation.DeletionRequestedAtCleared() {
+		_spec.ClearField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64)
+	}
 	if value, ok := _u.mutation.MergeStartedAt(); ok {
 		_spec.SetField(storagelocation.FieldMergeStartedAt, field.TypeInt64, value)
 	}
@@ -310,6 +462,21 @@ func (_u *StorageLocationUpdate) sqlSave(ctx context.Context) (_node int, err er
 	}
 	if _u.mutation.MergeStartedAtCleared() {
 		_spec.ClearField(storagelocation.FieldMergeStartedAt, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.MergeLeaseToken(); ok {
+		_spec.SetField(storagelocation.FieldMergeLeaseToken, field.TypeString, value)
+	}
+	if _u.mutation.MergeLeaseTokenCleared() {
+		_spec.ClearField(storagelocation.FieldMergeLeaseToken, field.TypeString)
+	}
+	if value, ok := _u.mutation.MergeLeaseExpiresAt(); ok {
+		_spec.SetField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedMergeLeaseExpiresAt(); ok {
+		_spec.AddField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64, value)
+	}
+	if _u.mutation.MergeLeaseExpiresAtCleared() {
+		_spec.ClearField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.MergedAt(); ok {
 		_spec.SetField(storagelocation.FieldMergedAt, field.TypeInt64, value)
@@ -392,6 +559,51 @@ func (_u *StorageLocationUpdate) sqlSave(ctx context.Context) (_node int, err er
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.ReaderLeasesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedReaderLeasesIDs(); len(nodes) > 0 && !_u.mutation.ReaderLeasesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ReaderLeasesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{storagelocation.Label}
@@ -447,6 +659,54 @@ func (_u *StorageLocationUpdateOne) AddPartCount(v int) *StorageLocationUpdateOn
 	return _u
 }
 
+// SetLeaseVersion sets the "leaseVersion" field.
+func (_u *StorageLocationUpdateOne) SetLeaseVersion(v int64) *StorageLocationUpdateOne {
+	_u.mutation.ResetLeaseVersion()
+	_u.mutation.SetLeaseVersion(v)
+	return _u
+}
+
+// SetNillableLeaseVersion sets the "leaseVersion" field if the given value is not nil.
+func (_u *StorageLocationUpdateOne) SetNillableLeaseVersion(v *int64) *StorageLocationUpdateOne {
+	if v != nil {
+		_u.SetLeaseVersion(*v)
+	}
+	return _u
+}
+
+// AddLeaseVersion adds value to the "leaseVersion" field.
+func (_u *StorageLocationUpdateOne) AddLeaseVersion(v int64) *StorageLocationUpdateOne {
+	_u.mutation.AddLeaseVersion(v)
+	return _u
+}
+
+// SetDeletionRequestedAt sets the "deletionRequestedAt" field.
+func (_u *StorageLocationUpdateOne) SetDeletionRequestedAt(v int64) *StorageLocationUpdateOne {
+	_u.mutation.ResetDeletionRequestedAt()
+	_u.mutation.SetDeletionRequestedAt(v)
+	return _u
+}
+
+// SetNillableDeletionRequestedAt sets the "deletionRequestedAt" field if the given value is not nil.
+func (_u *StorageLocationUpdateOne) SetNillableDeletionRequestedAt(v *int64) *StorageLocationUpdateOne {
+	if v != nil {
+		_u.SetDeletionRequestedAt(*v)
+	}
+	return _u
+}
+
+// AddDeletionRequestedAt adds value to the "deletionRequestedAt" field.
+func (_u *StorageLocationUpdateOne) AddDeletionRequestedAt(v int64) *StorageLocationUpdateOne {
+	_u.mutation.AddDeletionRequestedAt(v)
+	return _u
+}
+
+// ClearDeletionRequestedAt clears the value of the "deletionRequestedAt" field.
+func (_u *StorageLocationUpdateOne) ClearDeletionRequestedAt() *StorageLocationUpdateOne {
+	_u.mutation.ClearDeletionRequestedAt()
+	return _u
+}
+
 // SetMergeStartedAt sets the "mergeStartedAt" field.
 func (_u *StorageLocationUpdateOne) SetMergeStartedAt(v int64) *StorageLocationUpdateOne {
 	_u.mutation.ResetMergeStartedAt()
@@ -471,6 +731,53 @@ func (_u *StorageLocationUpdateOne) AddMergeStartedAt(v int64) *StorageLocationU
 // ClearMergeStartedAt clears the value of the "mergeStartedAt" field.
 func (_u *StorageLocationUpdateOne) ClearMergeStartedAt() *StorageLocationUpdateOne {
 	_u.mutation.ClearMergeStartedAt()
+	return _u
+}
+
+// SetMergeLeaseToken sets the "mergeLeaseToken" field.
+func (_u *StorageLocationUpdateOne) SetMergeLeaseToken(v string) *StorageLocationUpdateOne {
+	_u.mutation.SetMergeLeaseToken(v)
+	return _u
+}
+
+// SetNillableMergeLeaseToken sets the "mergeLeaseToken" field if the given value is not nil.
+func (_u *StorageLocationUpdateOne) SetNillableMergeLeaseToken(v *string) *StorageLocationUpdateOne {
+	if v != nil {
+		_u.SetMergeLeaseToken(*v)
+	}
+	return _u
+}
+
+// ClearMergeLeaseToken clears the value of the "mergeLeaseToken" field.
+func (_u *StorageLocationUpdateOne) ClearMergeLeaseToken() *StorageLocationUpdateOne {
+	_u.mutation.ClearMergeLeaseToken()
+	return _u
+}
+
+// SetMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field.
+func (_u *StorageLocationUpdateOne) SetMergeLeaseExpiresAt(v int64) *StorageLocationUpdateOne {
+	_u.mutation.ResetMergeLeaseExpiresAt()
+	_u.mutation.SetMergeLeaseExpiresAt(v)
+	return _u
+}
+
+// SetNillableMergeLeaseExpiresAt sets the "mergeLeaseExpiresAt" field if the given value is not nil.
+func (_u *StorageLocationUpdateOne) SetNillableMergeLeaseExpiresAt(v *int64) *StorageLocationUpdateOne {
+	if v != nil {
+		_u.SetMergeLeaseExpiresAt(*v)
+	}
+	return _u
+}
+
+// AddMergeLeaseExpiresAt adds value to the "mergeLeaseExpiresAt" field.
+func (_u *StorageLocationUpdateOne) AddMergeLeaseExpiresAt(v int64) *StorageLocationUpdateOne {
+	_u.mutation.AddMergeLeaseExpiresAt(v)
+	return _u
+}
+
+// ClearMergeLeaseExpiresAt clears the value of the "mergeLeaseExpiresAt" field.
+func (_u *StorageLocationUpdateOne) ClearMergeLeaseExpiresAt() *StorageLocationUpdateOne {
+	_u.mutation.ClearMergeLeaseExpiresAt()
 	return _u
 }
 
@@ -597,6 +904,21 @@ func (_u *StorageLocationUpdateOne) AddCacheEntries(v ...*CacheEntry) *StorageLo
 	return _u.AddCacheEntryIDs(ids...)
 }
 
+// AddReaderLeaseIDs adds the "readerLeases" edge to the StorageReaderLease entity by IDs.
+func (_u *StorageLocationUpdateOne) AddReaderLeaseIDs(ids ...string) *StorageLocationUpdateOne {
+	_u.mutation.AddReaderLeaseIDs(ids...)
+	return _u
+}
+
+// AddReaderLeases adds the "readerLeases" edges to the StorageReaderLease entity.
+func (_u *StorageLocationUpdateOne) AddReaderLeases(v ...*StorageReaderLease) *StorageLocationUpdateOne {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddReaderLeaseIDs(ids...)
+}
+
 // Mutation returns the StorageLocationMutation object of the builder.
 func (_u *StorageLocationUpdateOne) Mutation() *StorageLocationMutation {
 	return _u.mutation
@@ -621,6 +943,27 @@ func (_u *StorageLocationUpdateOne) RemoveCacheEntries(v ...*CacheEntry) *Storag
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveCacheEntryIDs(ids...)
+}
+
+// ClearReaderLeases clears all "readerLeases" edges to the StorageReaderLease entity.
+func (_u *StorageLocationUpdateOne) ClearReaderLeases() *StorageLocationUpdateOne {
+	_u.mutation.ClearReaderLeases()
+	return _u
+}
+
+// RemoveReaderLeaseIDs removes the "readerLeases" edge to StorageReaderLease entities by IDs.
+func (_u *StorageLocationUpdateOne) RemoveReaderLeaseIDs(ids ...string) *StorageLocationUpdateOne {
+	_u.mutation.RemoveReaderLeaseIDs(ids...)
+	return _u
+}
+
+// RemoveReaderLeases removes "readerLeases" edges to StorageReaderLease entities.
+func (_u *StorageLocationUpdateOne) RemoveReaderLeases(v ...*StorageReaderLease) *StorageLocationUpdateOne {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveReaderLeaseIDs(ids...)
 }
 
 // Where appends a list predicates to the StorageLocationUpdate builder.
@@ -675,6 +1018,11 @@ func (_u *StorageLocationUpdateOne) check() error {
 			return &ValidationError{Name: "partCount", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.partCount": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.LeaseVersion(); ok {
+		if err := storagelocation.LeaseVersionValidator(v); err != nil {
+			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -716,6 +1064,21 @@ func (_u *StorageLocationUpdateOne) sqlSave(ctx context.Context) (_node *Storage
 	if value, ok := _u.mutation.AddedPartCount(); ok {
 		_spec.AddField(storagelocation.FieldPartCount, field.TypeInt, value)
 	}
+	if value, ok := _u.mutation.LeaseVersion(); ok {
+		_spec.SetField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedLeaseVersion(); ok {
+		_spec.AddField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.DeletionRequestedAt(); ok {
+		_spec.SetField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedDeletionRequestedAt(); ok {
+		_spec.AddField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64, value)
+	}
+	if _u.mutation.DeletionRequestedAtCleared() {
+		_spec.ClearField(storagelocation.FieldDeletionRequestedAt, field.TypeInt64)
+	}
 	if value, ok := _u.mutation.MergeStartedAt(); ok {
 		_spec.SetField(storagelocation.FieldMergeStartedAt, field.TypeInt64, value)
 	}
@@ -724,6 +1087,21 @@ func (_u *StorageLocationUpdateOne) sqlSave(ctx context.Context) (_node *Storage
 	}
 	if _u.mutation.MergeStartedAtCleared() {
 		_spec.ClearField(storagelocation.FieldMergeStartedAt, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.MergeLeaseToken(); ok {
+		_spec.SetField(storagelocation.FieldMergeLeaseToken, field.TypeString, value)
+	}
+	if _u.mutation.MergeLeaseTokenCleared() {
+		_spec.ClearField(storagelocation.FieldMergeLeaseToken, field.TypeString)
+	}
+	if value, ok := _u.mutation.MergeLeaseExpiresAt(); ok {
+		_spec.SetField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedMergeLeaseExpiresAt(); ok {
+		_spec.AddField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64, value)
+	}
+	if _u.mutation.MergeLeaseExpiresAtCleared() {
+		_spec.ClearField(storagelocation.FieldMergeLeaseExpiresAt, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.MergedAt(); ok {
 		_spec.SetField(storagelocation.FieldMergedAt, field.TypeInt64, value)
@@ -799,6 +1177,51 @@ func (_u *StorageLocationUpdateOne) sqlSave(ctx context.Context) (_node *Storage
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(cacheentry.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.ReaderLeasesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedReaderLeasesIDs(); len(nodes) > 0 && !_u.mutation.ReaderLeasesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ReaderLeasesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   storagelocation.ReaderLeasesTable,
+			Columns: []string{storagelocation.ReaderLeasesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(storagereaderlease.FieldID, field.TypeString),
 			},
 		}
 		for _, k := range nodes {

@@ -15,5 +15,8 @@ type StorageDeletion func(*sql.Selector)
 // StorageLocation is the predicate function for storagelocation builders.
 type StorageLocation func(*sql.Selector)
 
+// StorageReaderLease is the predicate function for storagereaderlease builders.
+type StorageReaderLease func(*sql.Selector)
+
 // Upload is the predicate function for upload builders.
 type Upload func(*sql.Selector)

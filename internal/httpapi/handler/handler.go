@@ -11,6 +11,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/downloadurl"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,22 +22,29 @@ type Handler struct {
 	cache          *cache.Service
 	db             *ent.Client
 	storage        storage.Adapter
+	lifecycle      *storagelifecycle.Service
 	downloadSigner *downloadurl.Signer
 }
 
 type Options struct {
-	Config  config.Config
-	Cache   *cache.Service
-	DB      *ent.Client
-	Storage storage.Adapter
+	Config    config.Config
+	Cache     *cache.Service
+	DB        *ent.Client
+	Storage   storage.Adapter
+	Lifecycle *storagelifecycle.Service
 }
 
 func New(options Options) *Handler {
+	lifecycle := options.Lifecycle
+	if lifecycle == nil {
+		lifecycle = storagelifecycle.New(options.DB)
+	}
 	return &Handler{
 		cfg:            options.Config,
 		cache:          options.Cache,
 		db:             options.DB,
 		storage:        options.Storage,
+		lifecycle:      lifecycle,
 		downloadSigner: downloadurl.New(options.Config.Cache.DownloadURLSigningSecret, fallbackDownloadURLTTL),
 	}
 }

@@ -10,6 +10,8 @@ import (
 const (
 	uploadsInterval          = 5 * time.Minute
 	storageDeletionsInterval = 5 * time.Minute
+	pendingLocationsInterval = 5 * time.Minute
+	readerLeasesInterval     = time.Hour
 	cacheEntriesInterval     = 24 * time.Hour
 	storageLocationsInterval = 24 * time.Hour
 	partsInterval            = time.Hour
@@ -35,6 +37,8 @@ func (r *Runner) Start(ctx context.Context) {
 
 	go r.runPeriodically(ctx, "cleanup:uploads", uploadsInterval, r.service.RunUploads)
 	go r.runPeriodically(ctx, "cleanup:storage-deletions", storageDeletionsInterval, r.service.RunStorageDeletions)
+	go r.runPeriodically(ctx, "cleanup:pending-storage-locations", pendingLocationsInterval, r.service.RunPendingStorageLocations)
+	go r.runPeriodically(ctx, "cleanup:reader-leases", readerLeasesInterval, r.service.RunReaderLeases)
 	go r.runPeriodically(ctx, "cleanup:cache-entries", cacheEntriesInterval, r.service.RunCacheEntries)
 	go r.runPeriodically(ctx, "cleanup:storage-locations", storageLocationsInterval, r.service.RunStorageLocations)
 	go r.runPeriodically(ctx, "cleanup:parts", partsInterval, r.service.RunParts)
