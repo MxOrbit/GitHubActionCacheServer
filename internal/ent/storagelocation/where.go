@@ -73,6 +73,11 @@ func PartCount(v int) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldPartCount, v))
 }
 
+// SizeBytes applies equality check predicate on the "sizeBytes" field. It's identical to SizeBytesEQ.
+func SizeBytes(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldSizeBytes, v))
+}
+
 // LeaseVersion applies equality check predicate on the "leaseVersion" field. It's identical to LeaseVersionEQ.
 func LeaseVersion(v int64) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldLeaseVersion, v))
@@ -221,6 +226,56 @@ func PartCountLT(v int) predicate.StorageLocation {
 // PartCountLTE applies the LTE predicate on the "partCount" field.
 func PartCountLTE(v int) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldLTE(FieldPartCount, v))
+}
+
+// SizeBytesEQ applies the EQ predicate on the "sizeBytes" field.
+func SizeBytesEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldSizeBytes, v))
+}
+
+// SizeBytesNEQ applies the NEQ predicate on the "sizeBytes" field.
+func SizeBytesNEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNEQ(FieldSizeBytes, v))
+}
+
+// SizeBytesIn applies the In predicate on the "sizeBytes" field.
+func SizeBytesIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIn(FieldSizeBytes, vs...))
+}
+
+// SizeBytesNotIn applies the NotIn predicate on the "sizeBytes" field.
+func SizeBytesNotIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotIn(FieldSizeBytes, vs...))
+}
+
+// SizeBytesGT applies the GT predicate on the "sizeBytes" field.
+func SizeBytesGT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGT(FieldSizeBytes, v))
+}
+
+// SizeBytesGTE applies the GTE predicate on the "sizeBytes" field.
+func SizeBytesGTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGTE(FieldSizeBytes, v))
+}
+
+// SizeBytesLT applies the LT predicate on the "sizeBytes" field.
+func SizeBytesLT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLT(FieldSizeBytes, v))
+}
+
+// SizeBytesLTE applies the LTE predicate on the "sizeBytes" field.
+func SizeBytesLTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLTE(FieldSizeBytes, v))
+}
+
+// SizeBytesIsNil applies the IsNil predicate on the "sizeBytes" field.
+func SizeBytesIsNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIsNull(FieldSizeBytes))
+}
+
+// SizeBytesNotNil applies the NotNil predicate on the "sizeBytes" field.
+func SizeBytesNotNil() predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotNull(FieldSizeBytes))
 }
 
 // LeaseVersionEQ applies the EQ predicate on the "leaseVersion" field.

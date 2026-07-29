@@ -309,6 +309,63 @@ func (a *S3Adapter) CreateDownloadStream(ctx context.Context, objectName string)
 	return output.Body, nil
 }
 
+func (a *S3Adapter) InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error) {
+	output, err := a.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(a.key(objectName)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return ObjectMetadata{}, ObjectNotFoundError{ObjectName: objectName}
+		}
+		return ObjectMetadata{}, fmt.Errorf("head s3 object: %w", err)
+	}
+	if output.ContentLength == nil || aws.ToInt64(output.ContentLength) < 0 {
+		return ObjectMetadata{}, fmt.Errorf("head s3 object %q: invalid content length", objectName)
+	}
+	if output.LastModified == nil {
+		return ObjectMetadata{}, fmt.Errorf("head s3 object %q: missing modification time", objectName)
+	}
+	return ObjectMetadata{
+		Name:       objectName,
+		SizeBytes:  aws.ToInt64(output.ContentLength),
+		ModifiedAt: aws.ToTime(output.LastModified),
+	}, nil
+}
+
+func (a *S3Adapter) InspectFolder(ctx context.Context, folderName string) (FolderContents, error) {
+	prefix := a.key(folderName) + "/"
+	objects := make([]ObjectMetadata, 0)
+	err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
+		object.Name = strings.TrimPrefix(object.Name, prefix)
+		if object.Name == "" {
+			object.Name = "."
+		}
+		objects = append(objects, object)
+		return nil
+	})
+	if err != nil {
+		return FolderContents{}, err
+	}
+	return newFolderContents(folderName, objects)
+}
+
+func (a *S3Adapter) Inventory(ctx context.Context) (Inventory, error) {
+	prefix := a.clearPrefix()
+	builder := newInventoryBuilder()
+	err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
+		object.Name = strings.TrimPrefix(object.Name, prefix)
+		if object.Name == "" {
+			object.Name = "."
+		}
+		return builder.addObject(object)
+	})
+	if err != nil {
+		return Inventory{}, err
+	}
+	return builder.build(), nil
+}
+
 func (a *S3Adapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
 	_, err := a.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(a.bucket),
@@ -329,23 +386,15 @@ func (a *S3Adapter) DeleteFolder(ctx context.Context, folderName string) error {
 
 func (a *S3Adapter) CountFilesInFolder(ctx context.Context, folderName string) (int, error) {
 	prefix := a.key(folderName) + "/"
-	paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(a.bucket),
-		Prefix:    aws.String(prefix),
-		Delimiter: aws.String("/"),
-	})
-
 	count := 0
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("list s3 objects: %w", err)
+	err := a.walkObjects(ctx, prefix, "/", func(object ObjectMetadata) error {
+		if isDirectS3FolderObject(prefix, object.Name) {
+			count++
 		}
-		for _, object := range page.Contents {
-			if object.Key != nil && isDirectS3FolderObject(prefix, aws.ToString(object.Key)) {
-				count++
-			}
-		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return count, nil
 }
@@ -366,31 +415,20 @@ func (a *S3Adapter) CreateDownloadURL(ctx context.Context, objectName string, tt
 }
 
 func (a *S3Adapter) deleteByPrefix(ctx context.Context, prefix string) error {
-	paginator := s3.NewListObjectsV2Paginator(a.client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(a.bucket),
-		Prefix: aws.String(prefix),
-	})
+	objectKeys := make([]string, 0)
+	if err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
+		objectKeys = append(objectKeys, object.Name)
+		return nil
+	}); err != nil {
+		return err
+	}
 
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("list s3 objects: %w", err)
+	for start := 0; start < len(objectKeys); start += 1000 {
+		end := min(start+1000, len(objectKeys))
+		objects := make([]types.ObjectIdentifier, 0, end-start)
+		for _, key := range objectKeys[start:end] {
+			objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
 		}
-		if len(page.Contents) == 0 {
-			continue
-		}
-
-		objects := make([]types.ObjectIdentifier, 0, len(page.Contents))
-		for _, object := range page.Contents {
-			if object.Key == nil {
-				continue
-			}
-			objects = append(objects, types.ObjectIdentifier{Key: object.Key})
-		}
-		if len(objects) == 0 {
-			continue
-		}
-
 		output, err := a.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(a.bucket),
 			Delete: &types.Delete{
@@ -407,6 +445,63 @@ func (a *S3Adapter) deleteByPrefix(ctx context.Context, prefix string) error {
 	}
 
 	return nil
+}
+
+func (a *S3Adapter) walkObjects(ctx context.Context, prefix, delimiter string, visit func(ObjectMetadata) error) error {
+	var continuationToken *string
+	seenTokens := make(map[string]struct{})
+	for {
+		input := &s3.ListObjectsV2Input{
+			Bucket:            aws.String(a.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: continuationToken,
+		}
+		if delimiter != "" {
+			input.Delimiter = aws.String(delimiter)
+		}
+		page, err := a.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return fmt.Errorf("list s3 objects: %w", err)
+		}
+		if page == nil {
+			return fmt.Errorf("list s3 objects: empty response")
+		}
+		for _, object := range page.Contents {
+			if object.Key == nil || aws.ToString(object.Key) == "" {
+				return fmt.Errorf("list s3 objects: object without key")
+			}
+			key := aws.ToString(object.Key)
+			if !strings.HasPrefix(key, prefix) {
+				return fmt.Errorf("list s3 objects: key %q is outside prefix %q", key, prefix)
+			}
+			if object.Size == nil || aws.ToInt64(object.Size) < 0 {
+				return fmt.Errorf("list s3 objects: object %q has invalid size", key)
+			}
+			if object.LastModified == nil {
+				return fmt.Errorf("list s3 objects: object %q has no modification time", key)
+			}
+			if err := visit(ObjectMetadata{
+				Name:       key,
+				SizeBytes:  aws.ToInt64(object.Size),
+				ModifiedAt: aws.ToTime(object.LastModified),
+			}); err != nil {
+				return err
+			}
+		}
+
+		if !aws.ToBool(page.IsTruncated) {
+			return nil
+		}
+		nextToken := aws.ToString(page.NextContinuationToken)
+		if nextToken == "" {
+			return fmt.Errorf("list s3 objects: truncated response has no continuation token")
+		}
+		if _, duplicate := seenTokens[nextToken]; duplicate {
+			return fmt.Errorf("list s3 objects: repeated continuation token %q", nextToken)
+		}
+		seenTokens[nextToken] = struct{}{}
+		continuationToken = aws.String(nextToken)
+	}
 }
 
 func (a *S3Adapter) key(objectName string) string {

@@ -279,8 +279,17 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 			currentUpload.FinishedPartUploadCount,
 		)
 	}
+	parts, err := s.storage.InspectFolder(ctx, partsFolderName(currentUpload.FolderName))
+	if err != nil {
+		return 0, fmt.Errorf("inspect finalized cache parts: %w", err)
+	}
+	sizeBytes, err := parts.LogicalIndexedSize(partCount)
+	if err != nil {
+		_ = s.deleteUpload(ctx, currentUpload)
+		return 0, fmt.Errorf("%w: %v", ErrPartCountMismatch, err)
+	}
 
-	location, cacheEntryID, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
+	location, cacheEntryID, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount, sizeBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -327,7 +336,7 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 			}
 		}
 		if !representationAvailable {
-			if _, err := s.lifecycle.PurgeDanglingCacheEntry(ctx, cacheEntry.ID, location.ID); err != nil {
+			if _, err := s.lifecycle.PurgeDanglingCacheEntryIfUnchanged(ctx, cacheEntry.ID, location); err != nil {
 				return nil, err
 			}
 			continue
@@ -347,7 +356,7 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 					}
 					if !exists {
 						s.releaseReaderLease(lease.ID)
-						if _, purgeErr := s.lifecycle.PurgeDanglingCacheEntry(ctx, cacheEntry.ID, lease.Location.ID); purgeErr != nil {
+						if _, purgeErr := s.lifecycle.PurgeDanglingCacheEntryIfUnchanged(ctx, cacheEntry.ID, lease.Location); purgeErr != nil {
 							return nil, purgeErr
 						}
 						continue
@@ -634,7 +643,7 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 	return nil
 }
 
-func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (*ent.StorageLocation, string, error) {
+func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int, sizeBytes int64) (*ent.StorageLocation, string, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("start transaction: %w", err)
@@ -651,6 +660,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		SetID(locationID).
 		SetFolderName(currentUpload.FolderName).
 		SetPartCount(partCount).
+		SetSizeBytes(sizeBytes).
 		Save(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("create storage location: %w", err)
@@ -967,7 +977,7 @@ func randomPositiveInt64() (int64, error) {
 }
 
 func partsFolderName(folderName string) string {
-	return folderName + "/parts"
+	return storage.PartsFolder(folderName)
 }
 
 func partObjectName(folderName string, partIndex int) string {
@@ -983,5 +993,5 @@ func blockObjectName(folderName string, blockID string) string {
 }
 
 func mergedObjectName(folderName string) string {
-	return folderName + "/merged"
+	return storage.MergedObject(folderName)
 }

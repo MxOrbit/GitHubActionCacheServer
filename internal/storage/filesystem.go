@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -170,23 +171,125 @@ func (a *FilesystemAdapter) CreateDownloadStream(_ context.Context, objectName s
 	return file, nil
 }
 
-func (a *FilesystemAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+func (a *FilesystemAdapter) InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error) {
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return ObjectMetadata{}, err
 	}
 	path, err := a.safePath(objectName)
 	if err != nil {
-		return false, err
+		return ObjectMetadata{}, err
 	}
-
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			return ObjectMetadata{}, ObjectNotFoundError{ObjectName: objectName}
+		}
+		return ObjectMetadata{}, fmt.Errorf("stat object: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return ObjectMetadata{}, ObjectNotFoundError{ObjectName: objectName}
+	}
+	return ObjectMetadata{Name: objectName, SizeBytes: info.Size(), ModifiedAt: info.ModTime()}, nil
+}
+
+func (a *FilesystemAdapter) InspectFolder(ctx context.Context, folderName string) (FolderContents, error) {
+	path, err := a.safePath(folderName)
+	if err != nil {
+		return FolderContents{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return FolderContents{FolderName: folderName}, nil
+		}
+		return FolderContents{}, fmt.Errorf("stat folder: %w", err)
+	}
+	if !info.IsDir() {
+		return FolderContents{}, fmt.Errorf("inspect folder %q: path is not a directory", folderName)
+	}
+
+	objects := make([]ObjectMetadata, 0)
+	err = filepath.WalkDir(path, func(currentPath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if currentPath == path || entry.IsDir() {
+			return nil
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		relativeName, err := filepath.Rel(path, currentPath)
+		if err != nil {
+			return err
+		}
+		objects = append(objects, ObjectMetadata{
+			Name:       filepath.ToSlash(relativeName),
+			SizeBytes:  entryInfo.Size(),
+			ModifiedAt: entryInfo.ModTime(),
+		})
+		return nil
+	})
+	if err != nil {
+		return FolderContents{}, fmt.Errorf("inspect folder %q: %w", folderName, err)
+	}
+	return newFolderContents(folderName, objects)
+}
+
+func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
+	entries, err := os.ReadDir(a.root)
+	if err != nil {
+		return Inventory{}, fmt.Errorf("read storage root: %w", err)
+	}
+
+	builder := newInventoryBuilder()
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return Inventory{}, err
+		}
+		if entry.IsDir() {
+			builder.ensureFolder(entry.Name())
+			contents, err := a.InspectFolder(ctx, entry.Name())
+			if err != nil {
+				return Inventory{}, err
+			}
+			for _, object := range contents.Objects {
+				object.Name = entry.Name() + "/" + object.Name
+				if err := builder.addObject(object); err != nil {
+					return Inventory{}, err
+				}
+			}
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return Inventory{}, fmt.Errorf("inspect storage root object %q: %w", entry.Name(), err)
+		}
+		if err := builder.addObject(ObjectMetadata{
+			Name:       entry.Name(),
+			SizeBytes:  info.Size(),
+			ModifiedAt: info.ModTime(),
+		}); err != nil {
+			return Inventory{}, err
+		}
+	}
+	return builder.build(), nil
+}
+
+func (a *FilesystemAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
+	_, err := a.InspectObject(ctx, objectName)
+	if err != nil {
+		if errors.Is(err, ErrObjectNotFound) {
 			return false, nil
 		}
-		return false, fmt.Errorf("stat object: %w", err)
+		return false, err
 	}
-	return info.Mode().IsRegular(), nil
+	return true, nil
 }
 
 func (a *FilesystemAdapter) DeleteFolder(_ context.Context, folderName string) error {

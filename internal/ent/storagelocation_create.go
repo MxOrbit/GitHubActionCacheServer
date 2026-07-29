@@ -33,6 +33,20 @@ func (_c *StorageLocationCreate) SetPartCount(v int) *StorageLocationCreate {
 	return _c
 }
 
+// SetSizeBytes sets the "sizeBytes" field.
+func (_c *StorageLocationCreate) SetSizeBytes(v int64) *StorageLocationCreate {
+	_c.mutation.SetSizeBytes(v)
+	return _c
+}
+
+// SetNillableSizeBytes sets the "sizeBytes" field if the given value is not nil.
+func (_c *StorageLocationCreate) SetNillableSizeBytes(v *int64) *StorageLocationCreate {
+	if v != nil {
+		_c.SetSizeBytes(*v)
+	}
+	return _c
+}
+
 // SetLeaseVersion sets the "leaseVersion" field.
 func (_c *StorageLocationCreate) SetLeaseVersion(v int64) *StorageLocationCreate {
 	_c.mutation.SetLeaseVersion(v)
@@ -254,6 +268,11 @@ func (_c *StorageLocationCreate) check() error {
 			return &ValidationError{Name: "partCount", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.partCount": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.SizeBytes(); ok {
+		if err := storagelocation.SizeBytesValidator(v); err != nil {
+			return &ValidationError{Name: "sizeBytes", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.sizeBytes": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.LeaseVersion(); !ok {
 		return &ValidationError{Name: "leaseVersion", err: errors.New(`ent: missing required field "StorageLocation.leaseVersion"`)}
 	}
@@ -304,6 +323,10 @@ func (_c *StorageLocationCreate) createSpec() (*StorageLocation, *sqlgraph.Creat
 	if value, ok := _c.mutation.PartCount(); ok {
 		_spec.SetField(storagelocation.FieldPartCount, field.TypeInt, value)
 		_node.PartCount = value
+	}
+	if value, ok := _c.mutation.SizeBytes(); ok {
+		_spec.SetField(storagelocation.FieldSizeBytes, field.TypeInt64, value)
+		_node.SizeBytes = &value
 	}
 	if value, ok := _c.mutation.LeaseVersion(); ok {
 		_spec.SetField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)

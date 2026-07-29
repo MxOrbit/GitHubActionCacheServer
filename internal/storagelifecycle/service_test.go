@@ -9,6 +9,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/stretchr/testify/require"
@@ -218,6 +219,26 @@ func TestPurgeDanglingCacheEntryLeavesSharedLocationAvailable(t *testing.T) {
 	require.True(t, deleted)
 	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
 	require.Equal(t, location.ID, client.CacheEntry.GetX(ctx, "entry-b").LocationId)
+}
+
+func TestConditionalDanglingPurgeTreatsReaderLeaseVersionChangeAsStale(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	observed := createLifecycleEntry(ctx, client, "entry", "location", 1)
+
+	lease, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	deleted, err := service.PurgeDanglingCacheEntryIfUnchanged(ctx, "entry", observed)
+	require.NoError(t, err)
+	require.False(t, deleted)
+	require.True(t, client.CacheEntry.Query().Where(cacheentry.ID("entry")).ExistX(ctx))
+
+	refreshed := client.StorageLocation.GetX(ctx, observed.ID)
+	deleted, err = service.PurgeDanglingCacheEntryIfUnchanged(ctx, "entry", refreshed)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, observed.ID).DeletionRequestedAt)
+	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
 }
 
 func TestPartsDeletionWaitsForPartsReadersButNotMergedReaders(t *testing.T) {

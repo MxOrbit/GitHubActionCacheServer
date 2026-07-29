@@ -39,6 +39,59 @@ func TestFilesystemAdapterUploadDownloadCountAndDelete(t *testing.T) {
 	require.Zero(t, count)
 }
 
+func TestFilesystemInventorySeparatesLogicalRepresentationsFromPhysicalBytes(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, adapter.UploadStream(ctx, "folder/parts/0", strings.NewReader("hello ")))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/parts/1", strings.NewReader("world")))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/parts/3", strings.NewReader("stale")))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/blocks/YmxvY2s", strings.NewReader("duplicate")))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/merged", strings.NewReader("hello world")))
+	require.NoError(t, adapter.UploadStream(ctx, "folder/unknown/object", strings.NewReader("unknown")))
+	require.NoError(t, adapter.UploadStream(ctx, "loose", strings.NewReader("root")))
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(7), inventory.ObjectCount)
+	require.Equal(t, int64(47), inventory.PhysicalBytes)
+	require.Len(t, inventory.LooseObjects, 1)
+
+	folder, ok := inventory.Folder("folder")
+	require.True(t, ok)
+	require.Equal(t, int64(6), folder.ObjectCount)
+	require.Equal(t, int64(43), folder.PhysicalBytes)
+	require.Len(t, folder.Parts, 3)
+	require.Equal(t, int64(9), folder.Blocks.PhysicalBytes)
+	require.Equal(t, int64(7), folder.Unknown.PhysicalBytes)
+	require.NotNil(t, folder.Merged)
+	require.Equal(t, int64(11), folder.Merged.SizeBytes)
+
+	logicalSize, err := folder.LogicalPartsSize(2)
+	require.NoError(t, err)
+	require.Equal(t, int64(11), logicalSize)
+	_, err = folder.LogicalPartsSize(3)
+	require.ErrorIs(t, err, ErrIndexedObjectMissing)
+
+	parts, err := adapter.InspectFolder(ctx, "folder/parts")
+	require.NoError(t, err)
+	logicalSize, err = parts.LogicalIndexedSize(2)
+	require.NoError(t, err)
+	require.Equal(t, int64(11), logicalSize)
+
+	metadata, err := adapter.InspectObject(ctx, "folder/merged")
+	require.NoError(t, err)
+	require.Equal(t, int64(11), metadata.SizeBytes)
+	require.False(t, metadata.ModifiedAt.IsZero())
+}
+
+func TestLogicalIndexedSizeRejectsZeroPartLegacyLocation(t *testing.T) {
+	_, err := (FolderContents{}).LogicalIndexedSize(0)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrIndexedObjectMissing)
+}
+
 func TestFilesystemAdapterRejectsPathTraversal(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())

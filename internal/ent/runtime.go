@@ -110,8 +110,12 @@ func init() {
 	storagelocationDescPartCount := storagelocationFields[2].Descriptor()
 	// storagelocation.PartCountValidator is a validator for the "partCount" field. It is called by the builders before save.
 	storagelocation.PartCountValidator = storagelocationDescPartCount.Validators[0].(func(int) error)
+	// storagelocationDescSizeBytes is the schema descriptor for sizeBytes field.
+	storagelocationDescSizeBytes := storagelocationFields[3].Descriptor()
+	// storagelocation.SizeBytesValidator is a validator for the "sizeBytes" field. It is called by the builders before save.
+	storagelocation.SizeBytesValidator = storagelocationDescSizeBytes.Validators[0].(func(int64) error)
 	// storagelocationDescLeaseVersion is the schema descriptor for leaseVersion field.
-	storagelocationDescLeaseVersion := storagelocationFields[3].Descriptor()
+	storagelocationDescLeaseVersion := storagelocationFields[4].Descriptor()
 	// storagelocation.DefaultLeaseVersion holds the default value on creation for the leaseVersion field.
 	storagelocation.DefaultLeaseVersion = storagelocationDescLeaseVersion.Default.(int64)
 	// storagelocation.LeaseVersionValidator is a validator for the "leaseVersion" field. It is called by the builders before save.

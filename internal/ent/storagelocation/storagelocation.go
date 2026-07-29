@@ -16,6 +16,8 @@ const (
 	FieldFolderName = "folderName"
 	// FieldPartCount holds the string denoting the partcount field in the database.
 	FieldPartCount = "partCount"
+	// FieldSizeBytes holds the string denoting the sizebytes field in the database.
+	FieldSizeBytes = "sizeBytes"
 	// FieldLeaseVersion holds the string denoting the leaseversion field in the database.
 	FieldLeaseVersion = "leaseVersion"
 	// FieldDeletionRequestedAt holds the string denoting the deletionrequestedat field in the database.
@@ -61,6 +63,7 @@ var Columns = []string{
 	FieldID,
 	FieldFolderName,
 	FieldPartCount,
+	FieldSizeBytes,
 	FieldLeaseVersion,
 	FieldDeletionRequestedAt,
 	FieldMergeStartedAt,
@@ -87,6 +90,8 @@ var (
 	FolderNameValidator func(string) error
 	// PartCountValidator is a validator for the "partCount" field. It is called by the builders before save.
 	PartCountValidator func(int) error
+	// SizeBytesValidator is a validator for the "sizeBytes" field. It is called by the builders before save.
+	SizeBytesValidator func(int64) error
 	// DefaultLeaseVersion holds the default value on creation for the "leaseVersion" field.
 	DefaultLeaseVersion int64
 	// LeaseVersionValidator is a validator for the "leaseVersion" field. It is called by the builders before save.
@@ -109,6 +114,11 @@ func ByFolderName(opts ...sql.OrderTermOption) OrderOption {
 // ByPartCount orders the results by the partCount field.
 func ByPartCount(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPartCount, opts...).ToFunc()
+}
+
+// BySizeBytes orders the results by the sizeBytes field.
+func BySizeBytes(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSizeBytes, opts...).ToFunc()
 }
 
 // ByLeaseVersion orders the results by the leaseVersion field.

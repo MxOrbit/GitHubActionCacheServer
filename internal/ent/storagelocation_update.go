@@ -64,6 +64,33 @@ func (_u *StorageLocationUpdate) AddPartCount(v int) *StorageLocationUpdate {
 	return _u
 }
 
+// SetSizeBytes sets the "sizeBytes" field.
+func (_u *StorageLocationUpdate) SetSizeBytes(v int64) *StorageLocationUpdate {
+	_u.mutation.ResetSizeBytes()
+	_u.mutation.SetSizeBytes(v)
+	return _u
+}
+
+// SetNillableSizeBytes sets the "sizeBytes" field if the given value is not nil.
+func (_u *StorageLocationUpdate) SetNillableSizeBytes(v *int64) *StorageLocationUpdate {
+	if v != nil {
+		_u.SetSizeBytes(*v)
+	}
+	return _u
+}
+
+// AddSizeBytes adds value to the "sizeBytes" field.
+func (_u *StorageLocationUpdate) AddSizeBytes(v int64) *StorageLocationUpdate {
+	_u.mutation.AddSizeBytes(v)
+	return _u
+}
+
+// ClearSizeBytes clears the value of the "sizeBytes" field.
+func (_u *StorageLocationUpdate) ClearSizeBytes() *StorageLocationUpdate {
+	_u.mutation.ClearSizeBytes()
+	return _u
+}
+
 // SetLeaseVersion sets the "leaseVersion" field.
 func (_u *StorageLocationUpdate) SetLeaseVersion(v int64) *StorageLocationUpdate {
 	_u.mutation.ResetLeaseVersion()
@@ -410,6 +437,11 @@ func (_u *StorageLocationUpdate) check() error {
 			return &ValidationError{Name: "partCount", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.partCount": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SizeBytes(); ok {
+		if err := storagelocation.SizeBytesValidator(v); err != nil {
+			return &ValidationError{Name: "sizeBytes", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.sizeBytes": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.LeaseVersion(); ok {
 		if err := storagelocation.LeaseVersionValidator(v); err != nil {
 			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
@@ -438,6 +470,15 @@ func (_u *StorageLocationUpdate) sqlSave(ctx context.Context) (_node int, err er
 	}
 	if value, ok := _u.mutation.AddedPartCount(); ok {
 		_spec.AddField(storagelocation.FieldPartCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.SizeBytes(); ok {
+		_spec.SetField(storagelocation.FieldSizeBytes, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSizeBytes(); ok {
+		_spec.AddField(storagelocation.FieldSizeBytes, field.TypeInt64, value)
+	}
+	if _u.mutation.SizeBytesCleared() {
+		_spec.ClearField(storagelocation.FieldSizeBytes, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.LeaseVersion(); ok {
 		_spec.SetField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)
@@ -656,6 +697,33 @@ func (_u *StorageLocationUpdateOne) SetNillablePartCount(v *int) *StorageLocatio
 // AddPartCount adds value to the "partCount" field.
 func (_u *StorageLocationUpdateOne) AddPartCount(v int) *StorageLocationUpdateOne {
 	_u.mutation.AddPartCount(v)
+	return _u
+}
+
+// SetSizeBytes sets the "sizeBytes" field.
+func (_u *StorageLocationUpdateOne) SetSizeBytes(v int64) *StorageLocationUpdateOne {
+	_u.mutation.ResetSizeBytes()
+	_u.mutation.SetSizeBytes(v)
+	return _u
+}
+
+// SetNillableSizeBytes sets the "sizeBytes" field if the given value is not nil.
+func (_u *StorageLocationUpdateOne) SetNillableSizeBytes(v *int64) *StorageLocationUpdateOne {
+	if v != nil {
+		_u.SetSizeBytes(*v)
+	}
+	return _u
+}
+
+// AddSizeBytes adds value to the "sizeBytes" field.
+func (_u *StorageLocationUpdateOne) AddSizeBytes(v int64) *StorageLocationUpdateOne {
+	_u.mutation.AddSizeBytes(v)
+	return _u
+}
+
+// ClearSizeBytes clears the value of the "sizeBytes" field.
+func (_u *StorageLocationUpdateOne) ClearSizeBytes() *StorageLocationUpdateOne {
+	_u.mutation.ClearSizeBytes()
 	return _u
 }
 
@@ -1018,6 +1086,11 @@ func (_u *StorageLocationUpdateOne) check() error {
 			return &ValidationError{Name: "partCount", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.partCount": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.SizeBytes(); ok {
+		if err := storagelocation.SizeBytesValidator(v); err != nil {
+			return &ValidationError{Name: "sizeBytes", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.sizeBytes": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.LeaseVersion(); ok {
 		if err := storagelocation.LeaseVersionValidator(v); err != nil {
 			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
@@ -1063,6 +1136,15 @@ func (_u *StorageLocationUpdateOne) sqlSave(ctx context.Context) (_node *Storage
 	}
 	if value, ok := _u.mutation.AddedPartCount(); ok {
 		_spec.AddField(storagelocation.FieldPartCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.SizeBytes(); ok {
+		_spec.SetField(storagelocation.FieldSizeBytes, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedSizeBytes(); ok {
+		_spec.AddField(storagelocation.FieldSizeBytes, field.TypeInt64, value)
+	}
+	if _u.mutation.SizeBytesCleared() {
+		_spec.ClearField(storagelocation.FieldSizeBytes, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.LeaseVersion(); ok {
 		_spec.SetField(storagelocation.FieldLeaseVersion, field.TypeInt64, value)

@@ -20,6 +20,8 @@ type StorageLocation struct {
 	FolderName string `json:"folderName,omitempty"`
 	// PartCount holds the value of the "partCount" field.
 	PartCount int `json:"partCount,omitempty"`
+	// SizeBytes holds the value of the "sizeBytes" field.
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
 	// LeaseVersion holds the value of the "leaseVersion" field.
 	LeaseVersion int64 `json:"leaseVersion,omitempty"`
 	// DeletionRequestedAt holds the value of the "deletionRequestedAt" field.
@@ -78,7 +80,7 @@ func (*StorageLocation) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case storagelocation.FieldPartCount, storagelocation.FieldLeaseVersion, storagelocation.FieldDeletionRequestedAt, storagelocation.FieldMergeStartedAt, storagelocation.FieldMergeLeaseExpiresAt, storagelocation.FieldMergedAt, storagelocation.FieldMaterializationUnsupportedAt, storagelocation.FieldPartsDeletedAt, storagelocation.FieldLastDownloadedAt:
+		case storagelocation.FieldPartCount, storagelocation.FieldSizeBytes, storagelocation.FieldLeaseVersion, storagelocation.FieldDeletionRequestedAt, storagelocation.FieldMergeStartedAt, storagelocation.FieldMergeLeaseExpiresAt, storagelocation.FieldMergedAt, storagelocation.FieldMaterializationUnsupportedAt, storagelocation.FieldPartsDeletedAt, storagelocation.FieldLastDownloadedAt:
 			values[i] = new(sql.NullInt64)
 		case storagelocation.FieldID, storagelocation.FieldFolderName, storagelocation.FieldMergeLeaseToken:
 			values[i] = new(sql.NullString)
@@ -114,6 +116,13 @@ func (_m *StorageLocation) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field partCount", values[i])
 			} else if value.Valid {
 				_m.PartCount = int(value.Int64)
+			}
+		case storagelocation.FieldSizeBytes:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field sizeBytes", values[i])
+			} else if value.Valid {
+				_m.SizeBytes = new(int64)
+				*_m.SizeBytes = value.Int64
 			}
 		case storagelocation.FieldLeaseVersion:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -228,6 +237,11 @@ func (_m *StorageLocation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("partCount=")
 	builder.WriteString(fmt.Sprintf("%v", _m.PartCount))
+	builder.WriteString(", ")
+	if v := _m.SizeBytes; v != nil {
+		builder.WriteString("sizeBytes=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("leaseVersion=")
 	builder.WriteString(fmt.Sprintf("%v", _m.LeaseVersion))

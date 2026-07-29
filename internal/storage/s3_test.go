@@ -299,6 +299,90 @@ func TestS3AdapterObjectExistsUsesHeadAndClassifiesErrors(t *testing.T) {
 	}
 }
 
+func TestS3SharedListingRejectsTruncatedPageWithoutTokenBeforeConsumersAct(t *testing.T) {
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			key := r.URL.Query().Get("prefix") + "0"
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>%s</Key><LastModified>2026-07-29T00:00:00Z</LastModified><Size>1</Size></Contents></ListBucketResult>`, key)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	_, err = adapter.Inventory(context.Background())
+	require.ErrorContains(t, err, "truncated response has no continuation token")
+	_, err = adapter.CountFilesInFolder(context.Background(), "folder/parts")
+	require.ErrorContains(t, err, "truncated response has no continuation token")
+	err = adapter.DeleteFolder(context.Background(), "folder")
+	require.ErrorContains(t, err, "truncated response has no continuation token")
+	require.Zero(t, deleteCalls)
+}
+
+func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
+	continuationRequests := 0
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			prefix := r.URL.Query().Get("prefix")
+			basePrefix := strings.TrimSuffix(prefix, "folder/parts/")
+			if basePrefix == prefix {
+				basePrefix = strings.TrimSuffix(prefix, "folder/")
+			}
+			if r.URL.Query().Get("continuation-token") == "next" {
+				continuationRequests++
+				_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>%sfolder/parts/1</Key><LastModified>2026-07-29T00:01:00Z</LastModified><Size>4</Size></Contents></ListBucketResult>`, basePrefix)
+				return
+			}
+			key := basePrefix + "folder/parts/0"
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>%s</Key><LastModified>2026-07-29T00:00:00Z</LastModified><Size>3</Size></Contents></ListBucketResult>`, key)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	folder, ok := inventory.Folder("folder")
+	require.True(t, ok)
+	size, err := folder.LogicalPartsSize(2)
+	require.NoError(t, err)
+	require.Equal(t, int64(7), size)
+
+	count, err := adapter.CountFilesInFolder(ctx, "folder/parts")
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+	require.NoError(t, adapter.DeleteFolder(ctx, "folder"))
+	require.Equal(t, 3, continuationRequests)
+	require.Equal(t, 1, deleteCalls)
+}
+
 func TestS3AdapterCopyObjectUsesServerSideCopy(t *testing.T) {
 	ctx := context.Background()
 	fakeS3 := newFakeS3Server(t, fakeS3Options{})

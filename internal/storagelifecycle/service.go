@@ -8,6 +8,7 @@ import (
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
@@ -293,6 +294,98 @@ func (s *Service) PurgeDanglingCacheEntry(ctx context.Context, cacheEntryID, loc
 	}
 	committed = true
 	return deleted > 0, nil
+}
+
+// PurgeDanglingCacheEntryIfUnchanged removes an entry only while the storage
+// representation and materialization ownership still match the state that was
+// inspected before the missing object was confirmed. The conditional update is
+// also the cross-dialect write lock used by the rest of the fencing model.
+func (s *Service) PurgeDanglingCacheEntryIfUnchanged(ctx context.Context, cacheEntryID string, observed *ent.StorageLocation) (bool, error) {
+	if observed == nil || activeMaterialization(observed, s.now()) {
+		return false, nil
+	}
+
+	tx, err := s.db.Tx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("start conditional dangling cache entry purge transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	predicates := []predicate.StorageLocation{
+		storagelocation.ID(observed.ID),
+		storagelocation.FolderName(observed.FolderName),
+		storagelocation.PartCount(observed.PartCount),
+		storagelocation.LeaseVersion(observed.LeaseVersion),
+		storagelocation.DeletionRequestedAtIsNil(),
+	}
+	predicates = appendObservedRepresentationPredicates(predicates, observed)
+	affected, err := tx.StorageLocation.Update().
+		Where(predicates...).
+		AddLeaseVersion(1).
+		Save(ctx)
+	if err != nil {
+		return false, fmt.Errorf("claim conditional dangling cache entry purge: %w", err)
+	}
+	if affected == 0 {
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("commit stale dangling cache entry observation: %w", err)
+		}
+		committed = true
+		return false, nil
+	}
+
+	deleted, err := tx.CacheEntry.Delete().
+		Where(
+			cacheentry.ID(cacheEntryID),
+			cacheentry.LocationId(observed.ID),
+		).
+		Exec(ctx)
+	if err != nil {
+		return false, fmt.Errorf("delete conditionally dangling cache entry: %w", err)
+	}
+	if deleted > 0 {
+		if _, err := s.fenceDetachedLocation(ctx, tx.Client(), observed.ID, false); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit conditional dangling cache entry purge: %w", err)
+	}
+	committed = true
+	return deleted > 0, nil
+}
+
+func (s *Service) MaterializationActive(location *ent.StorageLocation) bool {
+	return location != nil && activeMaterialization(location, s.now())
+}
+
+func appendObservedRepresentationPredicates(predicates []predicate.StorageLocation, observed *ent.StorageLocation) []predicate.StorageLocation {
+	predicates = appendOptionalInt64Predicate(predicates, observed.MergeStartedAt, storagelocation.MergeStartedAtIsNil, storagelocation.MergeStartedAt)
+	predicates = appendOptionalStringPredicate(predicates, observed.MergeLeaseToken, storagelocation.MergeLeaseTokenIsNil, storagelocation.MergeLeaseToken)
+	predicates = appendOptionalInt64Predicate(predicates, observed.MergeLeaseExpiresAt, storagelocation.MergeLeaseExpiresAtIsNil, storagelocation.MergeLeaseExpiresAt)
+	predicates = appendOptionalInt64Predicate(predicates, observed.MergedAt, storagelocation.MergedAtIsNil, storagelocation.MergedAt)
+	predicates = appendOptionalInt64Predicate(predicates, observed.MaterializationUnsupportedAt, storagelocation.MaterializationUnsupportedAtIsNil, storagelocation.MaterializationUnsupportedAt)
+	predicates = appendOptionalInt64Predicate(predicates, observed.PartsDeletedAt, storagelocation.PartsDeletedAtIsNil, storagelocation.PartsDeletedAt)
+	return predicates
+}
+
+func appendOptionalInt64Predicate(predicates []predicate.StorageLocation, value *int64, isNil func() predicate.StorageLocation, equal func(int64) predicate.StorageLocation) []predicate.StorageLocation {
+	if value == nil {
+		return append(predicates, isNil())
+	}
+	return append(predicates, equal(*value))
+}
+
+func appendOptionalStringPredicate(predicates []predicate.StorageLocation, value *string, isNil func() predicate.StorageLocation, equal func(string) predicate.StorageLocation) []predicate.StorageLocation {
+	if value == nil {
+		return append(predicates, isNil())
+	}
+	return append(predicates, equal(*value))
 }
 
 func (s *Service) RequestLocationDeletion(ctx context.Context, locationID string, deleteCacheEntries, requireOrphan bool) (DeletionResult, error) {

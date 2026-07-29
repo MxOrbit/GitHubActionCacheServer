@@ -94,6 +94,7 @@ var (
 		{Name: "id", Type: field.TypeString, Unique: true, SchemaType: map[string]string{"mysql": "varchar(36)", "postgres": "text", "sqlite3": "text"}},
 		{Name: "folderName", Type: field.TypeString, SchemaType: map[string]string{"mysql": "text", "postgres": "text", "sqlite3": "text"}},
 		{Name: "partCount", Type: field.TypeInt},
+		{Name: "sizeBytes", Type: field.TypeInt64, Nullable: true},
 		{Name: "leaseVersion", Type: field.TypeInt64, Default: 0},
 		{Name: "deletionRequestedAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "mergeStartedAt", Type: field.TypeInt64, Nullable: true},

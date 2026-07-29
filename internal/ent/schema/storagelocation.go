@@ -31,6 +31,7 @@ func (StorageLocation) Fields() []ent.Field {
 		field.Int("partCount").
 			NonNegative().
 			StorageKey("partCount"),
+		field.Int64("sizeBytes").Optional().Nillable().NonNegative().StorageKey("sizeBytes"),
 		field.Int64("leaseVersion").Default(0).NonNegative().StorageKey("leaseVersion"),
 		field.Int64("deletionRequestedAt").Optional().Nillable().StorageKey("deletionRequestedAt"),
 		field.Int64("mergeStartedAt").Optional().Nillable().StorageKey("mergeStartedAt"),

@@ -16,6 +16,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagereconcile"
 	"github.com/rs/zerolog"
 )
 
@@ -58,6 +59,13 @@ func main() {
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
+	storageSizeReady := make(chan struct{})
+	go storagereconcile.Run(cleanupCtx, storagereconcile.Options{
+		DB:        dbClient,
+		Storage:   storageAdapter,
+		Lifecycle: lifecycleService,
+		Logger:    &logger,
+	}, storageSizeReady)
 	cleanup.NewRunner(cleanup.NewService(cleanup.Options{
 		DB:        dbClient,
 		Storage:   storageAdapter,

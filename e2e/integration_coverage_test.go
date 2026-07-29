@@ -2,8 +2,10 @@ package e2e
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -23,6 +25,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/go-sql-driver/mysql"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -55,6 +58,24 @@ func TestExternalMySQLFilesystemSaveAndRestore(t *testing.T) {
 	router := newExternalRouter(t, client, filesystem)
 
 	runSaveRestoreFlow(t, router, uniqueIntegrationCacheKey("mysql"), "mysql-cache-content")
+}
+
+func TestExternalPostgresStorageSizeMigration(t *testing.T) {
+	dbCfg, ok := externalPostgresConfig()
+	if !ok {
+		t.Skip("set E2E_POSTGRES_URL to run PostgreSQL integration coverage")
+	}
+
+	runExternalStorageSizeMigration(t, dbCfg)
+}
+
+func TestExternalMySQLStorageSizeMigration(t *testing.T) {
+	dbCfg, ok := externalMySQLConfig()
+	if !ok {
+		t.Skip("set E2E_MYSQL_HOST, E2E_MYSQL_DATABASE and E2E_MYSQL_USER to run MySQL integration coverage")
+	}
+
+	runExternalStorageSizeMigration(t, dbCfg)
 }
 
 func TestExternalPostgresCleanupRetention(t *testing.T) {
@@ -214,6 +235,67 @@ func openExternalDB(t *testing.T, ctx context.Context, cfg config.DBConfig) *ent
 
 	clearExternalDB(t, ctx, client)
 	return client
+}
+
+func runExternalStorageSizeMigration(t *testing.T, cfg config.DBConfig) {
+	t.Helper()
+	ctx := context.Background()
+
+	legacyClient, err := db.OpenAndMigrate(ctx, cfg)
+	require.NoError(t, err)
+	clearExternalDB(t, ctx, legacyClient)
+	legacyClient.StorageLocation.Create().
+		SetID("legacy-size-location").
+		SetFolderName("legacy-size-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	require.NoError(t, legacyClient.Close())
+
+	sqlDB := openExternalSQLDB(t, ctx, cfg)
+	dropSizeColumn := `alter table storage_locations drop column "sizeBytes"`
+	if cfg.Driver == db.DriverMySQL {
+		dropSizeColumn = "alter table storage_locations drop column `sizeBytes`"
+	}
+	_, err = sqlDB.ExecContext(ctx, dropSizeColumn)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	client, err := db.OpenAndMigrate(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		clearExternalDB(t, context.Background(), client)
+		require.NoError(t, client.Close())
+	})
+
+	legacyLocation := client.StorageLocation.GetX(ctx, "legacy-size-location")
+	require.Nil(t, legacyLocation.SizeBytes)
+	client.StorageLocation.UpdateOneID(legacyLocation.ID).SetSizeBytes(123).ExecX(ctx)
+	updatedLocation := client.StorageLocation.GetX(ctx, legacyLocation.ID)
+	require.NotNil(t, updatedLocation.SizeBytes)
+	require.Equal(t, int64(123), *updatedLocation.SizeBytes)
+}
+
+func openExternalSQLDB(t *testing.T, ctx context.Context, cfg config.DBConfig) *sql.DB {
+	t.Helper()
+
+	driverName := "pgx"
+	dsn := cfg.PostgresURL
+	if cfg.Driver == db.DriverMySQL {
+		driverName = "mysql"
+		mysqlCfg := mysql.NewConfig()
+		mysqlCfg.User = cfg.MySQLUser
+		mysqlCfg.Passwd = cfg.MySQLPassword
+		mysqlCfg.Net = "tcp"
+		mysqlCfg.Addr = net.JoinHostPort(cfg.MySQLHost, cfg.MySQLPort)
+		mysqlCfg.DBName = cfg.MySQLDatabase
+		mysqlCfg.ParseTime = true
+		dsn = mysqlCfg.FormatDSN()
+	}
+
+	sqlDB, err := sql.Open(driverName, dsn)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.PingContext(ctx))
+	return sqlDB
 }
 
 func clearExternalDB(t *testing.T, ctx context.Context, client *ent.Client) {

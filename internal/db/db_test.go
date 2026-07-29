@@ -130,6 +130,7 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "materializationUnsupportedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "deletionRequestedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "mergeLeaseToken"))
+	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "sizeBytes"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "lastPartUploadedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "committedPartCount"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "tupleHash"))
@@ -173,7 +174,7 @@ func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 		"id", "folderName", "createdAt", "attemptCount", "lastAttemptedAt", "lastError",
 	}, columnNames(migrate.StorageDeletionsColumns))
 	require.Equal(t, []string{
-		"id", "folderName", "partCount", "leaseVersion", "deletionRequestedAt", "mergeStartedAt", "mergeLeaseToken", "mergeLeaseExpiresAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt",
+		"id", "folderName", "partCount", "sizeBytes", "leaseVersion", "deletionRequestedAt", "mergeStartedAt", "mergeLeaseToken", "mergeLeaseExpiresAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt",
 	}, columnNames(migrate.StorageLocationsColumns))
 	require.Equal(t, []string{
 		"id", "scope", "expiresAt", "storageLocationId",

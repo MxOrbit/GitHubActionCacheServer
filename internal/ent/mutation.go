@@ -1440,6 +1440,8 @@ type StorageLocationMutation struct {
 	folderName                      *string
 	partCount                       *int
 	addpartCount                    *int
+	sizeBytes                       *int64
+	addsizeBytes                    *int64
 	leaseVersion                    *int64
 	addleaseVersion                 *int64
 	deletionRequestedAt             *int64
@@ -1663,6 +1665,76 @@ func (m *StorageLocationMutation) AddedPartCount() (r int, exists bool) {
 func (m *StorageLocationMutation) ResetPartCount() {
 	m.partCount = nil
 	m.addpartCount = nil
+}
+
+// SetSizeBytes sets the "sizeBytes" field.
+func (m *StorageLocationMutation) SetSizeBytes(i int64) {
+	m.sizeBytes = &i
+	m.addsizeBytes = nil
+}
+
+// SizeBytes returns the value of the "sizeBytes" field in the mutation.
+func (m *StorageLocationMutation) SizeBytes() (r int64, exists bool) {
+	v := m.sizeBytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSizeBytes returns the old "sizeBytes" field's value of the StorageLocation entity.
+// If the StorageLocation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageLocationMutation) OldSizeBytes(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSizeBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSizeBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSizeBytes: %w", err)
+	}
+	return oldValue.SizeBytes, nil
+}
+
+// AddSizeBytes adds i to the "sizeBytes" field.
+func (m *StorageLocationMutation) AddSizeBytes(i int64) {
+	if m.addsizeBytes != nil {
+		*m.addsizeBytes += i
+	} else {
+		m.addsizeBytes = &i
+	}
+}
+
+// AddedSizeBytes returns the value that was added to the "sizeBytes" field in this mutation.
+func (m *StorageLocationMutation) AddedSizeBytes() (r int64, exists bool) {
+	v := m.addsizeBytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearSizeBytes clears the value of the "sizeBytes" field.
+func (m *StorageLocationMutation) ClearSizeBytes() {
+	m.sizeBytes = nil
+	m.addsizeBytes = nil
+	m.clearedFields[storagelocation.FieldSizeBytes] = struct{}{}
+}
+
+// SizeBytesCleared returns if the "sizeBytes" field was cleared in this mutation.
+func (m *StorageLocationMutation) SizeBytesCleared() bool {
+	_, ok := m.clearedFields[storagelocation.FieldSizeBytes]
+	return ok
+}
+
+// ResetSizeBytes resets all changes to the "sizeBytes" field.
+func (m *StorageLocationMutation) ResetSizeBytes() {
+	m.sizeBytes = nil
+	m.addsizeBytes = nil
+	delete(m.clearedFields, storagelocation.FieldSizeBytes)
 }
 
 // SetLeaseVersion sets the "leaseVersion" field.
@@ -2402,12 +2474,15 @@ func (m *StorageLocationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *StorageLocationMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
 	if m.folderName != nil {
 		fields = append(fields, storagelocation.FieldFolderName)
 	}
 	if m.partCount != nil {
 		fields = append(fields, storagelocation.FieldPartCount)
+	}
+	if m.sizeBytes != nil {
+		fields = append(fields, storagelocation.FieldSizeBytes)
 	}
 	if m.leaseVersion != nil {
 		fields = append(fields, storagelocation.FieldLeaseVersion)
@@ -2448,6 +2523,8 @@ func (m *StorageLocationMutation) Field(name string) (ent.Value, bool) {
 		return m.FolderName()
 	case storagelocation.FieldPartCount:
 		return m.PartCount()
+	case storagelocation.FieldSizeBytes:
+		return m.SizeBytes()
 	case storagelocation.FieldLeaseVersion:
 		return m.LeaseVersion()
 	case storagelocation.FieldDeletionRequestedAt:
@@ -2479,6 +2556,8 @@ func (m *StorageLocationMutation) OldField(ctx context.Context, name string) (en
 		return m.OldFolderName(ctx)
 	case storagelocation.FieldPartCount:
 		return m.OldPartCount(ctx)
+	case storagelocation.FieldSizeBytes:
+		return m.OldSizeBytes(ctx)
 	case storagelocation.FieldLeaseVersion:
 		return m.OldLeaseVersion(ctx)
 	case storagelocation.FieldDeletionRequestedAt:
@@ -2519,6 +2598,13 @@ func (m *StorageLocationMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetPartCount(v)
+		return nil
+	case storagelocation.FieldSizeBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSizeBytes(v)
 		return nil
 	case storagelocation.FieldLeaseVersion:
 		v, ok := value.(int64)
@@ -2594,6 +2680,9 @@ func (m *StorageLocationMutation) AddedFields() []string {
 	if m.addpartCount != nil {
 		fields = append(fields, storagelocation.FieldPartCount)
 	}
+	if m.addsizeBytes != nil {
+		fields = append(fields, storagelocation.FieldSizeBytes)
+	}
 	if m.addleaseVersion != nil {
 		fields = append(fields, storagelocation.FieldLeaseVersion)
 	}
@@ -2628,6 +2717,8 @@ func (m *StorageLocationMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case storagelocation.FieldPartCount:
 		return m.AddedPartCount()
+	case storagelocation.FieldSizeBytes:
+		return m.AddedSizeBytes()
 	case storagelocation.FieldLeaseVersion:
 		return m.AddedLeaseVersion()
 	case storagelocation.FieldDeletionRequestedAt:
@@ -2659,6 +2750,13 @@ func (m *StorageLocationMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddPartCount(v)
+		return nil
+	case storagelocation.FieldSizeBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSizeBytes(v)
 		return nil
 	case storagelocation.FieldLeaseVersion:
 		v, ok := value.(int64)
@@ -2724,6 +2822,9 @@ func (m *StorageLocationMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *StorageLocationMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(storagelocation.FieldSizeBytes) {
+		fields = append(fields, storagelocation.FieldSizeBytes)
+	}
 	if m.FieldCleared(storagelocation.FieldDeletionRequestedAt) {
 		fields = append(fields, storagelocation.FieldDeletionRequestedAt)
 	}
@@ -2762,6 +2863,9 @@ func (m *StorageLocationMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *StorageLocationMutation) ClearField(name string) error {
 	switch name {
+	case storagelocation.FieldSizeBytes:
+		m.ClearSizeBytes()
+		return nil
 	case storagelocation.FieldDeletionRequestedAt:
 		m.ClearDeletionRequestedAt()
 		return nil
@@ -2799,6 +2903,9 @@ func (m *StorageLocationMutation) ResetField(name string) error {
 		return nil
 	case storagelocation.FieldPartCount:
 		m.ResetPartCount()
+		return nil
+	case storagelocation.FieldSizeBytes:
+		m.ResetSizeBytes()
 		return nil
 	case storagelocation.FieldLeaseVersion:
 		m.ResetLeaseVersion()

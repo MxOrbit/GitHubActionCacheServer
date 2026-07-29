@@ -36,6 +36,9 @@ type Adapter interface {
 	UploadStream(ctx context.Context, objectName string, stream io.Reader) error
 	CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error
 	CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error)
+	InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error)
+	InspectFolder(ctx context.Context, folderName string) (FolderContents, error)
+	Inventory(ctx context.Context) (Inventory, error)
 	ObjectExists(ctx context.Context, objectName string) (bool, error)
 	DeleteFolder(ctx context.Context, folderName string) error
 	CountFilesInFolder(ctx context.Context, folderName string) (int, error)

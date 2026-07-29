@@ -115,6 +115,32 @@ func TestCompleteUploadTrustsPersistedPartCount(t *testing.T) {
 	require.Zero(t, adapter.downloadCalls)
 }
 
+func TestCompleteUploadPersistsLogicalPartSizeOnly(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	currentUpload, err := service.uploadByID(ctx, upload.UploadID)
+	require.NoError(t, err)
+
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(currentUpload.FolderName, 0), bytes.NewBufferString("a")))
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(currentUpload.FolderName, 1), bytes.NewBufferString("bc")))
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(currentUpload.FolderName, 2), bytes.NewBufferString("stale")))
+	require.NoError(t, filesystem.UploadStream(ctx, blockObjectName(currentUpload.FolderName, "block"), bytes.NewBufferString("duplicate")))
+	require.NoError(t, filesystem.UploadStream(ctx, mergedObjectName(currentUpload.FolderName), bytes.NewBufferString("derived")))
+	require.NoError(t, client.Upload.UpdateOneID(currentUpload.ID).
+		SetCommittedPartCount(2).
+		SetFinishedPartUploadCount(3).
+		Exec(ctx))
+
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	location := client.StorageLocation.Query().OnlyX(ctx)
+	require.NotNil(t, location.SizeBytes)
+	require.Equal(t, int64(3), *location.SizeBytes)
+}
+
 func TestCompleteUploadValidatesLegacyUploadWithoutPartCountMetadata(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
