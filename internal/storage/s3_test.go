@@ -300,6 +300,7 @@ func TestS3AdapterObjectExistsUsesHeadAndClassifiesErrors(t *testing.T) {
 }
 
 func TestS3SharedListingRejectsTruncatedPageWithoutTokenBeforeConsumersAct(t *testing.T) {
+	consumerListCalls := 0
 	deleteCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
@@ -308,6 +309,7 @@ func TestS3SharedListingRejectsTruncatedPageWithoutTokenBeforeConsumersAct(t *te
 				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
 				return
 			}
+			consumerListCalls++
 			key := r.URL.Query().Get("prefix") + "0"
 			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>%s</Key><LastModified>2026-07-29T00:00:00Z</LastModified><Size>1</Size></Contents></ListBucketResult>`, key)
 			return
@@ -327,12 +329,15 @@ func TestS3SharedListingRejectsTruncatedPageWithoutTokenBeforeConsumersAct(t *te
 	require.ErrorContains(t, err, "truncated response has no continuation token")
 	err = adapter.DeleteFolder(context.Background(), "folder")
 	require.ErrorContains(t, err, "truncated response has no continuation token")
+	require.Equal(t, 3, consumerListCalls)
 	require.Zero(t, deleteCalls)
 }
 
 func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 	continuationRequests := 0
 	deleteCalls := 0
+	var deleteBody string
+	const basePrefix = "gh-actions-cache/"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
 			w.Header().Set("Content-Type", "application/xml")
@@ -341,9 +346,10 @@ func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 				return
 			}
 			prefix := r.URL.Query().Get("prefix")
-			basePrefix := strings.TrimSuffix(prefix, "folder/parts/")
-			if basePrefix == prefix {
-				basePrefix = strings.TrimSuffix(prefix, "folder/")
+			delimiter := r.URL.Query().Get("delimiter")
+			if !validPaginationTestPrefix(prefix, delimiter, basePrefix) {
+				http.Error(w, "unexpected listing scope", http.StatusBadRequest)
+				return
 			}
 			if r.URL.Query().Get("continuation-token") == "next" {
 				continuationRequests++
@@ -356,6 +362,12 @@ func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 		}
 		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
 			deleteCalls++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			deleteBody = string(body)
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = fmt.Fprint(w, `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`)
 			return
@@ -381,6 +393,14 @@ func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 	require.NoError(t, adapter.DeleteFolder(ctx, "folder"))
 	require.Equal(t, 3, continuationRequests)
 	require.Equal(t, 1, deleteCalls)
+	require.Contains(t, deleteBody, `<Key>gh-actions-cache/folder/parts/0</Key>`)
+	require.Contains(t, deleteBody, `<Key>gh-actions-cache/folder/parts/1</Key>`)
+}
+
+func validPaginationTestPrefix(prefix, delimiter, basePrefix string) bool {
+	return prefix == basePrefix && delimiter == "" ||
+		prefix == basePrefix+"folder/parts/" && delimiter == "/" ||
+		prefix == basePrefix+"folder/" && delimiter == ""
 }
 
 func TestS3AdapterCopyObjectUsesServerSideCopy(t *testing.T) {

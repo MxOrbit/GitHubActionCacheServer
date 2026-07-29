@@ -294,6 +294,25 @@ func TestMatchCacheEntryUsesOriginalOrder(t *testing.T) {
 	require.Equal(t, "restore-cache-old", match.Key)
 }
 
+func TestMatchCacheEntryContinuesToNextScopeWithoutRestoreKeys(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+
+	expected := createMatchedCacheEntryInScope(ctx, client, "secondary-scope", "linux-cache", "refs/heads/base")
+	scope := auth.CacheScope{
+		RepoID: "123",
+		Scopes: []auth.Scope{
+			{Scope: "refs/heads/main", Permission: 3},
+			{Scope: "refs/heads/base", Permission: 1},
+		},
+	}
+
+	match, err := service.MatchCacheEntry(ctx, []string{"linux-cache"}, "version", scope)
+	require.NoError(t, err)
+	require.NotNil(t, match)
+	require.Equal(t, expected.ID, match.ID)
+}
+
 func TestCreateUploadReservationIsAtomic(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
@@ -1345,6 +1364,10 @@ func writableScope() auth.CacheScope {
 }
 
 func createMatchedCacheEntry(ctx context.Context, client *ent.Client, id string, key string) *ent.CacheEntry {
+	return createMatchedCacheEntryInScope(ctx, client, id, key, "refs/heads/main")
+}
+
+func createMatchedCacheEntryInScope(ctx context.Context, client *ent.Client, id string, key string, scope string) *ent.CacheEntry {
 	location := client.StorageLocation.Create().
 		SetID(id + "-location").
 		SetFolderName(id + "-folder").
@@ -1354,7 +1377,7 @@ func createMatchedCacheEntry(ctx context.Context, client *ent.Client, id string,
 		SetID(id).
 		SetKey(key).
 		SetVersion("version").
-		SetScope("refs/heads/main").
+		SetScope(scope).
 		SetRepoId("123").
 		SetUpdatedAt(time.Now().UnixMilli()).
 		SetLocation(location).
