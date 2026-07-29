@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"entgo.io/ent/dialect/sql"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cachekey"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
@@ -177,9 +178,9 @@ func (h *Handler) findManagementCacheEntry(c *gin.Context, key string, version s
 			cacheentry.RepoId(repoID),
 		)
 	if prefix {
-		query = query.Where(cacheentry.KeyHasPrefix(key)).Order(cacheentry.ByUpdatedAt(sql.OrderDesc()))
+		query = query.Where(cachekey.Prefix(key)).Order(cacheentry.ByUpdatedAt(sql.OrderDesc()))
 	} else {
-		query = query.Where(cacheentry.Key(key))
+		query = query.Where(cachekey.Exact(key))
 	}
 
 	entry, err := query.First(c.Request.Context())
@@ -261,7 +262,7 @@ func (h *Handler) deleteManagementCacheEntries(ctx context.Context, predicates [
 func cacheEntryFilters(c *gin.Context) []entpredicate.CacheEntry {
 	var filters []entpredicate.CacheEntry
 	if value := c.Query("key"); value != "" {
-		filters = append(filters, cacheentry.Key(value))
+		filters = append(filters, cachekey.Exact(value))
 	}
 	if value := c.Query("version"); value != "" {
 		filters = append(filters, cacheentry.Version(value))

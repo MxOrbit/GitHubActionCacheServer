@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cleanup"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
@@ -59,6 +60,37 @@ func TestExternalMySQLFilesystemSaveAndRestore(t *testing.T) {
 	router := newExternalRouter(t, client, filesystem)
 
 	runSaveRestoreFlow(t, router, uniqueIntegrationCacheKey("mysql"), "mysql-cache-content")
+}
+
+func TestSQLiteCacheKeyMatching(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	app := newTestApp(t)
+	runCacheKeyMatching(t, app.db, app.router)
+}
+
+func TestExternalPostgresCacheKeyMatching(t *testing.T) {
+	dbCfg, ok := externalPostgresConfig()
+	if !ok {
+		t.Skip("set E2E_POSTGRES_URL to run PostgreSQL integration coverage")
+	}
+
+	ctx := context.Background()
+	client := openExternalDB(t, ctx, dbCfg)
+	router := newExternalRouter(t, client, testutil.NewFilesystemAdapter(t))
+	runCacheKeyMatching(t, client, router)
+}
+
+func TestExternalMySQLCacheKeyMatching(t *testing.T) {
+	dbCfg, ok := externalMySQLConfig()
+	if !ok {
+		t.Skip("set E2E_MYSQL_HOST, E2E_MYSQL_DATABASE and E2E_MYSQL_USER to run MySQL integration coverage")
+	}
+
+	ctx := context.Background()
+	client := openExternalDB(t, ctx, dbCfg)
+	useCaseInsensitiveMySQLCacheKeyCollation(t, ctx, dbCfg)
+	router := newExternalRouter(t, client, testutil.NewFilesystemAdapter(t))
+	runCacheKeyMatching(t, client, router)
 }
 
 func TestExternalPostgresStorageSizeMigration(t *testing.T) {
@@ -153,6 +185,97 @@ func runSaveRestoreFlow(t *testing.T, router http.Handler, key string, content s
 	})
 	require.Equal(t, key, matchResponse.MatchedKey)
 	require.Equal(t, content, downloadCache(t, router, parseSignedURL(t, matchResponse.SignedDownloadURL)))
+}
+
+func runCacheKeyMatching(t *testing.T, client *ent.Client, router http.Handler) {
+	t.Helper()
+
+	ctx := context.Background()
+	token := actionsToken(t)
+	upperKey := "Case-Key"
+	upperBody := cacheBody(upperKey)
+	uploadURL := createCacheEntry(t, router, token, upperBody)
+	uploadWholeCache(t, router, uploadURL, "upper-v1")
+	finalizeCacheEntry(t, router, token, upperBody)
+
+	// A newer case-only variant must not make finalize's .Only query singular
+	// or replace the wrong cache entry on a case-insensitive collation.
+	newer := time.Now().Add(time.Hour).UnixMilli()
+	createCacheKeyMatchEntry(ctx, client, "lower-variant", "case-key", newer)
+	uploadURL = createCacheEntry(t, router, token, upperBody)
+	uploadWholeCache(t, router, uploadURL, "upper-v2")
+	finalizeCacheEntry(t, router, token, upperBody)
+	require.Equal(t, 2, client.CacheEntry.Query().CountX(ctx))
+
+	service := cache.NewService(cache.Options{DB: client})
+	scope := auth.CacheScope{
+		RepoID: "123",
+		Scopes: []auth.Scope{{Scope: "refs/heads/main", Permission: 3}},
+	}
+
+	for _, test := range []struct {
+		name string
+		keys []string
+		want string
+	}{
+		{name: "upper exact", keys: []string{upperKey}, want: upperKey},
+		{name: "lower exact", keys: []string{"case-key"}, want: "case-key"},
+		{name: "case-only miss", keys: []string{"CASE-KEY"}},
+		{name: "upper prefix ignores newer lower variant", keys: []string{"missing", "Case-"}, want: upperKey},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			match, err := service.MatchCacheEntry(ctx, test.keys, defaultCacheEntryVersion, scope)
+			require.NoError(t, err)
+			if test.want == "" {
+				require.Nil(t, match)
+				return
+			}
+			require.NotNil(t, match)
+			require.Equal(t, test.want, match.Key)
+		})
+	}
+
+	for i, test := range []struct {
+		name   string
+		prefix string
+		match  string
+		decoy  string
+	}{
+		{name: "percent", prefix: "literal%", match: "literal%-match", decoy: "literalX-decoy"},
+		{name: "underscore", prefix: "literal_", match: "literal_-match", decoy: "literalX_other"},
+		{name: "backslash", prefix: `literal\`, match: `literal\-match`, decoy: "literalX-slash"},
+	} {
+		createCacheKeyMatchEntry(ctx, client, fmt.Sprintf("literal-match-%d", i), test.match, newer+int64(i*2+1))
+		createCacheKeyMatchEntry(ctx, client, fmt.Sprintf("literal-decoy-%d", i), test.decoy, newer+int64(i*2+2))
+		t.Run("literal "+test.name, func(t *testing.T) {
+			match, err := service.MatchCacheEntry(
+				ctx,
+				[]string{"missing-" + test.name, test.prefix},
+				defaultCacheEntryVersion,
+				scope,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, match)
+			require.Equal(t, test.match, match.Key)
+		})
+	}
+}
+
+func createCacheKeyMatchEntry(ctx context.Context, client *ent.Client, id string, key string, updatedAt int64) {
+	location := client.StorageLocation.Create().
+		SetID(id + "-location").
+		SetFolderName(id + "-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID(id + "-entry").
+		SetKey(key).
+		SetVersion(defaultCacheEntryVersion).
+		SetScope("refs/heads/main").
+		SetRepoId("123").
+		SetUpdatedAt(updatedAt).
+		SetLocation(location).
+		SaveX(ctx)
 }
 
 func runExternalCleanupRetention(t *testing.T, dbCfg config.DBConfig) {
@@ -366,6 +489,22 @@ func openExternalSQLDB(t *testing.T, ctx context.Context, cfg config.DBConfig) *
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.PingContext(ctx))
 	return sqlDB
+}
+
+func useCaseInsensitiveMySQLCacheKeyCollation(t *testing.T, ctx context.Context, cfg config.DBConfig) {
+	t.Helper()
+
+	alter := func(statement string) {
+		sqlDB := openExternalSQLDB(t, ctx, cfg)
+		_, err := sqlDB.ExecContext(ctx, statement)
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
+	}
+
+	alter("ALTER TABLE cache_entries MODIFY COLUMN `key` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL")
+	t.Cleanup(func() {
+		alter("ALTER TABLE cache_entries MODIFY COLUMN `key` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL")
+	})
 }
 
 func clearExternalDB(t *testing.T, ctx context.Context, client *ent.Client) {

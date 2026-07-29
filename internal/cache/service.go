@@ -18,6 +18,7 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cachekey"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
@@ -678,7 +679,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 
 	existingCacheEntry, err := tx.CacheEntry.Query().
 		Where(
-			cacheentry.Key(currentUpload.Key),
+			cachekey.Exact(currentUpload.Key),
 			cacheentry.Version(currentUpload.Version),
 			cacheentry.Scope(scope),
 			cacheentry.RepoId(repoID),
@@ -770,9 +771,9 @@ func (s *Service) findCacheEntry(ctx context.Context, match cacheEntryMatch) (*e
 			cacheentry.RepoId(match.repoID),
 		)
 	if match.prefix {
-		query = query.Where(cacheentry.KeyHasPrefix(match.key)).Order(cacheentry.ByUpdatedAt(sql.OrderDesc()))
+		query = query.Where(cachekey.Prefix(match.key)).Order(cacheentry.ByUpdatedAt(sql.OrderDesc()))
 	} else {
-		query = query.Where(cacheentry.Key(match.key))
+		query = query.Where(cachekey.Exact(match.key))
 	}
 
 	cacheEntry, err := query.First(ctx)

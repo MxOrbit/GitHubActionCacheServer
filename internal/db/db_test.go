@@ -276,9 +276,10 @@ func TestSQLiteCacheMatchQueryPlans(t *testing.T) {
 			query: `EXPLAIN QUERY PLAN
 				SELECT id FROM cache_entries
 				WHERE repoId = ? AND scope = ? AND version = ? AND key LIKE ?
+					AND substr(key, 1, length(?)) COLLATE BINARY = ?
 				ORDER BY updatedAt DESC
 				LIMIT 1`,
-			args: []any{"123", "refs/heads/main", "version", "linux-%"},
+			args: []any{"123", "refs/heads/main", "version", "linux-%", "linux-", "linux-"},
 			want: "idx_cache_entries_repo_scope_version_key (repoId=? AND scope=? AND version=?)",
 		},
 	}

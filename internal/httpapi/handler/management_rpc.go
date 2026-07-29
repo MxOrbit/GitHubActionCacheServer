@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cachekey"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
@@ -264,7 +265,7 @@ func decodeManagementRPCData(data io.Reader) (map[string]any, error) {
 func managementRPCCacheEntryFilters(input map[string]any) []entpredicate.CacheEntry {
 	var filters []entpredicate.CacheEntry
 	if value := rpcString(input, "key"); value != "" {
-		filters = append(filters, cacheentry.Key(value))
+		filters = append(filters, cachekey.Exact(value))
 	}
 	if value := rpcString(input, "version"); value != "" {
 		filters = append(filters, cacheentry.Version(value))
