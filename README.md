@@ -218,6 +218,29 @@ then rechecks grace-expired folders before queuing them in the same outbox.
 The database is authoritative, so restoring an older database can reclaim newer
 folders that it does not reference.
 
+### Metrics
+
+Unauthenticated Prometheus metrics are available at `GET /metrics`. The endpoint
+exports Go and process metrics plus:
+
+- `cache_requests_total{result="hit"|"miss"}`
+- `cache_uploads_total`
+- `cache_storage_bytes`
+- `storage_deletions_pending`
+- `storage_deletion_oldest_age_seconds`
+- `storage_deletion_failures_total`
+
+`cache_storage_bytes` sums known logical payload sizes for every tracked storage
+location, including fenced rows until lifecycle finalization. Once a location is
+handed to the physical-deletion outbox its remaining work is represented by the
+pending-deletion metrics, so this gauge is not an exact physical-storage reading.
+Scrapes query persisted metadata and never walk the filesystem or list S3.
+
+Request, upload, and deletion-failure counters are per process; aggregate their
+rates across replicas with `sum`. The storage and outbox gauges read the shared
+database and are repeated by every replica, so use `max` or select one target
+instead of summing them.
+
 ### Management API
 
 | Variable             | Default | Description                                                                     |

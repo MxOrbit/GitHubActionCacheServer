@@ -14,6 +14,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/metrics"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
@@ -35,6 +36,7 @@ type Service struct {
 	lifecycle *storagelifecycle.Service
 	now       func() time.Time
 	logger    zerolog.Logger
+	metrics   metrics.Recorder
 }
 
 type Options struct {
@@ -44,6 +46,7 @@ type Options struct {
 	Lifecycle *storagelifecycle.Service
 	Now       func() time.Time
 	Logger    *zerolog.Logger
+	Metrics   metrics.Recorder
 }
 
 func NewService(options Options) *Service {
@@ -59,6 +62,10 @@ func NewService(options Options) *Service {
 	if options.Logger != nil {
 		logger = *options.Logger
 	}
+	metricsRecorder := options.Metrics
+	if metricsRecorder == nil {
+		metricsRecorder = metrics.NopRecorder()
+	}
 	return &Service{
 		db:        options.DB,
 		storage:   options.Storage,
@@ -66,6 +73,7 @@ func NewService(options Options) *Service {
 		lifecycle: lifecycle,
 		now:       now,
 		logger:    logger,
+		metrics:   metricsRecorder,
 	}
 }
 
@@ -376,6 +384,8 @@ func (s *Service) processStorageDeletion(ctx context.Context, task *ent.StorageD
 	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
 		event = s.logger.Debug()
 		state = "interrupted"
+	} else {
+		s.metrics.RecordStorageDeletionFailure()
 	}
 	event.
 		Err(err).

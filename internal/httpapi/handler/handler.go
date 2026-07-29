@@ -10,6 +10,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/downloadurl"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/metrics"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/gin-gonic/gin"
@@ -25,6 +26,7 @@ type Handler struct {
 	storage        storage.Adapter
 	lifecycle      *storagelifecycle.Service
 	downloadSigner *downloadurl.Signer
+	metrics        metrics.Recorder
 	logger         zerolog.Logger
 }
 
@@ -34,6 +36,7 @@ type Options struct {
 	DB        *ent.Client
 	Storage   storage.Adapter
 	Lifecycle *storagelifecycle.Service
+	Metrics   metrics.Recorder
 	Logger    *zerolog.Logger
 }
 
@@ -46,6 +49,10 @@ func New(options Options) *Handler {
 	if options.Logger != nil {
 		logger = *options.Logger
 	}
+	metricsRecorder := options.Metrics
+	if metricsRecorder == nil {
+		metricsRecorder = metrics.NopRecorder()
+	}
 	return &Handler{
 		cfg:            options.Config,
 		cache:          options.Cache,
@@ -53,6 +60,7 @@ func New(options Options) *Handler {
 		storage:        options.Storage,
 		lifecycle:      lifecycle,
 		downloadSigner: downloadurl.New(options.Config.Cache.DownloadURLSigningSecret, fallbackDownloadURLTTL),
+		metrics:        metricsRecorder,
 		logger:         logger,
 	}
 }

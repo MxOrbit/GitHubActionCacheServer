@@ -70,6 +70,48 @@ func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
 	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
 }
 
+func TestPrometheusMetricsTrackCacheProtocolOutcomes(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	metricsBefore := httptest.NewRecorder()
+	router.ServeHTTP(metricsBefore, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, metricsBefore.Code)
+	require.Contains(t, metricsBefore.Body.String(), `cache_requests_total{result="hit"} 0`)
+	require.Contains(t, metricsBefore.Body.String(), `cache_requests_total{result="miss"} 0`)
+	require.Contains(t, metricsBefore.Body.String(), "go_goroutines")
+	require.Contains(t, metricsBefore.Body.String(), "process_cpu_seconds_total")
+
+	failedFinalize := postJSON(t, router, finalizeCacheEntryPath, token, cacheBody("missing-upload"))
+	require.Equal(t, http.StatusNotFound, failedFinalize.Code)
+
+	miss := postJSON(t, router, getCacheEntryDownloadPath, token, map[string]any{
+		"key":     "missing-metrics-cache",
+		"version": defaultCacheEntryVersion,
+	})
+	require.Equal(t, http.StatusOK, miss.Code)
+	require.JSONEq(t, `{"ok":false}`, miss.Body.String())
+
+	createBody := cacheBody("metrics-cache-entry")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+	uploadWholeCache(t, router, uploadURL, "payload")
+	finalizeCacheEntry(t, router, token, createBody)
+	matchCacheEntry(t, router, token, map[string]any{
+		"key":          "another-missing-key",
+		"restore_keys": []string{"metrics-cache-"},
+		"version":      defaultCacheEntryVersion,
+	})
+
+	metricsAfter := httptest.NewRecorder()
+	router.ServeHTTP(metricsAfter, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, metricsAfter.Code)
+	require.Contains(t, metricsAfter.Body.String(), `cache_requests_total{result="hit"} 1`)
+	require.Contains(t, metricsAfter.Body.String(), `cache_requests_total{result="miss"} 1`)
+	require.Contains(t, metricsAfter.Body.String(), "cache_uploads_total 1")
+	require.Contains(t, metricsAfter.Body.String(), "cache_storage_bytes 7")
+}
+
 func TestBlockUploadRetryIsIdempotent(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)

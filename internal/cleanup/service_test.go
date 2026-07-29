@@ -64,7 +64,13 @@ func TestRunUploadsDeletesInactiveUploads(t *testing.T) {
 func TestRunStorageDeletionsRetriesFailedUploadCleanup(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	failingStorage := &failingDeleteStorage{Adapter: filesystem}
-	service := NewService(Options{DB: client, Storage: failingStorage, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
+	metricRecorder := &recordedMetrics{}
+	service := NewService(Options{
+		DB:      client,
+		Storage: failingStorage,
+		Config:  config.CleanupConfig{CacheOlderThanDays: 90},
+		Metrics: metricRecorder,
+	})
 	old := time.Now().Add(-2 * time.Minute).UnixMilli()
 
 	require.NoError(t, filesystem.UploadStream(ctx, "old-upload/parts/0", bytes.NewBufferString("old")))
@@ -84,6 +90,7 @@ func TestRunStorageDeletionsRetriesFailedUploadCleanup(t *testing.T) {
 	require.Zero(t, client.Upload.Query().CountX(ctx))
 	task := client.StorageDeletion.Query().OnlyX(ctx)
 	require.Equal(t, 1, task.AttemptCount)
+	require.Equal(t, 1, metricRecorder.storageDeletionFailures)
 
 	service = NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
 	deleted, err = service.RunStorageDeletions(ctx)
@@ -116,6 +123,28 @@ func TestStorageDeletionRetryBackoff(t *testing.T) {
 	require.False(t, storageDeletionReady(task, now))
 	lastAttemptedAt = now.Add(-4*storageDeletionRetryBase - time.Second).UnixMilli()
 	require.True(t, storageDeletionReady(task, now))
+}
+
+func TestInterruptedStorageDeletionDoesNotCountFailure(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	metricRecorder := &recordedMetrics{}
+	service := NewService(Options{
+		DB:      client,
+		Storage: &failingDeleteStorage{Adapter: filesystem},
+		Config:  config.CleanupConfig{CacheOlderThanDays: 90},
+		Metrics: metricRecorder,
+	})
+	task := client.StorageDeletion.Create().
+		SetFolderName("interrupted-folder").
+		SetCreatedAt(time.Now().UnixMilli()).
+		SaveX(ctx)
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	err := service.processStorageDeletion(canceledCtx, task)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, metricRecorder.storageDeletionFailures)
 }
 
 func TestRunCacheEntriesDeletesExpiredLocations(t *testing.T) {
@@ -560,6 +589,18 @@ func TestRunPartsKeepsRecentlySupersededParts(t *testing.T) {
 
 type failingDeleteStorage struct {
 	storage.Adapter
+}
+
+type recordedMetrics struct {
+	storageDeletionFailures int
+}
+
+func (*recordedMetrics) RecordCacheRequest(bool) {}
+
+func (*recordedMetrics) RecordCacheUpload() {}
+
+func (r *recordedMetrics) RecordStorageDeletionFailure() {
+	r.storageDeletionFailures++
 }
 
 func (*failingDeleteStorage) DeleteFolder(context.Context, string) error {

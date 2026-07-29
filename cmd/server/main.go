@@ -14,6 +14,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/metrics"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagecapacity"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
@@ -48,6 +49,7 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("storage initialization failed")
 	}
+	metricsRegistry := metrics.New(dbClient)
 	lifecycleService := storagelifecycle.New(dbClient)
 	capacityService := storagecapacity.NewService(storagecapacity.Options{
 		DB:        dbClient,
@@ -82,6 +84,7 @@ func main() {
 		Config:    cfg.Cleanup,
 		Lifecycle: lifecycleService,
 		Logger:    &logger,
+		Metrics:   metricsRegistry,
 	}), logger, storageSizeReady).Start(cleanupCtx)
 
 	server := &http.Server{
@@ -91,6 +94,7 @@ func main() {
 			Storage:   storageAdapter,
 			Cache:     cacheService,
 			Lifecycle: lifecycleService,
+			Metrics:   metricsRegistry,
 		}),
 	}
 

@@ -98,6 +98,7 @@ func (h *Handler) GetCacheEntryDownloadURL(c *gin.Context) {
 		writeCacheError(c, err)
 		return
 	}
+	h.metrics.RecordCacheRequest(match != nil)
 	if match == nil {
 		writeCacheResponse(
 			c,
@@ -131,6 +132,7 @@ func (h *Handler) FinalizeCacheEntryUpload(c *gin.Context) {
 		writeCacheError(c, err)
 		return
 	}
+	h.metrics.RecordCacheUpload()
 
 	writeCacheResponse(
 		c,

@@ -10,6 +10,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/handler"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/metrics"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/gin-gonic/gin"
@@ -21,6 +22,7 @@ type Dependencies struct {
 	Storage   storage.Adapter
 	Cache     *cache.Service
 	Lifecycle *storagelifecycle.Service
+	Metrics   *metrics.Registry
 }
 
 func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http.Handler {
@@ -44,6 +46,10 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 			Logger:                &logger,
 		})
 	}
+	metricsRegistry := deps.Metrics
+	if metricsRegistry == nil {
+		metricsRegistry = metrics.New(deps.DB)
+	}
 
 	handlers := handler.New(handler.Options{
 		Config:    cfg,
@@ -51,11 +57,13 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 		DB:        deps.DB,
 		Storage:   deps.Storage,
 		Lifecycle: lifecycle,
+		Metrics:   metricsRegistry,
 		Logger:    &logger,
 	})
 
 	router.GET("/", handler.Root)
 	router.GET("/health", handler.Health)
+	router.GET("/metrics", gin.WrapH(metricsRegistry.Handler()))
 
 	cacheService := router.Group(
 		"/twirp/github.actions.results.api.v1.CacheService",
@@ -112,7 +120,11 @@ func requestLogger(logger zerolog.Logger) gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 
-		logger.Info().
+		event := logger.Info()
+		if c.Request.URL.Path == "/metrics" {
+			event = logger.Debug()
+		}
+		event.
 			Str("method", c.Request.Method).
 			Str("path", c.Request.URL.Path).
 			Int("status", c.Writer.Status()).
