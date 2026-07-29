@@ -292,6 +292,13 @@ func (a *FilesystemAdapter) ObjectExists(ctx context.Context, objectName string)
 	return true, nil
 }
 
+func (a *FilesystemAdapter) FilesystemUsage(ctx context.Context) (FilesystemUsage, error) {
+	if err := ctx.Err(); err != nil {
+		return FilesystemUsage{}, err
+	}
+	return filesystemUsage(a.root)
+}
+
 func (a *FilesystemAdapter) DeleteFolder(_ context.Context, folderName string) error {
 	path, err := a.safePath(folderName)
 	if err != nil {

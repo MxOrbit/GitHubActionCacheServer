@@ -61,6 +61,11 @@ type Service struct {
 	mergeWG               sync.WaitGroup
 	mergeMu               sync.Mutex
 	acceptingMerges       bool
+	capacity              CapacityTrigger
+}
+
+type CapacityTrigger interface {
+	Trigger()
 }
 
 type Options struct {
@@ -70,6 +75,7 @@ type Options struct {
 	MergeConcurrency      int
 	Lifecycle             *storagelifecycle.Service
 	Logger                *zerolog.Logger
+	Capacity              CapacityTrigger
 }
 
 type CreateUploadResult struct {
@@ -133,6 +139,7 @@ func NewService(options Options) *Service {
 		mergeCancel:           mergeCancel,
 		mergeSlots:            make(chan struct{}, mergeConcurrency),
 		acceptingMerges:       true,
+		capacity:              options.Capacity,
 	}
 }
 
@@ -295,6 +302,9 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 	}
 	if s.enableDirectDownloads {
 		s.tryStartMaterialization(location, cacheEntryID)
+	}
+	if s.capacity != nil {
+		s.capacity.Trigger()
 	}
 
 	return currentUpload.ID, nil

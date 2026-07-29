@@ -19,6 +19,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagecapacity"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -76,6 +77,24 @@ func TestExternalMySQLStorageSizeMigration(t *testing.T) {
 	}
 
 	runExternalStorageSizeMigration(t, dbCfg)
+}
+
+func TestExternalPostgresCapacityEviction(t *testing.T) {
+	dbCfg, ok := externalPostgresConfig()
+	if !ok {
+		t.Skip("set E2E_POSTGRES_URL to run PostgreSQL integration coverage")
+	}
+
+	runExternalCapacityEviction(t, dbCfg)
+}
+
+func TestExternalMySQLCapacityEviction(t *testing.T) {
+	dbCfg, ok := externalMySQLConfig()
+	if !ok {
+		t.Skip("set E2E_MYSQL_HOST, E2E_MYSQL_DATABASE and E2E_MYSQL_USER to run MySQL integration coverage")
+	}
+
+	runExternalCapacityEviction(t, dbCfg)
 }
 
 func TestExternalPostgresCleanupRetention(t *testing.T) {
@@ -202,6 +221,57 @@ func runExternalCleanupRetention(t *testing.T, dbCfg config.DBConfig) {
 	require.NoError(t, err)
 	require.Equal(t, 4, deleted)
 	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+}
+
+func runExternalCapacityEviction(t *testing.T, dbCfg config.DBConfig) {
+	t.Helper()
+
+	ctx := context.Background()
+	client := openExternalDB(t, ctx, dbCfg)
+	filesystem := testutil.NewFilesystemAdapter(t)
+	old := createExternalCapacityLocation(ctx, client, "capacity-old", 100, nil)
+	downloadedAt := int64(200)
+	downloaded := createExternalCapacityLocation(ctx, client, "capacity-downloaded", 50, &downloadedAt)
+	recent := createExternalCapacityLocation(ctx, client, "capacity-recent", 300, nil)
+	lifecycle := storagelifecycle.New(client)
+	service := storagecapacity.NewService(storagecapacity.Options{
+		DB:      client,
+		Storage: filesystem,
+		Config: config.CacheConfig{
+			MaxSizeBytes:              17,
+			MaxSizeBytesConfigured:    true,
+			FilesystemMaxUsagePercent: 90,
+		},
+		Lifecycle: lifecycle,
+	})
+
+	result, err := service.Enforce(ctx)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, result.ClaimedLocations)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, old.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, downloaded.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, recent.ID).DeletionRequestedAt)
+}
+
+func createExternalCapacityLocation(ctx context.Context, client *ent.Client, id string, updatedAt int64, lastDownloadedAt *int64) *ent.StorageLocation {
+	location := client.StorageLocation.Create().
+		SetID(id + "-location").
+		SetFolderName(id + "-folder").
+		SetPartCount(1).
+		SetSizeBytes(6).
+		SetNillableLastDownloadedAt(lastDownloadedAt).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID(id + "-entry").
+		SetKey(id + "-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(updatedAt).
+		SetLocation(location).
+		SaveX(ctx)
+	return location
 }
 
 func createExternalRetentionLocation(ctx context.Context, client *ent.Client, id string, lastDownloadedAt *int64, updatedAt int64) *ent.StorageLocation {

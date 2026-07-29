@@ -117,7 +117,8 @@ func TestCompleteUploadTrustsPersistedPartCount(t *testing.T) {
 
 func TestCompleteUploadPersistsLogicalPartSizeOnly(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
-	service := NewService(Options{DB: client, Storage: filesystem})
+	capacity := &capacityTriggerCounter{}
+	service := NewService(Options{DB: client, Storage: filesystem, Capacity: capacity})
 	scope := writableScope()
 	upload, err := service.CreateUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
@@ -139,6 +140,7 @@ func TestCompleteUploadPersistsLogicalPartSizeOnly(t *testing.T) {
 	location := client.StorageLocation.Query().OnlyX(ctx)
 	require.NotNil(t, location.SizeBytes)
 	require.Equal(t, int64(3), *location.SizeBytes)
+	require.Equal(t, 1, capacity.count)
 }
 
 func TestCompleteUploadValidatesLegacyUploadWithoutPartCountMetadata(t *testing.T) {
@@ -1079,6 +1081,14 @@ func readStorageObject(t *testing.T, ctx context.Context, adapter storage.Adapte
 type failOnceStorage struct {
 	storage.Adapter
 	failed bool
+}
+
+type capacityTriggerCounter struct {
+	count int
+}
+
+func (c *capacityTriggerCounter) Trigger() {
+	c.count++
 }
 
 func (s *failOnceStorage) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {

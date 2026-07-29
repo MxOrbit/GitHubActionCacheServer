@@ -32,6 +32,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "")
 	t.Setenv("CACHE_MERGE_CONCURRENCY", "")
+	t.Setenv("CACHE_MAX_SIZE_BYTES", "")
+	t.Setenv("CACHE_FILESYSTEM_MAX_USAGE_PERCENT", "")
 	t.Setenv("MANAGEMENT_API_KEY", "")
 	t.Setenv("DISABLE_CLEANUP_JOBS", "")
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "")
@@ -60,6 +62,9 @@ func TestLoadDefaults(t *testing.T) {
 	require.False(t, cfg.Cache.EnableDirectDownloads)
 	require.Empty(t, cfg.Cache.DownloadURLSigningSecret)
 	require.Equal(t, runtime.NumCPU(), cfg.Cache.MergeConcurrency)
+	require.False(t, cfg.Cache.MaxSizeBytesConfigured)
+	require.Zero(t, cfg.Cache.MaxSizeBytes)
+	require.Equal(t, float64(DefaultFilesystemMaxUsagePercent), cfg.Cache.FilesystemMaxUsagePercent)
 	require.Empty(t, cfg.Management.APIKey)
 	require.False(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 90, cfg.Cleanup.CacheOlderThanDays)
@@ -88,6 +93,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("ENABLE_DIRECT_DOWNLOADS", "true")
 	t.Setenv("DOWNLOAD_URL_SIGNING_SECRET", "secret")
 	t.Setenv("CACHE_MERGE_CONCURRENCY", "2")
+	t.Setenv("CACHE_MAX_SIZE_BYTES", "1073741824")
+	t.Setenv("CACHE_FILESYSTEM_MAX_USAGE_PERCENT", "82.5")
 	t.Setenv("MANAGEMENT_API_KEY", "management-secret")
 	t.Setenv("DISABLE_CLEANUP_JOBS", "true")
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "30")
@@ -117,6 +124,9 @@ func TestLoadFromEnv(t *testing.T) {
 	require.True(t, cfg.Cache.EnableDirectDownloads)
 	require.Equal(t, "secret", cfg.Cache.DownloadURLSigningSecret)
 	require.Equal(t, 2, cfg.Cache.MergeConcurrency)
+	require.True(t, cfg.Cache.MaxSizeBytesConfigured)
+	require.Equal(t, int64(1073741824), cfg.Cache.MaxSizeBytes)
+	require.Equal(t, 82.5, cfg.Cache.FilesystemMaxUsagePercent)
 	require.Equal(t, "management-secret", cfg.Management.APIKey)
 	require.True(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 30, cfg.Cleanup.CacheOlderThanDays)
@@ -203,6 +213,39 @@ func TestLoadRejectsMalformedS3UploadPartSize(t *testing.T) {
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "STORAGE_S3_UPLOAD_PART_SIZE_BYTES")
 			require.Contains(t, err.Error(), value)
+		})
+	}
+}
+
+func TestLoadRejectsInvalidCapacityConfiguration(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "zero byte budget", key: "CACHE_MAX_SIZE_BYTES", value: "0"},
+		{name: "negative byte budget", key: "CACHE_MAX_SIZE_BYTES", value: "-1"},
+		{name: "malformed byte budget", key: "CACHE_MAX_SIZE_BYTES", value: "1GiB"},
+		{name: "zero filesystem percent", key: "CACHE_FILESYSTEM_MAX_USAGE_PERCENT", value: "0"},
+		{name: "negative filesystem percent", key: "CACHE_FILESYSTEM_MAX_USAGE_PERCENT", value: "-1"},
+		{name: "filesystem percent above one hundred", key: "CACHE_FILESYSTEM_MAX_USAGE_PERCENT", value: "100.1"},
+		{name: "filesystem percent NaN", key: "CACHE_FILESYSTEM_MAX_USAGE_PERCENT", value: "NaN"},
+		{name: "filesystem percent infinity", key: "CACHE_FILESYSTEM_MAX_USAGE_PERCENT", value: "+Inf"},
+		{name: "malformed filesystem percent", key: "CACHE_FILESYSTEM_MAX_USAGE_PERCENT", value: "high"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CACHE_MAX_SIZE_BYTES", "")
+			t.Setenv("CACHE_FILESYSTEM_MAX_USAGE_PERCENT", "")
+			t.Setenv(tt.key, tt.value)
+
+			cfg, err := Load()
+
+			require.Zero(t, cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.key)
+			require.Contains(t, err.Error(), tt.value)
 		})
 	}
 }

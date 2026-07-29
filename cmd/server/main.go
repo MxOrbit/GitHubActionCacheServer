@@ -15,6 +15,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagecapacity"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagereconcile"
 	"github.com/rs/zerolog"
@@ -48,6 +49,13 @@ func main() {
 		logger.Fatal().Err(err).Msg("storage initialization failed")
 	}
 	lifecycleService := storagelifecycle.New(dbClient)
+	capacityService := storagecapacity.NewService(storagecapacity.Options{
+		DB:        dbClient,
+		Storage:   storageAdapter,
+		Config:    cfg.Cache,
+		Lifecycle: lifecycleService,
+		Logger:    &logger,
+	})
 	cacheService := cache.NewService(cache.Options{
 		DB:                    dbClient,
 		Storage:               storageAdapter,
@@ -55,6 +63,7 @@ func main() {
 		MergeConcurrency:      cfg.Cache.MergeConcurrency,
 		Lifecycle:             lifecycleService,
 		Logger:                &logger,
+		Capacity:              capacityService,
 	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
@@ -66,6 +75,7 @@ func main() {
 		Lifecycle: lifecycleService,
 		Logger:    &logger,
 	}, storageSizeReady)
+	go capacityService.Run(cleanupCtx, storageSizeReady)
 	cleanup.NewRunner(cleanup.NewService(cleanup.Options{
 		DB:        dbClient,
 		Storage:   storageAdapter,

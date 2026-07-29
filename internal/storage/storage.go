@@ -53,6 +53,15 @@ type ComposeAdapter interface {
 	ComposeObjects(ctx context.Context, destinationObjectName string, sourceObjectNames []string) error
 }
 
+type FilesystemUsage struct {
+	CapacityBytes int64
+	UsedBytes     int64
+}
+
+type FilesystemUsageAdapter interface {
+	FilesystemUsage(ctx context.Context) (FilesystemUsage, error)
+}
+
 func NewAdapter(ctx context.Context, cfg config.StorageConfig) (Adapter, error) {
 	switch cfg.Driver {
 	case DriverFilesystem:

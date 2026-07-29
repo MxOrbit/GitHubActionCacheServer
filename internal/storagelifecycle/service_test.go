@@ -167,6 +167,91 @@ func TestExpiredLocationDeletionRechecksAccessAndReaderLease(t *testing.T) {
 	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
 }
 
+func TestCapacityEvictionClaimsOnlyUnchangedUnreadLocation(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
+	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 1)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
+	client.CacheEntry.UpdateOneID("entry").SetUpdatedAt(now.Add(-time.Hour).UnixMilli()).ExecX(ctx)
+	location = client.StorageLocation.GetX(ctx, location.ID)
+
+	result, err := service.RequestCapacityEviction(ctx, CapacityObservation{
+		LocationID:       location.ID,
+		LeaseVersion:     location.LeaseVersion,
+		LastDownloadedAt: location.LastDownloadedAt,
+		RecencyAt:        now.Add(-time.Hour).UnixMilli(),
+	})
+
+	require.NoError(t, err)
+	require.True(t, result.Claimed)
+	require.False(t, result.Pinned)
+	require.Equal(t, int64(42), result.SizeBytes)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+	require.NotNil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+}
+
+func TestCapacityEvictionSkipsActiveReaderAndStaleAccessObservation(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
+	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 1)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
+	entry := client.CacheEntry.GetX(ctx, "entry")
+
+	stale := client.StorageLocation.GetX(ctx, location.ID)
+	lease, err := service.AcquireReader(ctx, entry.ID, AcquireReaderOptions{})
+	require.NoError(t, err)
+	current := client.StorageLocation.GetX(ctx, location.ID)
+
+	staleResult, err := service.RequestCapacityEviction(ctx, CapacityObservation{
+		LocationID:       stale.ID,
+		LeaseVersion:     stale.LeaseVersion,
+		LastDownloadedAt: stale.LastDownloadedAt,
+		RecencyAt:        entry.UpdatedAt,
+	})
+	require.NoError(t, err)
+	require.False(t, staleResult.Claimed)
+	require.False(t, staleResult.Pinned)
+
+	pinnedResult, err := service.RequestCapacityEviction(ctx, CapacityObservation{
+		LocationID:       current.ID,
+		LeaseVersion:     current.LeaseVersion,
+		LastDownloadedAt: current.LastDownloadedAt,
+		RecencyAt:        entry.UpdatedAt,
+	})
+	require.NoError(t, err)
+	require.False(t, pinnedResult.Claimed)
+	require.True(t, pinnedResult.Pinned)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
+}
+
+func TestCapacityEvictionRechecksFallbackSaveRecency(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 1)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
+	entry := client.CacheEntry.GetX(ctx, "entry")
+	location = client.StorageLocation.GetX(ctx, location.ID)
+	newer := entry.UpdatedAt + 1
+	client.CacheEntry.UpdateOneID(entry.ID).SetUpdatedAt(newer).ExecX(ctx)
+
+	result, err := service.RequestCapacityEviction(ctx, CapacityObservation{
+		LocationID:       location.ID,
+		LeaseVersion:     location.LeaseVersion,
+		LastDownloadedAt: location.LastDownloadedAt,
+		RecencyAt:        entry.UpdatedAt,
+	})
+
+	require.NoError(t, err)
+	require.False(t, result.Claimed)
+	require.False(t, result.Pinned)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).DeletionRequestedAt)
+}
+
 func TestPurgeDanglingCacheEntryIsConditionalAndFencesOnlyChildlessLocation(t *testing.T) {
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	service := New(client)

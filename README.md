@@ -142,17 +142,26 @@ An AWS S3 lifecycle configuration can scope the rule to the cache prefix:
 
 ### Cache Behavior
 
-| Variable                      | Default              | Description                                                                                                    |
-|-------------------------------|----------------------|----------------------------------------------------------------------------------------------------------------|
-| `ENABLE_DIRECT_DOWNLOADS`     | `false`              | When using S3, presigns eligible cache objects instead of proxying their downloads through the server.         |
-| `DOWNLOAD_URL_SIGNING_SECRET` | generated at startup | HMAC secret for local signed download URLs. Set a stable value for multi-instance or restart-safe deployments. |
-| `CACHE_MERGE_CONCURRENCY`     | CPU count            | Maximum number of concurrent S3 materializations. Values below `1` fall back to CPU count.                     |
+| Variable                             | Default              | Description                                                                                                    |
+|--------------------------------------|----------------------|----------------------------------------------------------------------------------------------------------------|
+| `ENABLE_DIRECT_DOWNLOADS`            | `false`              | When using S3, presigns eligible cache objects instead of proxying their downloads through the server.         |
+| `DOWNLOAD_URL_SIGNING_SECRET`        | generated at startup | HMAC secret for local signed download URLs. Set a stable value for multi-instance or restart-safe deployments. |
+| `CACHE_MERGE_CONCURRENCY`            | CPU count            | Maximum number of concurrent S3 materializations. Values below `1` fall back to CPU count.                     |
+| `CACHE_MAX_SIZE_BYTES`               | unset                | Maximum logical cache payload bytes for any backend. Must be a positive integer when set.                      |
+| `CACHE_FILESYSTEM_MAX_USAGE_PERCENT` | `90`                 | Filesystem volume usage that triggers eviction when no explicit byte budget is set. Range `(0, 100]`.          |
 
 Local signed download URLs and S3 direct download URLs expire after 10 minutes.
 Single-part S3 caches are presigned directly. Multi-part caches are presigned
 after composition when all non-final parts satisfy the backend's multipart
 upload size constraints (5 MiB on AWS S3); unsupported layouts transparently
 fall back to server-proxied downloads.
+
+Capacity eviction runs after startup, every 10 minutes, and after finalize. It
+removes least-recently-used entries to 90% of the active budget. Filesystem
+usage includes non-cache data, in-progress uploads, and temporary files on the
+same volume; pending deletions receive a conservative logical-size credit until
+their grace period ends, after which the outbox physically removes them. S3 is
+unlimited unless an explicit byte budget is configured.
 
 Active downloads are protected by durable database reader leases. Proxied
 downloads renew a two-minute lease every 30 seconds and release it when the

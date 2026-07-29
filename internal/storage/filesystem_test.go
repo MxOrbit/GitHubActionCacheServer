@@ -151,6 +151,19 @@ func TestFilesystemAdapterObjectExists(t *testing.T) {
 	require.False(t, exists)
 }
 
+func TestFilesystemAdapterReportsVolumeUsage(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	usage, err := adapter.FilesystemUsage(ctx)
+
+	require.NoError(t, err)
+	require.Positive(t, usage.CapacityBytes)
+	require.GreaterOrEqual(t, usage.UsedBytes, int64(0))
+	require.LessOrEqual(t, usage.UsedBytes, usage.CapacityBytes)
+}
+
 func TestFilesystemAdapterClear(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())

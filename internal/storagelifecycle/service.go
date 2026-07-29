@@ -83,6 +83,19 @@ type MaterializationLease struct {
 	RenewAfter time.Duration
 }
 
+type CapacityObservation struct {
+	LocationID       string
+	LeaseVersion     int64
+	LastDownloadedAt *int64
+	RecencyAt        int64
+}
+
+type CapacityEvictionResult struct {
+	Claimed   bool
+	Pinned    bool
+	SizeBytes int64
+}
+
 func New(db *ent.Client) *Service {
 	return NewWithOptions(db, Options{})
 }
@@ -413,13 +426,12 @@ func (s *Service) RequestLocationDeletion(ctx context.Context, locationID string
 			return DeletionResult{}, nil
 		}
 	}
+	var result DeletionResult
 	if deleteCacheEntries {
-		if _, err := tx.CacheEntry.Delete().Where(cacheentry.LocationId(locationID)).Exec(ctx); err != nil {
-			return DeletionResult{}, fmt.Errorf("delete cache entries: %w", err)
-		}
+		result, err = s.detachCacheEntriesAndFence(ctx, tx.Client(), locationID, true)
+	} else {
+		result, err = s.FenceDetachedLocation(ctx, tx.Client(), locationID)
 	}
-
-	result, err := s.FenceDetachedLocation(ctx, tx.Client(), locationID)
 	if err != nil {
 		return DeletionResult{}, err
 	}
@@ -428,6 +440,117 @@ func (s *Service) RequestLocationDeletion(ctx context.Context, locationID string
 	}
 	committed = true
 	return result, nil
+}
+
+// RequestCapacityEviction removes a location only while its access observation
+// is still current. Active readers pin the location instead of merely delaying
+// its physical deletion, which preserves capacity eviction's LRU contract.
+func (s *Service) RequestCapacityEviction(ctx context.Context, observed CapacityObservation) (CapacityEvictionResult, error) {
+	tx, err := s.db.Tx(ctx)
+	if err != nil {
+		return CapacityEvictionResult{}, fmt.Errorf("start capacity eviction transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	predicates := []predicate.StorageLocation{
+		storagelocation.ID(observed.LocationID),
+		storagelocation.LeaseVersion(observed.LeaseVersion),
+		storagelocation.DeletionRequestedAtIsNil(),
+		storagelocation.SizeBytesNotNil(),
+	}
+	predicates = appendOptionalInt64Predicate(
+		predicates,
+		observed.LastDownloadedAt,
+		storagelocation.LastDownloadedAtIsNil,
+		storagelocation.LastDownloadedAt,
+	)
+	affected, err := tx.StorageLocation.Update().
+		Where(predicates...).
+		AddLeaseVersion(1).
+		Save(ctx)
+	if err != nil {
+		return CapacityEvictionResult{}, fmt.Errorf("claim capacity eviction candidate: %w", err)
+	}
+	if affected == 0 {
+		if err := tx.Commit(); err != nil {
+			return CapacityEvictionResult{}, fmt.Errorf("commit stale capacity eviction observation: %w", err)
+		}
+		committed = true
+		return CapacityEvictionResult{}, nil
+	}
+
+	location, err := tx.StorageLocation.Get(ctx, observed.LocationID)
+	if err != nil {
+		return CapacityEvictionResult{}, fmt.Errorf("query claimed capacity eviction location: %w", err)
+	}
+	newestEntry, err := tx.CacheEntry.Query().
+		Where(cacheentry.LocationId(location.ID)).
+		Order(ent.Desc(cacheentry.FieldUpdatedAt)).
+		First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			if err := tx.Commit(); err != nil {
+				return CapacityEvictionResult{}, fmt.Errorf("commit orphan capacity candidate check: %w", err)
+			}
+			committed = true
+			return CapacityEvictionResult{}, nil
+		}
+		return CapacityEvictionResult{}, fmt.Errorf("query capacity candidate recency: %w", err)
+	}
+	currentRecency := newestEntry.UpdatedAt
+	if location.LastDownloadedAt != nil {
+		currentRecency = *location.LastDownloadedAt
+	}
+	if currentRecency != observed.RecencyAt {
+		if err := tx.Commit(); err != nil {
+			return CapacityEvictionResult{}, fmt.Errorf("commit changed capacity candidate recency: %w", err)
+		}
+		committed = true
+		return CapacityEvictionResult{}, nil
+	}
+
+	now := s.now().UnixMilli()
+	hasActiveReader, err := tx.StorageReaderLease.Query().
+		Where(
+			storagereaderlease.StorageLocationId(location.ID),
+			storagereaderlease.ExpiresAtGT(now),
+		).
+		Exist(ctx)
+	if err != nil {
+		return CapacityEvictionResult{}, fmt.Errorf("query capacity candidate readers: %w", err)
+	}
+	if hasActiveReader {
+		if err := tx.Commit(); err != nil {
+			return CapacityEvictionResult{}, fmt.Errorf("commit pinned capacity candidate check: %w", err)
+		}
+		committed = true
+		return CapacityEvictionResult{Pinned: true}, nil
+	}
+
+	result, err := s.detachCacheEntriesAndFence(ctx, tx.Client(), location.ID, false)
+	if err != nil {
+		return CapacityEvictionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CapacityEvictionResult{}, fmt.Errorf("commit capacity eviction: %w", err)
+	}
+	committed = true
+	return CapacityEvictionResult{
+		Claimed:   result.Fenced,
+		SizeBytes: *location.SizeBytes,
+	}, nil
+}
+
+func (s *Service) detachCacheEntriesAndFence(ctx context.Context, db *ent.Client, locationID string, lock bool) (DeletionResult, error) {
+	if _, err := db.CacheEntry.Delete().Where(cacheentry.LocationId(locationID)).Exec(ctx); err != nil {
+		return DeletionResult{}, fmt.Errorf("delete cache entries: %w", err)
+	}
+	return s.fenceDetachedLocation(ctx, db, locationID, lock)
 }
 
 // RequestExpiredLocationDeletion atomically rechecks retention eligibility

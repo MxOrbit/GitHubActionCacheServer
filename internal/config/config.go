@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -16,11 +17,12 @@ const (
 	DefaultActionsResultsURL = "https://results-receiver.actions.githubusercontent.com"
 	DefaultTokenIssuer       = "https://token.actions.githubusercontent.com"
 
-	MinS3UploadPartSizeBytes       = 5 * 1024 * 1024
-	DefaultS3KeyPrefix             = "gh-actions-cache"
-	DefaultS3UploadPartSizeBytes   = MinS3UploadPartSizeBytes
-	DefaultS3UploadConcurrency     = 1
-	DefaultS3MultipartAbortTimeout = 30 * time.Second
+	MinS3UploadPartSizeBytes         = 5 * 1024 * 1024
+	DefaultS3KeyPrefix               = "gh-actions-cache"
+	DefaultS3UploadPartSizeBytes     = MinS3UploadPartSizeBytes
+	DefaultS3UploadConcurrency       = 1
+	DefaultS3MultipartAbortTimeout   = 30 * time.Second
+	DefaultFilesystemMaxUsagePercent = 90
 )
 
 type Config struct {
@@ -83,9 +85,12 @@ type StorageConfig struct {
 }
 
 type CacheConfig struct {
-	EnableDirectDownloads    bool
-	DownloadURLSigningSecret string
-	MergeConcurrency         int
+	EnableDirectDownloads     bool
+	DownloadURLSigningSecret  string
+	MergeConcurrency          int
+	MaxSizeBytes              int64
+	MaxSizeBytesConfigured    bool
+	FilesystemMaxUsagePercent float64
 }
 
 type ManagementConfig struct {
@@ -99,6 +104,14 @@ type CleanupConfig struct {
 
 func Load() (Config, error) {
 	s3UploadPartSizeBytes, s3UploadPartSizeBytesConfigured, err := int64Env("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", DefaultS3UploadPartSizeBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	cacheMaxSizeBytes, cacheMaxSizeBytesConfigured, err := optionalPositiveInt64Env("CACHE_MAX_SIZE_BYTES")
+	if err != nil {
+		return Config{}, err
+	}
+	filesystemMaxUsagePercent, err := percentageEnv("CACHE_FILESYSTEM_MAX_USAGE_PERCENT", DefaultFilesystemMaxUsagePercent)
 	if err != nil {
 		return Config{}, err
 	}
@@ -154,9 +167,12 @@ func Load() (Config, error) {
 			S3MultipartAbortTimeout:         positiveDurationEnv("STORAGE_S3_MULTIPART_ABORT_TIMEOUT", DefaultS3MultipartAbortTimeout),
 		},
 		Cache: CacheConfig{
-			EnableDirectDownloads:    tools.ParseBool(tools.EnvOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
-			DownloadURLSigningSecret: tools.EnvOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
-			MergeConcurrency:         positiveIntEnv("CACHE_MERGE_CONCURRENCY", defaultMergeConcurrency()),
+			EnableDirectDownloads:     tools.ParseBool(tools.EnvOrDefault("ENABLE_DIRECT_DOWNLOADS", "false")),
+			DownloadURLSigningSecret:  tools.EnvOrDefault("DOWNLOAD_URL_SIGNING_SECRET", ""),
+			MergeConcurrency:          positiveIntEnv("CACHE_MERGE_CONCURRENCY", defaultMergeConcurrency()),
+			MaxSizeBytes:              cacheMaxSizeBytes,
+			MaxSizeBytesConfigured:    cacheMaxSizeBytesConfigured,
+			FilesystemMaxUsagePercent: filesystemMaxUsagePercent,
 		},
 		Management: ManagementConfig{
 			APIKey: tools.EnvOrDefault("MANAGEMENT_API_KEY", ""),
@@ -194,6 +210,30 @@ func int64Env(key string, fallback int64) (int64, bool, error) {
 		return 0, true, fmt.Errorf("%s must be an integer number of bytes: %q", key, raw)
 	}
 	return value, true, nil
+}
+
+func optionalPositiveInt64Env(key string) (int64, bool, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 0, false, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, true, fmt.Errorf("%s must be a positive integer number of bytes: %q", key, raw)
+	}
+	return value, true, nil
+}
+
+func percentageEnv(key string, fallback float64) (float64, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 || value > 100 {
+		return 0, fmt.Errorf("%s must be a number greater than 0 and at most 100: %q", key, raw)
+	}
+	return value, nil
 }
 
 func positiveDurationEnv(key string, fallback time.Duration) time.Duration {
