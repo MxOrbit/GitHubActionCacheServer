@@ -722,7 +722,7 @@ func TestStalePartsLocationDoesNotRestartCompletedMaterialization(t *testing.T) 
 	staleLocation := *location
 	staleLocation.MergedAt = nil
 
-	service.tryStartMaterialization(&staleLocation)
+	service.tryStartMaterialization(&staleLocation, "")
 	require.NoError(t, service.WaitForMerges(ctx))
 	require.Zero(t, adapter.callCount())
 
@@ -936,7 +936,7 @@ func TestLongMaterializationRenewsOwnershipAcrossServiceInstances(t *testing.T) 
 	require.NoError(t, err)
 	adapter.waitStarted(t)
 	time.Sleep(140 * time.Millisecond)
-	second.tryStartMaterialization(client.StorageLocation.GetX(ctx, location.ID))
+	second.tryStartMaterialization(client.StorageLocation.GetX(ctx, location.ID), "entry-id")
 
 	select {
 	case <-adapter.started:

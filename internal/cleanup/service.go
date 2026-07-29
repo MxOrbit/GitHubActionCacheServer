@@ -17,6 +17,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -33,6 +34,7 @@ type Service struct {
 	config    config.CleanupConfig
 	lifecycle *storagelifecycle.Service
 	now       func() time.Time
+	logger    zerolog.Logger
 }
 
 type Options struct {
@@ -41,6 +43,7 @@ type Options struct {
 	Config    config.CleanupConfig
 	Lifecycle *storagelifecycle.Service
 	Now       func() time.Time
+	Logger    *zerolog.Logger
 }
 
 func NewService(options Options) *Service {
@@ -52,12 +55,17 @@ func NewService(options Options) *Service {
 	if lifecycle == nil {
 		lifecycle = storagelifecycle.NewWithOptions(options.DB, storagelifecycle.Options{Now: now})
 	}
+	logger := zerolog.Nop()
+	if options.Logger != nil {
+		logger = *options.Logger
+	}
 	return &Service{
 		db:        options.DB,
 		storage:   options.Storage,
 		config:    options.Config,
 		lifecycle: lifecycle,
 		now:       now,
+		logger:    logger,
 	}
 }
 
@@ -142,7 +150,7 @@ func (s *Service) RunCacheEntries(ctx context.Context) (int, error) {
 				continue
 			}
 			if result.Task != nil {
-				_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
+				_ = s.processStorageDeletion(ctx, result.Task)
 			}
 			deleted++
 		}
@@ -209,7 +217,7 @@ func (s *Service) RunParts(ctx context.Context) (int, error) {
 				return deletedParts, err
 			}
 			if result.Task != nil {
-				_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
+				_ = s.processStorageDeletion(ctx, result.Task)
 				deletedParts += result.PartCount
 			}
 		}
@@ -244,7 +252,7 @@ func (s *Service) RunPendingStorageLocations(ctx context.Context) (int, error) {
 				return finalized, err
 			}
 			if result.Task != nil {
-				_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
+				_ = s.processStorageDeletion(ctx, result.Task)
 			}
 			if result.Finalized {
 				finalized++
@@ -289,7 +297,7 @@ func (s *Service) RunStorageDeletions(ctx context.Context) (int, error) {
 			if !storageDeletionReady(task, now) {
 				continue
 			}
-			if err := storageoutbox.Process(ctx, s.db, s.storage, task); err != nil {
+			if err := s.processStorageDeletion(ctx, task); err != nil {
 				processErrors = append(processErrors, err)
 				continue
 			}
@@ -341,7 +349,7 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 	}
 	committed = true
 
-	_ = storageoutbox.Process(ctx, s.db, s.storage, task)
+	_ = s.processStorageDeletion(ctx, task)
 	return nil
 }
 
@@ -351,7 +359,34 @@ func (s *Service) deleteStorageLocation(ctx context.Context, location *ent.Stora
 		return err
 	}
 	if result.Task != nil {
-		_ = storageoutbox.Process(ctx, s.db, s.storage, result.Task)
+		_ = s.processStorageDeletion(ctx, result.Task)
 	}
 	return nil
+}
+
+func (s *Service) processStorageDeletion(ctx context.Context, task *ent.StorageDeletion) error {
+	err := storageoutbox.Process(ctx, s.db, s.storage, task)
+	if err == nil {
+		return nil
+	}
+
+	attemptCount := task.AttemptCount + 1
+	event := s.logger.Error()
+	state := "retryable"
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		event = s.logger.Debug()
+		state = "interrupted"
+	}
+	event.
+		Err(err).
+		Int64("storage_deletion_id", task.ID).
+		Str("folder_name", task.FolderName).
+		Int("attempt_count", attemptCount).
+		Str("state", state)
+	if state == "retryable" {
+		event.Dur("retry_in", storageDeletionRetryDelay(attemptCount))
+	}
+	event.
+		Msg("storage deletion failed")
+	return err
 }

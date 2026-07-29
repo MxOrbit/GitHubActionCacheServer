@@ -28,6 +28,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -52,6 +53,7 @@ type Service struct {
 	storage               storage.Adapter
 	composer              storage.ComposeAdapter
 	lifecycle             *storagelifecycle.Service
+	logger                zerolog.Logger
 	enableDirectDownloads bool
 	mergeCtx              context.Context
 	mergeCancel           context.CancelFunc
@@ -67,6 +69,7 @@ type Options struct {
 	EnableDirectDownloads bool
 	MergeConcurrency      int
 	Lifecycle             *storagelifecycle.Service
+	Logger                *zerolog.Logger
 }
 
 type CreateUploadResult struct {
@@ -76,6 +79,28 @@ type CreateUploadResult struct {
 type MatchResult struct {
 	CacheEntry  *ent.CacheEntry
 	DownloadURL string
+}
+
+type DownloadStream struct {
+	io.ReadCloser
+	CacheEntryID      string
+	StorageLocationID string
+	Representation    string
+}
+
+type DownloadError struct {
+	Err               error
+	CacheEntryID      string
+	StorageLocationID string
+	Representation    string
+}
+
+func (e *DownloadError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *DownloadError) Unwrap() error {
+	return e.Err
 }
 
 func NewService(options Options) *Service {
@@ -92,12 +117,17 @@ func NewService(options Options) *Service {
 	if lifecycle == nil {
 		lifecycle = storagelifecycle.New(options.DB)
 	}
+	logger := zerolog.Nop()
+	if options.Logger != nil {
+		logger = *options.Logger
+	}
 
 	return &Service{
 		db:                    options.DB,
 		storage:               options.Storage,
 		composer:              composer,
 		lifecycle:             lifecycle,
+		logger:                logger,
 		enableDirectDownloads: options.EnableDirectDownloads,
 		mergeCtx:              mergeCtx,
 		mergeCancel:           mergeCancel,
@@ -250,12 +280,12 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 		)
 	}
 
-	location, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
+	location, cacheEntryID, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount)
 	if err != nil {
 		return 0, err
 	}
 	if s.enableDirectDownloads {
-		s.tryStartMaterialization(location)
+		s.tryStartMaterialization(location, cacheEntryID)
 	}
 
 	return currentUpload.ID, nil
@@ -267,7 +297,7 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 	}
 
 	direct, directDownloads := s.storage.(storage.DirectDownloadAdapter)
-	for attempt := 0; attempt < maxDanglingPurgeAttempts; attempt++ {
+	for range maxDanglingPurgeAttempts {
 		cacheEntry, err := s.MatchCacheEntry(ctx, keys, version, scope)
 		if err != nil {
 			return nil, err
@@ -335,7 +365,7 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 				s.touchStorageLocationIfStale(ctx, lease.Location)
 				downloadURL = url
 			case errors.Is(leaseErr, storagelifecycle.ErrDirectRepresentation):
-				s.tryStartMaterialization(location)
+				s.tryStartMaterialization(location, cacheEntry.ID)
 			case errors.Is(leaseErr, storagelifecycle.ErrLocationUnavailable):
 				continue
 			default:
@@ -391,29 +421,41 @@ func (s *Service) MatchCacheEntry(ctx context.Context, keys []string, version st
 	return nil, nil
 }
 
-func (s *Service) Download(ctx context.Context, cacheEntryID string) (io.ReadCloser, error) {
+func (s *Service) Download(ctx context.Context, cacheEntryID string) (*DownloadStream, error) {
 	lease, err := s.lifecycle.AcquireReader(ctx, cacheEntryID, storagelifecycle.AcquireReaderOptions{})
 	if err != nil {
 		if errors.Is(err, storagelifecycle.ErrLocationUnavailable) {
 			return nil, ErrCacheNotFound
 		}
-		return nil, err
+		return nil, &DownloadError{Err: err, CacheEntryID: cacheEntryID}
 	}
 	location := lease.Location
+	representation := string(storagereaderlease.ScopeParts)
 
 	var stream io.ReadCloser
 	if lease.Scope == storagereaderlease.ScopeStorage {
+		representation = string(storagereaderlease.ScopeStorage)
 		stream, err = s.openMerged(ctx, location)
 	} else {
-		s.tryStartMaterialization(location)
+		s.tryStartMaterialization(location, cacheEntryID)
 		stream, err = s.openParts(ctx, location)
 	}
 	if err != nil {
 		s.releaseReaderLease(lease.ID)
-		return nil, err
+		return nil, &DownloadError{
+			Err:               err,
+			CacheEntryID:      cacheEntryID,
+			StorageLocationID: location.ID,
+			Representation:    representation,
+		}
 	}
 	s.touchStorageLocationIfStale(ctx, location)
-	return newLeasedReadCloser(stream, s.lifecycle, lease), nil
+	return &DownloadStream{
+		ReadCloser:        newLeasedReadCloser(stream, s.lifecycle, lease),
+		CacheEntryID:      cacheEntryID,
+		StorageLocationID: location.ID,
+		Representation:    representation,
+	}, nil
 }
 
 func WriteScope(scope auth.CacheScope) (string, bool) {
@@ -592,10 +634,10 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 	return nil
 }
 
-func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (*ent.StorageLocation, error) {
+func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int) (*ent.StorageLocation, string, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("start transaction: %w", err)
+		return nil, "", fmt.Errorf("start transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -611,7 +653,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		SetPartCount(partCount).
 		Save(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("create storage location: %w", err)
+		return nil, "", fmt.Errorf("create storage location: %w", err)
 	}
 
 	existingCacheEntry, err := tx.CacheEntry.Query().
@@ -624,23 +666,25 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		WithLocation().
 		Only(ctx)
 	if err != nil && !ent.IsNotFound(err) {
-		return nil, fmt.Errorf("query existing cache entry: %w", err)
+		return nil, "", fmt.Errorf("query existing cache entry: %w", err)
 	}
 
+	var cacheEntryID string
 	if existingCacheEntry != nil {
+		cacheEntryID = existingCacheEntry.ID
 		if _, err := tx.CacheEntry.UpdateOneID(existingCacheEntry.ID).
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
 			Save(ctx); err != nil {
-			return nil, fmt.Errorf("update cache entry: %w", err)
+			return nil, "", fmt.Errorf("update cache entry: %w", err)
 		}
 		if existingCacheEntry.LocationId != "" {
 			if _, err := s.lifecycle.FenceDetachedLocation(ctx, tx.Client(), existingCacheEntry.LocationId); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 		}
 	} else {
-		if _, err := tx.CacheEntry.Create().
+		createdCacheEntry, err := tx.CacheEntry.Create().
 			SetID(uuid.NewString()).
 			SetKey(currentUpload.Key).
 			SetVersion(currentUpload.Version).
@@ -648,23 +692,25 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 			SetRepoId(repoID).
 			SetUpdatedAt(time.Now().UnixMilli()).
 			SetLocation(location).
-			Save(ctx); err != nil {
-			return nil, fmt.Errorf("create cache entry: %w", err)
+			Save(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("create cache entry: %w", err)
 		}
+		cacheEntryID = createdCacheEntry.ID
 	}
 
 	if _, err := storageoutbox.Enqueue(ctx, tx.Client(), blocksFolderName(currentUpload.FolderName)); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return nil, fmt.Errorf("delete upload: %w", err)
+		return nil, "", fmt.Errorf("delete upload: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit upload: %w", err)
+		return nil, "", fmt.Errorf("commit upload: %w", err)
 	}
 	committed = true
-	return location, nil
+	return location, cacheEntryID, nil
 }
 
 type cacheEntryMatch struct {
@@ -765,7 +811,7 @@ func (s *Service) ensureCommittedPartsAreContiguous(ctx context.Context, folderN
 	return nil
 }
 
-func (s *Service) tryStartMaterialization(location *ent.StorageLocation) {
+func (s *Service) tryStartMaterialization(location *ent.StorageLocation, cacheEntryID string) {
 	if s.composer == nil || location.PartCount < 2 || location.MergedAt != nil || location.MaterializationUnsupportedAt != nil || location.PartsDeletedAt != nil {
 		return
 	}
@@ -776,13 +822,17 @@ func (s *Service) tryStartMaterialization(location *ent.StorageLocation) {
 	lease, err := s.lifecycle.AcquireMaterialization(s.mergeCtx, location.ID)
 	if err != nil {
 		s.finishReservedMerge()
+		if !errors.Is(err, storagelifecycle.ErrMaterializationLeaseHeld) && !errors.Is(err, storagelifecycle.ErrLocationUnavailable) {
+			s.materializationLogEvent(zerolog.ErrorLevel, cacheEntryID, location.ID, "retryable", "acquire", err).
+				Msg("cache materialization failed")
+		}
 		return
 	}
 
-	go s.materializeLocationInBackground(lease)
+	go s.materializeLocationInBackground(cacheEntryID, lease)
 }
 
-func (s *Service) materializeLocationInBackground(lease *storagelifecycle.MaterializationLease) {
+func (s *Service) materializeLocationInBackground(cacheEntryID string, lease *storagelifecycle.MaterializationLease) {
 	defer s.finishReservedMerge()
 	location := lease.Location
 
@@ -798,7 +848,9 @@ func (s *Service) materializeLocationInBackground(lease *storagelifecycle.Materi
 	cancel()
 	renewalErr := <-renewalDone
 	if renewalErr != nil {
-		s.releaseMaterializationLease(location.ID, lease.Token)
+		s.materializationLogEvent(zerolog.ErrorLevel, cacheEntryID, location.ID, "retryable", "renew", renewalErr).
+			Msg("cache materialization failed")
+		s.releaseMaterializationLease(cacheEntryID, location.ID, lease.Token)
 		return
 	}
 	if composeErr != nil {
@@ -806,10 +858,17 @@ func (s *Service) materializeLocationInBackground(lease *storagelifecycle.Materi
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 			defer cleanupCancel()
 			if markErr := s.lifecycle.MarkMaterializationUnsupported(cleanupCtx, location.ID, lease.Token); markErr != nil {
-				s.releaseMaterializationLease(location.ID, lease.Token)
+				s.materializationLogEvent(zerolog.ErrorLevel, cacheEntryID, location.ID, "retryable", "mark_unsupported", markErr).
+					Msg("cache materialization failed")
+				s.releaseMaterializationLease(cacheEntryID, location.ID, lease.Token)
+			} else {
+				s.materializationLogEvent(zerolog.WarnLevel, cacheEntryID, location.ID, "unsupported", "compose", composeErr).
+					Msg("cache materialization unsupported")
 			}
 		} else {
-			s.releaseMaterializationLease(location.ID, lease.Token)
+			s.materializationLogEvent(zerolog.ErrorLevel, cacheEntryID, location.ID, "retryable", "compose", composeErr).
+				Msg("cache materialization failed")
+			s.releaseMaterializationLease(cacheEntryID, location.ID, lease.Token)
 		}
 		return
 	}
@@ -817,8 +876,19 @@ func (s *Service) materializeLocationInBackground(lease *storagelifecycle.Materi
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
 	if err := s.lifecycle.FinishMaterialization(cleanupCtx, location.ID, lease.Token); err != nil {
-		s.releaseMaterializationLease(location.ID, lease.Token)
+		s.materializationLogEvent(zerolog.ErrorLevel, cacheEntryID, location.ID, "retryable", "finish", err).
+			Msg("cache materialization failed")
+		s.releaseMaterializationLease(cacheEntryID, location.ID, lease.Token)
 	}
+}
+
+func (s *Service) materializationLogEvent(level zerolog.Level, cacheEntryID, locationID, state, stage string, err error) *zerolog.Event {
+	return s.logger.WithLevel(level).
+		Err(err).
+		Str("cache_entry_id", cacheEntryID).
+		Str("storage_location_id", locationID).
+		Str("state", state).
+		Str("stage", stage)
 }
 
 func (s *Service) renewMaterializationLease(ctx context.Context, cancel context.CancelFunc, lease *storagelifecycle.MaterializationLease, done chan<- error) {
@@ -875,10 +945,13 @@ func (s *Service) releaseReaderLease(leaseID string) {
 	_ = s.lifecycle.ReleaseReader(cleanupCtx, leaseID)
 }
 
-func (s *Service) releaseMaterializationLease(locationID, token string) {
+func (s *Service) releaseMaterializationLease(cacheEntryID, locationID, token string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
-	_ = s.lifecycle.ReleaseMaterialization(cleanupCtx, locationID, token)
+	if err := s.lifecycle.ReleaseMaterialization(cleanupCtx, locationID, token); err != nil {
+		s.materializationLogEvent(zerolog.ErrorLevel, cacheEntryID, locationID, "retryable", "release", err).
+			Msg("cache materialization lease release failed")
+	}
 }
 
 func randomPositiveInt64() (int64, error) {

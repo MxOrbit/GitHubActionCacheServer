@@ -13,6 +13,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
 )
 
 const fallbackDownloadURLTTL = 10 * time.Minute
@@ -24,6 +25,7 @@ type Handler struct {
 	storage        storage.Adapter
 	lifecycle      *storagelifecycle.Service
 	downloadSigner *downloadurl.Signer
+	logger         zerolog.Logger
 }
 
 type Options struct {
@@ -32,12 +34,17 @@ type Options struct {
 	DB        *ent.Client
 	Storage   storage.Adapter
 	Lifecycle *storagelifecycle.Service
+	Logger    *zerolog.Logger
 }
 
 func New(options Options) *Handler {
 	lifecycle := options.Lifecycle
 	if lifecycle == nil {
 		lifecycle = storagelifecycle.New(options.DB)
+	}
+	logger := zerolog.Nop()
+	if options.Logger != nil {
+		logger = *options.Logger
 	}
 	return &Handler{
 		cfg:            options.Config,
@@ -46,6 +53,7 @@ func New(options Options) *Handler {
 		storage:        options.Storage,
 		lifecycle:      lifecycle,
 		downloadSigner: downloadurl.New(options.Config.Cache.DownloadURLSigningSecret, fallbackDownloadURLTTL),
+		logger:         logger,
 	}
 }
 

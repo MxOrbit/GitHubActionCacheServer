@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
@@ -80,22 +83,83 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 	stream, err := h.cache.Download(c.Request.Context(), cacheEntryID)
 	if err != nil {
 		if errors.Is(err, cache.ErrCacheNotFound) {
+			var downloadErr *cache.DownloadError
+			if errors.As(err, &downloadErr) {
+				h.logDownloadFailure(c.Request.Context(), err, downloadFailureMetadata(err, cacheEntryID), "open")
+			}
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
 			return
 		}
+		h.logDownloadFailure(c.Request.Context(), err, downloadFailureMetadata(err, cacheEntryID), "open")
 		writeCacheError(c, err)
 		return
 	}
-	defer stream.Close()
 
-	written, err := bufferpool.Copy(c.Writer, stream)
-	if err != nil && written == 0 && !c.Writer.Written() {
-		if errors.Is(err, cache.ErrCacheNotFound) {
+	metadata := downloadMetadata{
+		cacheEntryID:      stream.CacheEntryID,
+		storageLocationID: stream.StorageLocationID,
+		representation:    stream.Representation,
+	}
+	defer func() {
+		if err := stream.Close(); err != nil {
+			h.logDownloadFailure(c.Request.Context(), err, metadata, "close")
+		}
+	}()
+
+	written, copyErr := bufferpool.Copy(c.Writer, stream)
+	if copyErr != nil {
+		h.logDownloadFailure(c.Request.Context(), copyErr, metadata, "stream")
+		if written != 0 || c.Writer.Written() {
+			return
+		}
+		if errors.Is(copyErr, cache.ErrCacheNotFound) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
 			return
 		}
-		writeCacheError(c, err)
+		writeCacheError(c, copyErr)
+		return
 	}
+}
+
+type downloadMetadata struct {
+	cacheEntryID      string
+	storageLocationID string
+	representation    string
+}
+
+func downloadFailureMetadata(err error, fallbackCacheEntryID string) downloadMetadata {
+	metadata := downloadMetadata{cacheEntryID: fallbackCacheEntryID}
+	var downloadErr *cache.DownloadError
+	if errors.As(err, &downloadErr) {
+		metadata.cacheEntryID = downloadErr.CacheEntryID
+		metadata.storageLocationID = downloadErr.StorageLocationID
+		metadata.representation = downloadErr.Representation
+	}
+	return metadata
+}
+
+func (h *Handler) logDownloadFailure(ctx context.Context, err error, metadata downloadMetadata, stage string) {
+	event := h.logger.Error()
+	message := "download stream failed"
+	if isExpectedDownloadCancellation(ctx, err) {
+		event = h.logger.Debug()
+		message = "download stream canceled"
+	}
+	event.
+		Err(err).
+		Str("cache_entry_id", metadata.cacheEntryID).
+		Str("storage_location_id", metadata.storageLocationID).
+		Str("representation", metadata.representation).
+		Str("stage", stage).
+		Msg(message)
+}
+
+func isExpectedDownloadCancellation(ctx context.Context, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
 
 func isValidBase64BlockID(blockIDBase64 string) bool {

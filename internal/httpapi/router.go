@@ -41,6 +41,7 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 			EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
 			MergeConcurrency:      cfg.Cache.MergeConcurrency,
 			Lifecycle:             lifecycle,
+			Logger:                &logger,
 		})
 	}
 
@@ -50,6 +51,7 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 		DB:        deps.DB,
 		Storage:   deps.Storage,
 		Lifecycle: lifecycle,
+		Logger:    &logger,
 	})
 
 	router.GET("/", handler.Root)

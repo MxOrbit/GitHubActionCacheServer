@@ -53,6 +53,7 @@ func main() {
 		EnableDirectDownloads: cfg.Cache.EnableDirectDownloads,
 		MergeConcurrency:      cfg.Cache.MergeConcurrency,
 		Lifecycle:             lifecycleService,
+		Logger:                &logger,
 	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
@@ -62,6 +63,7 @@ func main() {
 		Storage:   storageAdapter,
 		Config:    cfg.Cleanup,
 		Lifecycle: lifecycleService,
+		Logger:    &logger,
 	}), logger).Start(cleanupCtx)
 
 	server := &http.Server{
