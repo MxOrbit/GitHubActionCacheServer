@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -84,6 +85,63 @@ func TestFilesystemInventorySeparatesLogicalRepresentationsFromPhysicalBytes(t *
 	require.NoError(t, err)
 	require.Equal(t, int64(11), metadata.SizeBytes)
 	require.False(t, metadata.ModifiedAt.IsZero())
+}
+
+func TestFilesystemFolderMetadataIncludesNestedDirectoryActivity(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	folderPath := filepath.Join(adapter.root, "folder")
+	blocksPath := filepath.Join(folderPath, "blocks")
+	require.NoError(t, os.MkdirAll(blocksPath, 0o755))
+	objectPath := filepath.Join(blocksPath, "old-block")
+	require.NoError(t, os.WriteFile(objectPath, []byte("data"), 0o644))
+
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	recent := time.Now().Add(-time.Hour).Truncate(time.Second)
+	require.NoError(t, os.Chtimes(objectPath, old, old))
+	require.NoError(t, os.Chtimes(folderPath, old, old))
+	require.NoError(t, os.Chtimes(blocksPath, recent, recent))
+
+	contents, err := adapter.InspectFolder(ctx, "folder")
+	require.NoError(t, err)
+	require.True(t, contents.Exists)
+	require.WithinDuration(t, recent, contents.NewestModifiedAt, time.Second)
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	folder, ok := inventory.Folder("folder")
+	require.True(t, ok)
+	require.WithinDuration(t, recent, folder.NewestModifiedAt, time.Second)
+}
+
+func TestFilesystemFolderMetadataDistinguishesEmptyAndMissingFolders(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	emptyPath := filepath.Join(adapter.root, "empty")
+	require.NoError(t, os.MkdirAll(emptyPath, 0o755))
+	modifiedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	require.NoError(t, os.Chtimes(emptyPath, modifiedAt, modifiedAt))
+
+	empty, err := adapter.InspectFolder(ctx, "empty")
+	require.NoError(t, err)
+	require.True(t, empty.Exists)
+	require.Zero(t, empty.ObjectCount)
+	require.WithinDuration(t, modifiedAt, empty.NewestModifiedAt, time.Second)
+
+	missing, err := adapter.InspectFolder(ctx, "missing")
+	require.NoError(t, err)
+	require.False(t, missing.Exists)
+	require.True(t, missing.NewestModifiedAt.IsZero())
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	emptyFolder, ok := inventory.Folder("empty")
+	require.True(t, ok)
+	require.WithinDuration(t, modifiedAt, emptyFolder.NewestModifiedAt, time.Second)
 }
 
 func TestLogicalIndexedSizeRejectsZeroPartLegacyLocation(t *testing.T) {

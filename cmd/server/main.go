@@ -82,7 +82,7 @@ func main() {
 		Config:    cfg.Cleanup,
 		Lifecycle: lifecycleService,
 		Logger:    &logger,
-	}), logger).Start(cleanupCtx)
+	}), logger, storageSizeReady).Start(cleanupCtx)
 
 	server := &http.Server{
 		Addr: cfg.Server.Addr,

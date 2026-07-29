@@ -347,7 +347,12 @@ func (a *S3Adapter) InspectFolder(ctx context.Context, folderName string) (Folde
 	if err != nil {
 		return FolderContents{}, err
 	}
-	return newFolderContents(folderName, objects)
+	contents, err := newFolderContents(folderName, objects)
+	if err != nil {
+		return FolderContents{}, err
+	}
+	contents.Exists = len(objects) > 0
+	return contents, nil
 }
 
 func (a *S3Adapter) Inventory(ctx context.Context) (Inventory, error) {

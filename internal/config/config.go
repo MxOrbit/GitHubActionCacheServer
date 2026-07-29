@@ -23,6 +23,7 @@ const (
 	DefaultS3UploadConcurrency       = 1
 	DefaultS3MultipartAbortTimeout   = 30 * time.Second
 	DefaultFilesystemMaxUsagePercent = 90
+	DefaultOrphanedStorageGraceHours = 24
 )
 
 type Config struct {
@@ -98,8 +99,9 @@ type ManagementConfig struct {
 }
 
 type CleanupConfig struct {
-	Disabled           bool
-	CacheOlderThanDays int
+	Disabled                   bool
+	CacheOlderThanDays         int
+	OrphanedStorageGracePeriod time.Duration
 }
 
 func Load() (Config, error) {
@@ -112,6 +114,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	filesystemMaxUsagePercent, err := percentageEnv("CACHE_FILESYSTEM_MAX_USAGE_PERCENT", DefaultFilesystemMaxUsagePercent)
+	if err != nil {
+		return Config{}, err
+	}
+	orphanedStorageGracePeriod, err := positiveHoursEnv("ORPHANED_STORAGE_GRACE_PERIOD_HOURS", DefaultOrphanedStorageGraceHours)
 	if err != nil {
 		return Config{}, err
 	}
@@ -178,8 +184,9 @@ func Load() (Config, error) {
 			APIKey: tools.EnvOrDefault("MANAGEMENT_API_KEY", ""),
 		},
 		Cleanup: CleanupConfig{
-			Disabled:           tools.ParseBool(tools.EnvOrDefault("DISABLE_CLEANUP_JOBS", "false")),
-			CacheOlderThanDays: tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
+			Disabled:                   tools.ParseBool(tools.EnvOrDefault("DISABLE_CLEANUP_JOBS", "false")),
+			CacheOlderThanDays:         tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
+			OrphanedStorageGracePeriod: orphanedStorageGracePeriod,
 		},
 		Debug: tools.ParseBool(tools.EnvOrDefault("DEBUG", "false")),
 	}, nil
@@ -234,6 +241,19 @@ func percentageEnv(key string, fallback float64) (float64, error) {
 		return 0, fmt.Errorf("%s must be a number greater than 0 and at most 100: %q", key, raw)
 	}
 	return value, nil
+}
+
+func positiveHoursEnv(key string, fallback int64) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		raw = strconv.FormatInt(fallback, 10)
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	maximumHours := int64(math.MaxInt64 / int64(time.Hour))
+	if err != nil || value < 1 || value > maximumHours {
+		return 0, fmt.Errorf("%s must be a positive integer number of hours: %q", key, raw)
+	}
+	return time.Duration(value) * time.Hour, nil
 }
 
 func positiveDurationEnv(key string, fallback time.Duration) time.Duration {

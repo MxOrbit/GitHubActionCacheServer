@@ -209,6 +209,7 @@ func (a *FilesystemAdapter) InspectFolder(ctx context.Context, folderName string
 	}
 
 	objects := make([]ObjectMetadata, 0)
+	newestModifiedAt := info.ModTime()
 	err = filepath.WalkDir(path, func(currentPath string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -216,12 +217,16 @@ func (a *FilesystemAdapter) InspectFolder(ctx context.Context, folderName string
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if currentPath == path || entry.IsDir() {
+		if currentPath == path {
 			return nil
 		}
 		entryInfo, err := entry.Info()
 		if err != nil {
 			return err
+		}
+		if entry.IsDir() {
+			newestModifiedAt = newestTime(newestModifiedAt, entryInfo.ModTime())
+			return nil
 		}
 		relativeName, err := filepath.Rel(path, currentPath)
 		if err != nil {
@@ -237,7 +242,13 @@ func (a *FilesystemAdapter) InspectFolder(ctx context.Context, folderName string
 	if err != nil {
 		return FolderContents{}, fmt.Errorf("inspect folder %q: %w", folderName, err)
 	}
-	return newFolderContents(folderName, objects)
+	contents, err := newFolderContents(folderName, objects)
+	if err != nil {
+		return FolderContents{}, err
+	}
+	contents.Exists = true
+	contents.NewestModifiedAt = newestTime(contents.NewestModifiedAt, newestModifiedAt)
+	return contents, nil
 }
 
 func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
@@ -252,11 +263,11 @@ func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
 			return Inventory{}, err
 		}
 		if entry.IsDir() {
-			builder.ensureFolder(entry.Name())
 			contents, err := a.InspectFolder(ctx, entry.Name())
 			if err != nil {
 				return Inventory{}, err
 			}
+			builder.ensureFolder(entry.Name(), contents.NewestModifiedAt)
 			for _, object := range contents.Objects {
 				object.Name = entry.Name() + "/" + object.Name
 				if err := builder.addObject(object); err != nil {

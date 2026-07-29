@@ -37,6 +37,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("MANAGEMENT_API_KEY", "")
 	t.Setenv("DISABLE_CLEANUP_JOBS", "")
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "")
+	t.Setenv("ORPHANED_STORAGE_GRACE_PERIOD_HOURS", "")
 	t.Setenv("DEBUG", "")
 
 	cfg, err := Load()
@@ -68,6 +69,7 @@ func TestLoadDefaults(t *testing.T) {
 	require.Empty(t, cfg.Management.APIKey)
 	require.False(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 90, cfg.Cleanup.CacheOlderThanDays)
+	require.Equal(t, 24*time.Hour, cfg.Cleanup.OrphanedStorageGracePeriod)
 	require.False(t, cfg.Debug)
 }
 
@@ -98,6 +100,7 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("MANAGEMENT_API_KEY", "management-secret")
 	t.Setenv("DISABLE_CLEANUP_JOBS", "true")
 	t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", "30")
+	t.Setenv("ORPHANED_STORAGE_GRACE_PERIOD_HOURS", "48")
 	t.Setenv("DEBUG", "true")
 
 	cfg, err := Load()
@@ -130,6 +133,7 @@ func TestLoadFromEnv(t *testing.T) {
 	require.Equal(t, "management-secret", cfg.Management.APIKey)
 	require.True(t, cfg.Cleanup.Disabled)
 	require.Equal(t, 30, cfg.Cleanup.CacheOlderThanDays)
+	require.Equal(t, 48*time.Hour, cfg.Cleanup.OrphanedStorageGracePeriod)
 	require.True(t, cfg.Debug)
 }
 
@@ -246,6 +250,21 @@ func TestLoadRejectsInvalidCapacityConfiguration(t *testing.T) {
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.key)
 			require.Contains(t, err.Error(), tt.value)
+		})
+	}
+}
+
+func TestLoadRejectsInvalidOrphanedStorageGracePeriod(t *testing.T) {
+	for _, value := range []string{"0", "-1", "1.5", "forever", "2562048"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("ORPHANED_STORAGE_GRACE_PERIOD_HOURS", value)
+
+			cfg, err := Load()
+
+			require.Zero(t, cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "ORPHANED_STORAGE_GRACE_PERIOD_HOURS")
+			require.Contains(t, err.Error(), value)
 		})
 	}
 }

@@ -32,6 +32,7 @@ type ObjectMetadata struct {
 
 type FolderContents struct {
 	FolderName       string
+	Exists           bool
 	Objects          []ObjectMetadata
 	ObjectCount      int64
 	PhysicalBytes    int64
@@ -145,10 +146,14 @@ func newInventoryBuilder() *inventoryBuilder {
 	return &inventoryBuilder{folders: make(map[string]*FolderInventory)}
 }
 
-func (b *inventoryBuilder) ensureFolder(folderName string) {
-	if _, ok := b.folders[folderName]; !ok {
-		b.folders[folderName] = &FolderInventory{FolderName: folderName}
+func (b *inventoryBuilder) ensureFolder(folderName string, modifiedAt time.Time) {
+	folder := b.folders[folderName]
+	if folder == nil {
+		folder = &FolderInventory{FolderName: folderName}
+		b.folders[folderName] = folder
 	}
+	folder.NewestModifiedAt = newestTime(folder.NewestModifiedAt, modifiedAt)
+	b.newest = newestTime(b.newest, modifiedAt)
 }
 
 func (b *inventoryBuilder) addObject(object ObjectMetadata) error {

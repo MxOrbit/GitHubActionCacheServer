@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
@@ -351,6 +353,164 @@ func TestRunStorageLocationsDeletesOrphans(t *testing.T) {
 	require.Zero(t, locationCount)
 }
 
+func TestRunOrphanedStorageQueuesOnlyExpiredUnreferencedFolders(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	old := now.Add(-25 * time.Hour)
+	recent := now.Add(-23 * time.Hour)
+	for _, folderName := range []string{"old-orphan", "recent-orphan", "upload", "location", "pending"} {
+		require.NoError(t, filesystem.UploadStream(ctx, folderName+"/parts/0", bytes.NewBufferString("data")))
+	}
+
+	client.Upload.Create().
+		SetID(100).
+		SetKey("key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetCreatedAt(now.UnixMilli()).
+		SetFolderName("upload").
+		SaveX(ctx)
+	client.StorageLocation.Create().
+		SetID("location-id").
+		SetFolderName("location").
+		SetPartCount(1).
+		SaveX(ctx)
+	client.StorageDeletion.Create().
+		SetFolderName("pending/blocks").
+		SetCreatedAt(now.UnixMilli()).
+		SaveX(ctx)
+
+	adapter := newOrphanTestStorage(filesystem, map[string]time.Time{
+		"old-orphan":    old,
+		"recent-orphan": recent,
+		"upload":        old,
+		"location":      old,
+		"pending":       old,
+	})
+	service := NewService(Options{
+		DB:      client,
+		Storage: adapter,
+		Config: config.CleanupConfig{
+			OrphanedStorageGracePeriod: 24 * time.Hour,
+		},
+		Now: func() time.Time { return now },
+	})
+
+	queued, err := service.RunOrphanedStorage(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, queued)
+	require.Zero(t, adapter.inspectCount("upload"))
+	require.Zero(t, adapter.inspectCount("location"))
+	require.Zero(t, adapter.inspectCount("pending"))
+
+	task := client.StorageDeletion.Query().
+		Where(storagedeletion.FolderName("old-orphan")).
+		OnlyX(ctx)
+	contents, err := filesystem.InspectFolder(ctx, "old-orphan")
+	require.NoError(t, err)
+	require.True(t, contents.Exists, "orphan discovery must not delete storage inline")
+
+	require.NoError(t, service.processStorageDeletion(ctx, task))
+	contents, err = filesystem.InspectFolder(ctx, "old-orphan")
+	require.NoError(t, err)
+	require.False(t, contents.Exists)
+	require.Equal(t, 1, client.StorageDeletion.Query().CountX(ctx))
+}
+
+func TestRunOrphanedStorageRechecksRecentActivityAndDatabaseAuthorization(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	old := now.Add(-48 * time.Hour)
+	recent := now.Add(-time.Hour)
+	adapter := newOrphanTestStorage(filesystem, map[string]time.Time{
+		"became-authorized": old,
+		"recently-active":   old,
+	})
+	adapter.inspections["recently-active"] = storage.FolderContents{
+		FolderName:       "recently-active",
+		Exists:           true,
+		NewestModifiedAt: recent,
+	}
+	adapter.onInspect = func(folderName string) {
+		if folderName != "became-authorized" {
+			return
+		}
+		client.Upload.Create().
+			SetID(101).
+			SetKey("key").
+			SetVersion("version").
+			SetScope("scope").
+			SetRepoId("repo").
+			SetCreatedAt(now.UnixMilli()).
+			SetFolderName(folderName).
+			SaveX(ctx)
+	}
+	service := NewService(Options{
+		DB:      client,
+		Storage: adapter,
+		Config: config.CleanupConfig{
+			OrphanedStorageGracePeriod: 24 * time.Hour,
+		},
+		Now: func() time.Time { return now },
+	})
+
+	queued, err := service.RunOrphanedStorage(ctx)
+	require.NoError(t, err)
+	require.Zero(t, queued)
+	require.Zero(t, client.StorageDeletion.Query().CountX(ctx))
+	require.Equal(t, 1, client.Upload.Query().CountX(ctx))
+}
+
+func TestRunOrphanedStorageFailsClosedOnIncompleteInventory(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	require.NoError(t, filesystem.UploadStream(ctx, "orphan/parts/0", bytes.NewBufferString("data")))
+	adapter := newOrphanTestStorage(filesystem, map[string]time.Time{
+		"orphan": time.Now().Add(-48 * time.Hour),
+	})
+	adapter.inventoryErr = errors.New("incomplete inventory")
+	service := NewService(Options{
+		DB:      client,
+		Storage: adapter,
+		Config: config.CleanupConfig{
+			OrphanedStorageGracePeriod: 24 * time.Hour,
+		},
+	})
+
+	queued, err := service.RunOrphanedStorage(ctx)
+	require.ErrorContains(t, err, "incomplete inventory")
+	require.Zero(t, queued)
+	require.Zero(t, client.StorageDeletion.Query().CountX(ctx))
+	contents, inspectErr := filesystem.InspectFolder(ctx, "orphan")
+	require.NoError(t, inspectErr)
+	require.True(t, contents.Exists)
+}
+
+func TestRunOrphanedStorageAggregatesCandidateFailures(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	old := now.Add(-48 * time.Hour)
+	adapter := newOrphanTestStorage(filesystem, map[string]time.Time{
+		"broken": old,
+		"valid":  old,
+	})
+	adapter.inspectErrors["broken"] = errors.New("injected inspect failure")
+	service := NewService(Options{
+		DB:      client,
+		Storage: adapter,
+		Config: config.CleanupConfig{
+			OrphanedStorageGracePeriod: 24 * time.Hour,
+		},
+		Now: func() time.Time { return now },
+	})
+
+	queued, err := service.RunOrphanedStorage(ctx)
+	require.ErrorContains(t, err, "injected inspect failure")
+	require.Equal(t, 1, queued)
+	task := client.StorageDeletion.Query().OnlyX(ctx)
+	require.Equal(t, "valid", task.FolderName)
+}
+
 func TestRunPartsDeletesMergedParts(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
@@ -404,6 +564,61 @@ type failingDeleteStorage struct {
 
 func (*failingDeleteStorage) DeleteFolder(context.Context, string) error {
 	return errors.New("injected delete failure")
+}
+
+type orphanTestStorage struct {
+	storage.Adapter
+	inventory     storage.Inventory
+	inventoryErr  error
+	inspections   map[string]storage.FolderContents
+	inspectErrors map[string]error
+	onInspect     func(string)
+	mu            sync.Mutex
+	inspectCalls  map[string]int
+}
+
+func newOrphanTestStorage(adapter storage.Adapter, modifiedAtByFolder map[string]time.Time) *orphanTestStorage {
+	testStorage := &orphanTestStorage{
+		Adapter:       adapter,
+		inspections:   make(map[string]storage.FolderContents),
+		inspectErrors: make(map[string]error),
+		inspectCalls:  make(map[string]int),
+	}
+	for folderName, modifiedAt := range modifiedAtByFolder {
+		testStorage.inventory.Folders = append(testStorage.inventory.Folders, storage.FolderInventory{
+			FolderName:       folderName,
+			NewestModifiedAt: modifiedAt,
+		})
+		testStorage.inspections[folderName] = storage.FolderContents{
+			FolderName:       folderName,
+			Exists:           true,
+			NewestModifiedAt: modifiedAt,
+		}
+	}
+	return testStorage
+}
+
+func (s *orphanTestStorage) Inventory(context.Context) (storage.Inventory, error) {
+	return s.inventory, s.inventoryErr
+}
+
+func (s *orphanTestStorage) InspectFolder(_ context.Context, folderName string) (storage.FolderContents, error) {
+	s.mu.Lock()
+	s.inspectCalls[folderName]++
+	s.mu.Unlock()
+	if s.onInspect != nil {
+		s.onInspect(folderName)
+	}
+	if err := s.inspectErrors[folderName]; err != nil {
+		return storage.FolderContents{}, err
+	}
+	return s.inspections[folderName], nil
+}
+
+func (s *orphanTestStorage) inspectCount(folderName string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inspectCalls[folderName]
 }
 
 func createRetentionLocation(ctx context.Context, client *ent.Client, id string, lastDownloadedAt *int64, updatedAt int64) *ent.StorageLocation {
