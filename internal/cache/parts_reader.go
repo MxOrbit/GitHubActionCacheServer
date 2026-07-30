@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 )
@@ -14,6 +15,7 @@ type partsReadCloser struct {
 	folder    string
 	partCount int
 
+	mu      sync.Mutex
 	index   int
 	current io.ReadCloser
 	closed  bool
@@ -29,31 +31,15 @@ func newPartsReadCloser(ctx context.Context, storage storage.Adapter, folder str
 }
 
 func (r *partsReadCloser) Read(p []byte) (int, error) {
-	if r.closed {
-		return 0, io.ErrClosedPipe
-	}
-
 	for {
-		if r.current == nil {
-			if r.index >= r.partCount {
-				return 0, io.EOF
-			}
-
-			stream, err := r.storage.CreateDownloadStream(r.ctx, partObjectName(r.folder, r.index))
-			if err != nil {
-				if errors.Is(err, storage.ErrObjectNotFound) {
-					return 0, ErrCacheNotFound
-				}
-				return 0, err
-			}
-			r.current = stream
-			r.index++
+		stream, err := r.currentStream()
+		if err != nil {
+			return 0, err
 		}
 
-		n, err := r.current.Read(p)
+		n, err := stream.Read(p)
 		if err == io.EOF {
-			closeErr := r.current.Close()
-			r.current = nil
+			closeErr := r.finishPart(stream)
 			if n > 0 {
 				return n, nil
 			}
@@ -67,11 +53,66 @@ func (r *partsReadCloser) Read(p []byte) (int, error) {
 }
 
 func (r *partsReadCloser) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
 	r.closed = true
-	if r.current != nil {
-		err := r.current.Close()
-		r.current = nil
-		return err
+	stream := r.current
+	r.current = nil
+	r.mu.Unlock()
+
+	if stream != nil {
+		return stream.Close()
 	}
 	return nil
+}
+
+func (r *partsReadCloser) currentStream() (io.ReadCloser, error) {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, io.ErrClosedPipe
+	}
+	if r.current != nil {
+		stream := r.current
+		r.mu.Unlock()
+		return stream, nil
+	}
+	if r.index >= r.partCount {
+		r.mu.Unlock()
+		return nil, io.EOF
+	}
+	partIndex := r.index
+	r.mu.Unlock()
+
+	stream, err := r.storage.CreateDownloadStream(r.ctx, partObjectName(r.folder, partIndex))
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return nil, ErrCacheNotFound
+		}
+		return nil, err
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, errors.Join(io.ErrClosedPipe, stream.Close())
+	}
+	r.current = stream
+	r.index++
+	r.mu.Unlock()
+	return stream, nil
+}
+
+func (r *partsReadCloser) finishPart(stream io.ReadCloser) error {
+	r.mu.Lock()
+	if r.current != stream {
+		r.mu.Unlock()
+		return nil
+	}
+	r.current = nil
+	r.mu.Unlock()
+	return stream.Close()
 }
