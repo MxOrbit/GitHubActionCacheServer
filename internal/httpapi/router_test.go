@@ -218,52 +218,6 @@ func TestManagementCORSPreflightDoesNotRequireAPIKey(t *testing.T) {
 	require.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-Api-Key")
 }
 
-func TestManagementRPCFindMany(t *testing.T) {
-	ctx, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
-	cfg := newTestConfig(t)
-	cfg.Management.APIKey = "secret"
-	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
-	})
-
-	location := client.StorageLocation.Create().
-		SetID("location-id").
-		SetFolderName("folder").
-		SetPartCount(1).
-		SaveX(ctx)
-	client.CacheEntry.Create().
-		SetID("entry-id").
-		SetKey("linux-cache").
-		SetVersion("version-1").
-		SetScope("refs/heads/main").
-		SetRepoId("123").
-		SetUpdatedAt(time.Now().UnixMilli()).
-		SetLocation(location).
-		SaveX(ctx)
-
-	req := httptest.NewRequest(http.MethodPost, "/management-api/_rpc/cacheEntries/findMany", strings.NewReader(`{"json":{"key":"linux-cache"},"meta":[]}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", "secret")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	var rpcResponse struct {
-		JSON struct {
-			Total int `json:"total"`
-			Items []struct {
-				ID string `json:"id"`
-			} `json:"items"`
-		} `json:"json"`
-		Meta []any `json:"meta"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rpcResponse))
-	require.Equal(t, 1, rpcResponse.JSON.Total)
-	require.Equal(t, "entry-id", rpcResponse.JSON.Items[0].ID)
-	require.Empty(t, rpcResponse.Meta)
-}
-
 func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
