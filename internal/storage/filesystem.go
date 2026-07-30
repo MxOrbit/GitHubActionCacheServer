@@ -15,10 +15,15 @@ import (
 const filesystemUploadTempPrefix = ".upload-"
 
 type FilesystemAdapter struct {
-	root string
+	root       string
+	syncUpload func(*os.File) error
 }
 
 func NewFilesystemAdapter(root string) (*FilesystemAdapter, error) {
+	return newFilesystemAdapter(root, true)
+}
+
+func newFilesystemAdapter(root string, fsyncUploads bool) (*FilesystemAdapter, error) {
 	if root == "" {
 		return nil, fmt.Errorf("STORAGE_FILESYSTEM_PATH is required")
 	}
@@ -31,7 +36,11 @@ func NewFilesystemAdapter(root string) (*FilesystemAdapter, error) {
 		return nil, fmt.Errorf("create filesystem storage path: %w", err)
 	}
 
-	return &FilesystemAdapter{root: abs}, nil
+	adapter := &FilesystemAdapter{root: abs}
+	if fsyncUploads {
+		adapter.syncUpload = (*os.File).Sync
+	}
+	return adapter, nil
 }
 
 func (a *FilesystemAdapter) UploadStream(ctx context.Context, objectName string, stream io.Reader) error {
@@ -58,6 +67,12 @@ func (a *FilesystemAdapter) UploadStream(ctx context.Context, objectName string,
 	if _, err := bufferpool.Copy(file, contextReader{ctx: ctx, reader: stream}); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write object: %w", err)
+	}
+	if a.syncUpload != nil {
+		if err := a.syncUpload(file); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("sync temporary object: %w", err)
+		}
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close temporary object: %w", err)

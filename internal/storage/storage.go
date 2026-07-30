@@ -65,7 +65,7 @@ type FilesystemUsageAdapter interface {
 func NewAdapter(ctx context.Context, cfg config.StorageConfig) (Adapter, error) {
 	switch cfg.Driver {
 	case DriverFilesystem:
-		return NewFilesystemAdapter(cfg.FilesystemPath)
+		return newFilesystemAdapter(cfg.FilesystemPath, cfg.FilesystemFsync)
 	case DriverS3:
 		return NewS3Adapter(ctx, cfg)
 	default:

@@ -133,6 +133,7 @@ for authenticated TLS.
 |--------------------------------------|----------------------------|-----------------------------------------------------------------------------------------------------------------|
 | `STORAGE_DRIVER`                     | `filesystem`               | `filesystem` or `s3`.                                                                                           |
 | `STORAGE_FILESYSTEM_PATH`            | `.data/storage/filesystem` | Root directory for filesystem storage.                                                                          |
+| `STORAGE_FILESYSTEM_FSYNC`           | `true`                     | Sync filesystem upload contents before publishing them; disable only to trade crash durability for throughput.  |
 | `STORAGE_S3_BUCKET`                  | empty                      | S3 bucket name. Required for S3 storage.                                                                        |
 | `AWS_REGION`                         | `us-east-1`                | S3 region.                                                                                                      |
 | `AWS_ENDPOINT_URL`                   | empty                      | Custom S3-compatible endpoint, such as MinIO.                                                                   |

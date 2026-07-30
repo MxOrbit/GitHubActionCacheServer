@@ -77,7 +77,8 @@ type DBConfig struct {
 type StorageConfig struct {
 	Driver string
 
-	FilesystemPath string
+	FilesystemPath  string
+	FilesystemFsync bool
 
 	S3Bucket         string
 	S3Region         string
@@ -190,6 +191,7 @@ func Load() (Config, error) {
 		Storage: StorageConfig{
 			Driver:                          tools.EnvOrDefault("STORAGE_DRIVER", "filesystem"),
 			FilesystemPath:                  tools.EnvOrDefault("STORAGE_FILESYSTEM_PATH", ".data/storage/filesystem"),
+			FilesystemFsync:                 tools.ParseBool(tools.EnvOrDefault("STORAGE_FILESYSTEM_FSYNC", "true")),
 			S3Bucket:                        tools.EnvOrDefault("STORAGE_S3_BUCKET", ""),
 			S3Region:                        tools.EnvOrDefault("AWS_REGION", "us-east-1"),
 			S3EndpointURL:                   tools.EnvOrDefault("AWS_ENDPOINT_URL", ""),

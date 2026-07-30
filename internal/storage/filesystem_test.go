@@ -251,6 +251,32 @@ func TestFilesystemAdapterRemovesPartialFileAfterFailedUpload(t *testing.T) {
 	require.ErrorIs(t, err, ErrObjectNotFound)
 }
 
+func TestFilesystemAdapterDoesNotPublishObjectAfterFailedSync(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	syncErr := errors.New("sync failed")
+	adapter.syncUpload = func(*os.File) error { return syncErr }
+
+	err = adapter.UploadStream(ctx, "folder/parts/0", strings.NewReader("data"))
+	require.ErrorIs(t, err, syncErr)
+
+	entries, err := os.ReadDir(filepath.Join(adapter.root, "folder", "parts"))
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	_, err = adapter.CreateDownloadStream(ctx, "folder/parts/0")
+	require.ErrorIs(t, err, ErrObjectNotFound)
+}
+
+func TestFilesystemAdapterCanDisableUploadFsync(t *testing.T) {
+	adapter, err := newFilesystemAdapter(t.TempDir(), false)
+	require.NoError(t, err)
+	require.Nil(t, adapter.syncUpload)
+	require.NoError(t, adapter.UploadStream(context.Background(), "folder/object", strings.NewReader("data")))
+}
+
 func TestFilesystemAdapterRemovesTempFileAfterCanceledUpload(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	adapter, err := NewFilesystemAdapter(t.TempDir())
