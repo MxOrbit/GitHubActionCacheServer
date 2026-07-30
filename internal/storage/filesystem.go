@@ -67,7 +67,10 @@ func (a *FilesystemAdapter) UploadStream(ctx context.Context, objectName string,
 		}
 	}()
 
-	if _, err := bufferpool.Copy(file, contextReader{ctx: ctx, reader: stream}); err != nil {
+	// Hide *os.File.ReadFrom so io.CopyBuffer uses the pooled buffer instead of
+	// discarding it and allocating another buffer in the generic file fallback.
+	destination := struct{ io.Writer }{Writer: file}
+	if _, err := bufferpool.Copy(destination, contextReader{ctx: ctx, reader: stream}); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write object: %w", err)
 	}
