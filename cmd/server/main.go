@@ -39,6 +39,11 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("configuration load failed")
 	}
+	if cfg.Cache.DownloadURLSigningSecret == "" {
+		logger.Warn().
+			Str("environment_variable", "DOWNLOAD_URL_SIGNING_SECRET").
+			Msg("download URL signing secret is unset; using a random per-process key, so issued URLs will fail after restart or on another replica")
+	}
 
 	dbClient, err := db.OpenAndMigrate(logger.WithContext(context.Background()), cfg.DB)
 	if err != nil {
