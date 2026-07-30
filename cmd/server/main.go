@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -72,24 +73,37 @@ func main() {
 		Capacity:              capacityService,
 	})
 
-	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	defer cleanupCancel()
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+	defer backgroundCancel()
 	storageSizeReady := make(chan struct{})
-	go storagereconcile.Run(cleanupCtx, storagereconcile.Options{
-		DB:        dbClient,
-		Storage:   storageAdapter,
-		Lifecycle: lifecycleService,
-		Logger:    &logger,
-	}, storageSizeReady)
-	go capacityService.Run(cleanupCtx, storageSizeReady)
-	cleanup.NewRunner(cleanup.NewService(cleanup.Options{
+	var backgroundServices sync.WaitGroup
+	backgroundServices.Go(func() {
+		storagereconcile.Run(backgroundCtx, storagereconcile.Options{
+			DB:        dbClient,
+			Storage:   storageAdapter,
+			Lifecycle: lifecycleService,
+			Logger:    &logger,
+		}, storageSizeReady)
+	})
+	backgroundServices.Go(func() {
+		capacityService.Run(backgroundCtx, storageSizeReady)
+	})
+	cleanupRunner := cleanup.NewRunner(cleanup.NewService(cleanup.Options{
 		DB:        dbClient,
 		Storage:   storageAdapter,
 		Config:    cfg.Cleanup,
 		Lifecycle: lifecycleService,
 		Logger:    &logger,
 		Metrics:   metricsRegistry,
-	}), logger, storageSizeReady).Start(cleanupCtx)
+	}), logger, storageSizeReady)
+	backgroundServices.Go(func() {
+		cleanupRunner.Run(backgroundCtx)
+	})
+	backgroundDone := make(chan struct{})
+	go func() {
+		backgroundServices.Wait()
+		close(backgroundDone)
+	}()
 
 	server := newHTTPServer(cfg.Server.Addr, httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
 		DB:        dbClient,
@@ -108,17 +122,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var serveErr error
+	serveResultReceived := false
 	select {
 	case <-ctx.Done():
 		logger.Info().Dur("timeout", shutdownTimeout).Msg("shutdown signal received")
-	case serveErr := <-errCh:
-		if errors.Is(serveErr, http.ErrServerClosed) {
-			return
+	case serveErr = <-errCh:
+		serveResultReceived = true
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			logger.Fatal().Err(serveErr).Msg("server failed")
 		}
-		logger.Fatal().Err(serveErr).Msg("server failed")
 	}
 
-	cleanupCancel()
+	backgroundCancel()
 	cacheService.StopAcceptingMerges()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -134,16 +150,28 @@ func main() {
 		mergeErrCh <- cacheService.WaitForMerges(shutdownCtx)
 	}()
 
+	backgroundErrCh := make(chan error, 1)
+	go func() {
+		backgroundErrCh <- waitForBackgroundServices(shutdownCtx, backgroundDone)
+	}()
+
 	shutdownErr := <-shutdownErrCh
 	mergeErr := <-mergeErrCh
+	backgroundErr := <-backgroundErrCh
 	if shutdownErr != nil {
 		logger.Fatal().Err(shutdownErr).Msg("graceful shutdown failed")
 	}
 	if mergeErr != nil {
 		logger.Fatal().Err(mergeErr).Msg("waiting for in-flight merges failed")
 	}
+	if backgroundErr != nil {
+		logger.Fatal().Err(backgroundErr).Msg("waiting for background services failed")
+	}
 
-	if serveErr := <-errCh; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+	if !serveResultReceived {
+		serveErr = <-errCh
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		logger.Fatal().Err(serveErr).Msg("server stopped with error")
 	}
 
@@ -156,5 +184,19 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		Handler:           handler,
 		ReadHeaderTimeout: serverReadHeaderTimeout,
 		IdleTimeout:       serverIdleTimeout,
+	}
+}
+
+func waitForBackgroundServices(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return nil
+		default:
+			return ctx.Err()
+		}
 	}
 }

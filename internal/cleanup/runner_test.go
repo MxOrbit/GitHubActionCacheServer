@@ -85,3 +85,46 @@ func TestOrphanedStoragePeriodicFallbackDoesNotRequireReadiness(t *testing.T) {
 		t.Fatal("orphaned storage scheduler did not stop")
 	}
 }
+
+func TestPeriodicRunnerDrainsInFlightJobAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	runner := &Runner{logger: zerolog.Nop()}
+	t.Cleanup(cancel)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	go func() {
+		defer close(done)
+		runner.runPeriodically(ctx, "cleanup:test", time.Millisecond, func(context.Context) (int, error) {
+			started <- struct{}{}
+			<-release
+			return 1, nil
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup job did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("cleanup scheduler returned before its in-flight job")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup scheduler did not stop after its in-flight job returned")
+	}
+}

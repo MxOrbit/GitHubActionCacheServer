@@ -3,6 +3,7 @@ package cleanup
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -34,27 +35,43 @@ func NewRunner(service *Service, logger zerolog.Logger, storageReady <-chan stru
 	}
 }
 
-func (r *Runner) Start(ctx context.Context) {
+func (r *Runner) Run(ctx context.Context) {
 	if r.service.config.Disabled {
 		r.logger.Info().Msg("cleanup jobs disabled")
 		return
 	}
 
-	go r.runPeriodically(ctx, "cleanup:uploads", uploadsInterval, r.service.RunUploads)
-	go r.runPeriodically(ctx, "cleanup:storage-deletions", storageDeletionsInterval, r.service.RunStorageDeletions)
-	go r.runPeriodically(ctx, "cleanup:pending-storage-locations", pendingLocationsInterval, r.service.RunPendingStorageLocations)
-	go r.runPeriodically(ctx, "cleanup:reader-leases", readerLeasesInterval, r.service.RunReaderLeases)
-	go r.runPeriodically(ctx, "cleanup:cache-entries", cacheEntriesInterval, r.service.RunCacheEntries)
-	go r.runPeriodically(ctx, "cleanup:storage-locations", storageLocationsInterval, r.service.RunStorageLocations)
-	go r.runAfterStorageReadyAndPeriodically(
-		ctx,
-		"cleanup:orphaned-storage",
-		r.storageReady,
-		orphanedStorageReadyDelay,
-		orphanedStorageInterval,
-		r.service.RunOrphanedStorage,
-	)
-	go r.runPeriodically(ctx, "cleanup:parts", partsInterval, r.service.RunParts)
+	periodicJobs := []struct {
+		name     string
+		interval time.Duration
+		run      func(context.Context) (int, error)
+	}{
+		{name: "cleanup:uploads", interval: uploadsInterval, run: r.service.RunUploads},
+		{name: "cleanup:storage-deletions", interval: storageDeletionsInterval, run: r.service.RunStorageDeletions},
+		{name: "cleanup:pending-storage-locations", interval: pendingLocationsInterval, run: r.service.RunPendingStorageLocations},
+		{name: "cleanup:reader-leases", interval: readerLeasesInterval, run: r.service.RunReaderLeases},
+		{name: "cleanup:cache-entries", interval: cacheEntriesInterval, run: r.service.RunCacheEntries},
+		{name: "cleanup:storage-locations", interval: storageLocationsInterval, run: r.service.RunStorageLocations},
+		{name: "cleanup:parts", interval: partsInterval, run: r.service.RunParts},
+	}
+
+	var schedulers sync.WaitGroup
+	for _, job := range periodicJobs {
+		schedulers.Go(func() {
+			r.runPeriodically(ctx, job.name, job.interval, job.run)
+		})
+	}
+	schedulers.Go(func() {
+		r.runAfterStorageReadyAndPeriodically(
+			ctx,
+			"cleanup:orphaned-storage",
+			r.storageReady,
+			orphanedStorageReadyDelay,
+			orphanedStorageInterval,
+			r.service.RunOrphanedStorage,
+		)
+	})
+	schedulers.Wait()
 }
 
 func (r *Runner) runPeriodically(ctx context.Context, name string, interval time.Duration, run func(context.Context) (int, error)) {
