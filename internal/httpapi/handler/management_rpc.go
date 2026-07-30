@@ -14,6 +14,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/managementauth"
 	"github.com/gin-gonic/gin"
 )
 
@@ -35,7 +36,7 @@ func (h *Handler) ManagementRPC(c *gin.Context) {
 		managementRPCErrorResponse(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "management api is disabled", true)
 		return
 	}
-	if c.GetHeader("x-api-key") != h.cfg.Management.APIKey {
+	if !managementauth.Matches(h.cfg.Management.APIKey, c.GetHeader("x-api-key")) {
 		managementRPCErrorResponse(c, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized", true)
 		return
 	}

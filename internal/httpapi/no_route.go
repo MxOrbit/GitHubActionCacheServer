@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/managementauth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/middleware"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	"github.com/gin-gonic/gin"
@@ -37,7 +38,7 @@ func writeManagementNoRoute(c *gin.Context, apiKey string) {
 		response.JSON(c, response.Error(http.StatusServiceUnavailable, "management api is disabled"))
 		return
 	}
-	if c.GetHeader("x-api-key") != apiKey {
+	if !managementauth.Matches(apiKey, c.GetHeader("x-api-key")) {
 		response.JSON(c, response.Error(http.StatusUnauthorized, "unauthorized"))
 		return
 	}
