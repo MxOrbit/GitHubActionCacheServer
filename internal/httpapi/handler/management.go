@@ -185,17 +185,20 @@ func (h *Handler) findManagementCacheEntry(c *gin.Context, key string, version s
 }
 
 func (h *Handler) listManagementCacheEntries(c *gin.Context, filters []entpredicate.CacheEntry, page int, itemsPerPage int) (cacheEntryListResponse, error) {
+	total, err := h.db.CacheEntry.Query().Where(filters...).Count(c.Request.Context())
+	if err != nil {
+		return cacheEntryListResponse{}, err
+	}
+	if total == 0 || page > 1+(total-1)/itemsPerPage {
+		return cacheEntryListResponse{Total: total, Items: []*ent.CacheEntry{}}, nil
+	}
+
 	query := h.db.CacheEntry.Query().
 		Where(filters...).
 		Order(cacheentry.ByUpdatedAt(sql.OrderDesc())).
 		Limit(itemsPerPage).
 		Offset((page - 1) * itemsPerPage)
 	items, err := query.All(c.Request.Context())
-	if err != nil {
-		return cacheEntryListResponse{}, err
-	}
-
-	total, err := h.db.CacheEntry.Query().Where(filters...).Count(c.Request.Context())
 	if err != nil {
 		return cacheEntryListResponse{}, err
 	}

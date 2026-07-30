@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -232,6 +234,32 @@ func TestManagementListPaginationCoercion(t *testing.T) {
 				require.Equal(t, 3, response.Total)
 				require.Equal(t, []string{"middle"}, managementCacheEntryResponseIDs(response))
 			}
+		})
+	}
+}
+
+func TestManagementListPageBeyondLastReturnsEmpty(t *testing.T) {
+	t.Setenv("MANAGEMENT_API_KEY", "secret")
+
+	for _, rpc := range []bool{false, true} {
+		transport := "http"
+		if rpc {
+			transport = "rpc"
+		}
+		t.Run(transport, func(t *testing.T) {
+			app := newTestApp(t)
+			createManagementCacheEntry(app, "entry", "key", "version", "scope", "repo", 100)
+
+			rec := managementCacheEntryListRequest(t, app.router, rpc, map[string]any{
+				"page":         strconv.Itoa(math.MaxInt),
+				"itemsPerPage": "100",
+			})
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			response := decodeManagementCacheEntryList(t, rec, rpc)
+			require.Equal(t, 1, response.Total)
+			require.NotNil(t, response.Items)
+			require.Empty(t, response.Items)
 		})
 	}
 }
