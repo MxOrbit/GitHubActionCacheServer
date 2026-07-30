@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -538,6 +540,94 @@ func TestRunOrphanedStorageAggregatesCandidateFailures(t *testing.T) {
 	require.Equal(t, 1, queued)
 	task := client.StorageDeletion.Query().OnlyX(ctx)
 	require.Equal(t, "valid", task.FolderName)
+}
+
+func TestRunOrphanedStorageSweepsExpiredTemporaryUploadsFromLocationFolder(t *testing.T) {
+	ctx, client := testutil.NewSQLiteClient(t)
+	root := t.TempDir()
+	filesystem, err := storage.NewFilesystemAdapter(root)
+	require.NoError(t, err)
+	now := time.Now().Truncate(time.Second)
+
+	require.NoError(t, filesystem.UploadStream(ctx, "location/parts/0", bytes.NewBufferString("committed")))
+	partsPath := filepath.Join(root, "location", "parts")
+	stalePath := filepath.Join(partsPath, ".upload-stale")
+	recentPath := filepath.Join(partsPath, ".upload-recent")
+	require.NoError(t, os.WriteFile(stalePath, []byte("stale"), 0o644))
+	require.NoError(t, os.WriteFile(recentPath, []byte("recent"), 0o644))
+	stale := now.Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(stalePath, stale, stale))
+
+	client.StorageLocation.Create().
+		SetID("location-id").
+		SetFolderName("location").
+		SetPartCount(1).
+		SaveX(ctx)
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config: config.CleanupConfig{
+			OrphanedStorageGracePeriod: 24 * time.Hour,
+		},
+		Now: func() time.Time { return now },
+	})
+
+	queued, err := service.RunOrphanedStorage(ctx)
+	require.NoError(t, err)
+	require.Zero(t, queued)
+	require.NoFileExists(t, stalePath)
+	require.FileExists(t, recentPath)
+	committed, err := os.ReadFile(filepath.Join(partsPath, "0"))
+	require.NoError(t, err)
+	require.Equal(t, "committed", string(committed))
+}
+
+func TestRunOrphanedStorageRetainsStalledTemporaryUploadInActiveFolder(t *testing.T) {
+	ctx, client := testutil.NewSQLiteClient(t)
+	root := t.TempDir()
+	filesystem, err := storage.NewFilesystemAdapter(root)
+	require.NoError(t, err)
+	now := time.Now().Truncate(time.Second)
+
+	require.NoError(t, filesystem.UploadStream(ctx, "shared/parts/0", bytes.NewBufferString("committed")))
+	stalledPath := filepath.Join(root, "shared", "parts", ".upload-stalled")
+	require.NoError(t, os.WriteFile(stalledPath, []byte("still open elsewhere"), 0o644))
+	stalled := now.Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(stalledPath, stalled, stalled))
+	stalledFile, err := os.OpenFile(stalledPath, os.O_WRONLY|os.O_APPEND, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, stalledFile.Close()) })
+
+	client.StorageLocation.Create().
+		SetID("location-id").
+		SetFolderName("shared").
+		SetPartCount(1).
+		SaveX(ctx)
+	client.Upload.Create().
+		SetID(100).
+		SetKey("key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetCreatedAt(now.UnixMilli()).
+		SetFolderName("shared").
+		SaveX(ctx)
+	service := NewService(Options{
+		DB:      client,
+		Storage: filesystem,
+		Config: config.CleanupConfig{
+			OrphanedStorageGracePeriod: 24 * time.Hour,
+		},
+		Now: func() time.Time { return now },
+	})
+
+	queued, err := service.RunOrphanedStorage(ctx)
+	require.NoError(t, err)
+	require.Zero(t, queued)
+	require.FileExists(t, stalledPath)
+	committed, err := os.ReadFile(filepath.Join(root, "shared", "parts", "0"))
+	require.NoError(t, err)
+	require.Equal(t, "committed", string(committed))
 }
 
 func TestRunPartsDeletesMergedParts(t *testing.T) {

@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 )
@@ -15,8 +17,9 @@ import (
 const filesystemUploadTempPrefix = ".upload-"
 
 type FilesystemAdapter struct {
-	root       string
-	syncUpload func(*os.File) error
+	root                  string
+	syncUpload            func(*os.File) error
+	removeTemporaryUpload func(string) error
 }
 
 func NewFilesystemAdapter(root string) (*FilesystemAdapter, error) {
@@ -36,7 +39,7 @@ func newFilesystemAdapter(root string, fsyncUploads bool) (*FilesystemAdapter, e
 		return nil, fmt.Errorf("create filesystem storage path: %w", err)
 	}
 
-	adapter := &FilesystemAdapter{root: abs}
+	adapter := &FilesystemAdapter{root: abs, removeTemporaryUpload: os.Remove}
 	if fsyncUploads {
 		adapter.syncUpload = (*os.File).Sync
 	}
@@ -273,6 +276,7 @@ func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
 	}
 
 	builder := newInventoryBuilder()
+	temporaryUploads := make([]ObjectMetadata, 0)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return Inventory{}, err
@@ -285,6 +289,9 @@ func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
 			builder.ensureFolder(entry.Name(), contents.NewestModifiedAt)
 			for _, object := range contents.Objects {
 				object.Name = entry.Name() + "/" + object.Name
+				if isFilesystemTemporaryUpload(object.Name) {
+					temporaryUploads = append(temporaryUploads, object)
+				}
 				if err := builder.addObject(object); err != nil {
 					return Inventory{}, err
 				}
@@ -296,15 +303,77 @@ func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
 		if err != nil {
 			return Inventory{}, fmt.Errorf("inspect storage root object %q: %w", entry.Name(), err)
 		}
-		if err := builder.addObject(ObjectMetadata{
+		object := ObjectMetadata{
 			Name:       entry.Name(),
 			SizeBytes:  info.Size(),
 			ModifiedAt: info.ModTime(),
-		}); err != nil {
+		}
+		if isFilesystemTemporaryUpload(object.Name) {
+			temporaryUploads = append(temporaryUploads, object)
+		}
+		if err := builder.addObject(object); err != nil {
 			return Inventory{}, err
 		}
 	}
-	return builder.build(), nil
+	inventory := builder.build()
+	sort.Slice(temporaryUploads, func(i, j int) bool {
+		return temporaryUploads[i].Name < temporaryUploads[j].Name
+	})
+	inventory.TemporaryUploads = temporaryUploads
+	return inventory, nil
+}
+
+func (a *FilesystemAdapter) CleanupTemporaryUploads(ctx context.Context, candidates []ObjectMetadata, cutoff time.Time) (int, error) {
+	deleted := 0
+	var cleanupErrors []error
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+			return deleted, errors.Join(cleanupErrors...)
+		}
+		if !isFilesystemTemporaryUpload(candidate.Name) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("refuse to clean non-temporary object %q", candidate.Name))
+			continue
+		}
+
+		objectPath, err := a.safePath(candidate.Name)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("resolve temporary upload %q: %w", candidate.Name, err))
+			continue
+		}
+		info, err := os.Lstat(objectPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("inspect temporary upload %q: %w", candidate.Name, err))
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("temporary upload %q is not a regular file", candidate.Name))
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := a.removeTemporaryUpload(objectPath); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("delete temporary upload %q: %w", candidate.Name, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errors.Join(cleanupErrors...)
+}
+
+func isFilesystemTemporaryUpload(objectName string) bool {
+	baseName := objectName
+	if separator := strings.LastIndexByte(baseName, '/'); separator >= 0 {
+		baseName = baseName[separator+1:]
+	}
+	return strings.HasPrefix(baseName, filesystemUploadTempPrefix)
 }
 
 func (a *FilesystemAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {

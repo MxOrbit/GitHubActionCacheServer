@@ -62,6 +62,10 @@ type FilesystemUsageAdapter interface {
 	FilesystemUsage(ctx context.Context) (FilesystemUsage, error)
 }
 
+type TemporaryUploadCleaner interface {
+	CleanupTemporaryUploads(ctx context.Context, candidates []ObjectMetadata, cutoff time.Time) (int, error)
+}
+
 func NewAdapter(ctx context.Context, cfg config.StorageConfig) (Adapter, error) {
 	switch cfg.Driver {
 	case DriverFilesystem:

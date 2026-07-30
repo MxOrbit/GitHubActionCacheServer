@@ -87,6 +87,114 @@ func TestFilesystemInventorySeparatesLogicalRepresentationsFromPhysicalBytes(t *
 	require.False(t, metadata.ModifiedAt.IsZero())
 }
 
+func TestFilesystemInventoryCollectsCompleteTemporaryUploadNames(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	partsPath := filepath.Join(adapter.root, "location", "parts")
+	require.NoError(t, os.MkdirAll(partsPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(partsPath, filesystemUploadTempPrefix+"stale"), []byte("temporary"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(partsPath, "0"), []byte("committed"), 0o644))
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	require.Len(t, inventory.TemporaryUploads, 1)
+	require.Equal(t, "location/parts/"+filesystemUploadTempPrefix+"stale", inventory.TemporaryUploads[0].Name)
+	require.Equal(t, int64(len("temporary")), inventory.TemporaryUploads[0].SizeBytes)
+	require.False(t, inventory.TemporaryUploads[0].ModifiedAt.IsZero())
+	require.Equal(t, int64(2), inventory.ObjectCount)
+	require.Equal(t, int64(len("temporary")+len("committed")), inventory.PhysicalBytes)
+}
+
+func TestFilesystemCleanupTemporaryUploadsRechecksCandidatesAndContinuesAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	partsPath := filepath.Join(adapter.root, "location", "parts")
+	require.NoError(t, os.MkdirAll(partsPath, 0o755))
+	oldPath := filepath.Join(partsPath, filesystemUploadTempPrefix+"old")
+	recentPath := filepath.Join(partsPath, filesystemUploadTempPrefix+"recent")
+	vanishedPath := filepath.Join(partsPath, filesystemUploadTempPrefix+"vanished")
+	committedPath := filepath.Join(partsPath, "0")
+	for _, objectPath := range []string{oldPath, recentPath, vanishedPath, committedPath} {
+		require.NoError(t, os.WriteFile(objectPath, []byte("data"), 0o644))
+	}
+
+	now := time.Now().Truncate(time.Second)
+	old := now.Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(oldPath, old, old))
+	require.NoError(t, os.Chtimes(vanishedPath, old, old))
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	require.Len(t, inventory.TemporaryUploads, 3)
+	require.NoError(t, os.Remove(vanishedPath))
+
+	candidates := append([]ObjectMetadata{{
+		Name:       "../" + filesystemUploadTempPrefix + "invalid",
+		ModifiedAt: old,
+	}}, inventory.TemporaryUploads...)
+	deleted, err := adapter.CleanupTemporaryUploads(ctx, candidates, now.Add(-24*time.Hour))
+	require.ErrorContains(t, err, "resolve temporary upload")
+	require.Equal(t, 1, deleted)
+	require.NoFileExists(t, oldPath)
+	require.FileExists(t, recentPath)
+	require.NoFileExists(t, vanishedPath)
+	require.FileExists(t, committedPath)
+}
+
+func TestFilesystemCleanupTemporaryUploadsToleratesConcurrentRename(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	partsPath := filepath.Join(adapter.root, "location", "parts")
+	require.NoError(t, os.MkdirAll(partsPath, 0o755))
+	temporaryPath := filepath.Join(partsPath, filesystemUploadTempPrefix+"committing")
+	committedPath := filepath.Join(partsPath, "0")
+	require.NoError(t, os.WriteFile(temporaryPath, []byte("data"), 0o644))
+	old := time.Now().Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(temporaryPath, old, old))
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	require.Len(t, inventory.TemporaryUploads, 1)
+	require.NoError(t, os.Rename(temporaryPath, committedPath))
+
+	deleted, err := adapter.CleanupTemporaryUploads(ctx, inventory.TemporaryUploads, time.Now().Add(-24*time.Hour))
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.FileExists(t, committedPath)
+}
+
+func TestFilesystemCleanupTemporaryUploadsToleratesConcurrentRemoval(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	partsPath := filepath.Join(adapter.root, "location", "parts")
+	require.NoError(t, os.MkdirAll(partsPath, 0o755))
+	temporaryPath := filepath.Join(partsPath, filesystemUploadTempPrefix+"removed")
+	require.NoError(t, os.WriteFile(temporaryPath, []byte("data"), 0o644))
+	old := time.Now().Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(temporaryPath, old, old))
+
+	inventory, err := adapter.Inventory(ctx)
+	require.NoError(t, err)
+	require.Len(t, inventory.TemporaryUploads, 1)
+	adapter.removeTemporaryUpload = func(objectPath string) error {
+		require.NoError(t, os.Remove(objectPath))
+		return os.ErrNotExist
+	}
+
+	deleted, err := adapter.CleanupTemporaryUploads(ctx, inventory.TemporaryUploads, time.Now().Add(-24*time.Hour))
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+	require.NoFileExists(t, temporaryPath)
+}
+
 func TestFilesystemFolderMetadataIncludesNestedDirectoryActivity(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())

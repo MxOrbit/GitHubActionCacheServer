@@ -94,6 +94,7 @@ type FolderInventory struct {
 type Inventory struct {
 	Folders          []FolderInventory
 	LooseObjects     []ObjectMetadata
+	TemporaryUploads []ObjectMetadata
 	ObjectCount      int64
 	PhysicalBytes    int64
 	NewestModifiedAt time.Time

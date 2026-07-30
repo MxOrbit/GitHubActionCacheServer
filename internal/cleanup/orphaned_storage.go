@@ -11,8 +11,16 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
 )
+
+const temporaryUploadRetention = 24 * time.Hour
+
+type storageFolderReferences struct {
+	referenced    map[string]struct{}
+	activeUploads map[string]struct{}
+}
 
 func (s *Service) RunOrphanedStorage(ctx context.Context) (int, error) {
 	inventory, err := s.storage.Inventory(ctx)
@@ -20,7 +28,7 @@ func (s *Service) RunOrphanedStorage(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("inventory storage for orphan reconciliation: %w", err)
 	}
 
-	referencedFolders, err := s.referencedStorageFolders(ctx)
+	folderReferences, err := s.referencedStorageFolders(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -39,7 +47,7 @@ func (s *Service) RunOrphanedStorage(ctx context.Context) (int, error) {
 			}
 			return queued, err
 		}
-		if _, ok := referencedFolders[folder.FolderName]; ok {
+		if _, ok := folderReferences.referenced[folder.FolderName]; ok {
 			continue
 		}
 		if !folder.NewestModifiedAt.IsZero() && folder.NewestModifiedAt.After(cutoff) {
@@ -73,17 +81,50 @@ func (s *Service) RunOrphanedStorage(ctx context.Context) (int, error) {
 			queued++
 		}
 	}
+
+	if cleaner, ok := s.storage.(storage.TemporaryUploadCleaner); ok {
+		candidates := make([]storage.ObjectMetadata, 0, len(inventory.TemporaryUploads))
+		temporaryCutoff := s.now().Add(-temporaryUploadRetention)
+		for _, candidate := range inventory.TemporaryUploads {
+			if candidate.ModifiedAt.After(temporaryCutoff) {
+				continue
+			}
+			folderName := topLevelStorageFolder(candidate.Name)
+			if _, active := folderReferences.activeUploads[folderName]; active {
+				s.logger.Debug().
+					Str("object_name", candidate.Name).
+					Str("folder_name", folderName).
+					Msg("temporary upload retained for active upload")
+				continue
+			}
+			candidates = append(candidates, candidate)
+		}
+
+		deleted, cleanupErr := cleaner.CleanupTemporaryUploads(ctx, candidates, temporaryCutoff)
+		s.logger.Info().
+			Int("candidates", len(candidates)).
+			Int("deleted", deleted).
+			Msg("temporary upload cleanup finished")
+		if cleanupErr != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("cleanup temporary uploads: %w", cleanupErr))
+		}
+	}
 	return queued, errors.Join(reconcileErrors...)
 }
 
-func (s *Service) referencedStorageFolders(ctx context.Context) (map[string]struct{}, error) {
-	referenced := make(map[string]struct{})
+func (s *Service) referencedStorageFolders(ctx context.Context) (storageFolderReferences, error) {
+	references := storageFolderReferences{
+		referenced:    make(map[string]struct{}),
+		activeUploads: make(map[string]struct{}),
+	}
 	queries := []struct {
-		name string
-		run  func() ([]string, error)
+		name         string
+		activeUpload bool
+		run          func() ([]string, error)
 	}{
 		{
-			name: "uploads",
+			name:         "uploads",
+			activeUpload: true,
 			run: func() ([]string, error) {
 				var names []string
 				err := s.db.Upload.Query().Select(upload.FieldFolderName).Scan(ctx, &names)
@@ -110,15 +151,18 @@ func (s *Service) referencedStorageFolders(ctx context.Context) (map[string]stru
 	for _, query := range queries {
 		names, err := query.run()
 		if err != nil {
-			return nil, fmt.Errorf("query %s for orphan reconciliation: %w", query.name, err)
+			return storageFolderReferences{}, fmt.Errorf("query %s for orphan reconciliation: %w", query.name, err)
 		}
 		for _, name := range names {
 			if root := topLevelStorageFolder(name); root != "" {
-				referenced[root] = struct{}{}
+				references.referenced[root] = struct{}{}
+				if query.activeUpload {
+					references.activeUploads[root] = struct{}{}
+				}
 			}
 		}
 	}
-	return referenced, nil
+	return references, nil
 }
 
 func (s *Service) claimOrphanedStorageFolder(ctx context.Context, folderName string) (bool, error) {

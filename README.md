@@ -195,6 +195,8 @@ direct-URL access refreshes recency at most once every 10 minutes.
 Cleanup jobs run on fixed intervals from 5 minutes to 24 hours. The database is
 authoritative for storage reconciliation, so restoring an older database can
 reclaim newer folders that it does not reference.
+The daily filesystem scan also removes `.upload-*` temporary files older than
+24 hours, while retaining every folder that still has an active upload record.
 
 ### Metrics
 
