@@ -189,7 +189,7 @@ reader leases, so running old and new cleanup workers concurrently is unsafe.
 | Variable                              | Default | Description                                                                                  |
 |---------------------------------------|---------|----------------------------------------------------------------------------------------------|
 | `DISABLE_CLEANUP_JOBS`                | `false` | Disables background cleanup jobs.                                                            |
-| `CACHE_CLEANUP_OLDER_THAN_DAYS`       | `90`    | Deletes inactive cache storage locations after this many days. Set to `0` to disable expiry. |
+| `CACHE_CLEANUP_OLDER_THAN_DAYS`       | `90`    | Deletes inactive cache storage locations after 1–36500 days. Set to `0` to disable expiry.   |
 | `ORPHANED_STORAGE_GRACE_PERIOD_HOURS` | `24`    | Retains unreferenced physical storage folders for at least this many hours.                  |
 
 A location expires only when its last download and every referencing entry's

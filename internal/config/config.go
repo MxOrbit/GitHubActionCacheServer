@@ -24,6 +24,8 @@ const (
 	DefaultS3MultipartAbortTimeout   = 30 * time.Second
 	DefaultFilesystemMaxUsagePercent = 90
 	DefaultOrphanedStorageGraceHours = 24
+	DefaultCacheOlderThanDays        = 90
+	MaximumCacheOlderThanDays        = 36500
 )
 
 type Config struct {
@@ -121,6 +123,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cacheOlderThanDays, err := cleanupOlderThanDaysEnv("CACHE_CLEANUP_OLDER_THAN_DAYS", DefaultCacheOlderThanDays)
+	if err != nil {
+		return Config{}, err
+	}
 	tokenIssuer := strings.TrimRight(
 		tools.EnvOrDefault(
 			"ACTIONS_TOKEN_ISSUER",
@@ -185,7 +191,7 @@ func Load() (Config, error) {
 		},
 		Cleanup: CleanupConfig{
 			Disabled:                   tools.ParseBool(tools.EnvOrDefault("DISABLE_CLEANUP_JOBS", "false")),
-			CacheOlderThanDays:         tools.ParseInt(tools.EnvOrDefault("CACHE_CLEANUP_OLDER_THAN_DAYS", "90"), 90),
+			CacheOlderThanDays:         cacheOlderThanDays,
 			OrphanedStorageGracePeriod: orphanedStorageGracePeriod,
 		},
 		Debug: tools.ParseBool(tools.EnvOrDefault("DEBUG", "false")),
@@ -254,6 +260,23 @@ func positiveHoursEnv(key string, fallback int64) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a positive integer number of hours: %q", key, raw)
 	}
 	return time.Duration(value) * time.Hour, nil
+}
+
+func cleanupOlderThanDaysEnv(key string, fallback int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 || value > MaximumCacheOlderThanDays {
+		return 0, fmt.Errorf(
+			"%s must be an integer number of days from 0 through %d: %q",
+			key,
+			MaximumCacheOlderThanDays,
+			raw,
+		)
+	}
+	return int(value), nil
 }
 
 func positiveDurationEnv(key string, fallback time.Duration) time.Duration {

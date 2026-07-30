@@ -2,6 +2,7 @@ package config
 
 import (
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestLoadDefaults(t *testing.T) {
 	require.Equal(t, float64(DefaultFilesystemMaxUsagePercent), cfg.Cache.FilesystemMaxUsagePercent)
 	require.Empty(t, cfg.Management.APIKey)
 	require.False(t, cfg.Cleanup.Disabled)
-	require.Equal(t, 90, cfg.Cleanup.CacheOlderThanDays)
+	require.Equal(t, DefaultCacheOlderThanDays, cfg.Cleanup.CacheOlderThanDays)
 	require.Equal(t, 24*time.Hour, cfg.Cleanup.OrphanedStorageGracePeriod)
 	require.False(t, cfg.Debug)
 }
@@ -264,6 +265,41 @@ func TestLoadRejectsInvalidOrphanedStorageGracePeriod(t *testing.T) {
 			require.Zero(t, cfg)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "ORPHANED_STORAGE_GRACE_PERIOD_HOURS")
+			require.Contains(t, err.Error(), value)
+		})
+	}
+}
+
+func TestLoadAcceptsCleanupRetentionBounds(t *testing.T) {
+	tests := []struct {
+		value string
+		want  int
+	}{
+		{value: "0", want: 0},
+		{value: strconv.Itoa(MaximumCacheOlderThanDays), want: MaximumCacheOlderThanDays},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", tt.value)
+
+			cfg, err := Load()
+
+			require.NoError(t, err)
+			require.Equal(t, tt.want, cfg.Cleanup.CacheOlderThanDays)
+		})
+	}
+}
+
+func TestLoadRejectsInvalidCleanupRetention(t *testing.T) {
+	for _, value := range []string{"-1", strconv.Itoa(MaximumCacheOlderThanDays + 1), "1.5", "forever", "9223372036854775808"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CACHE_CLEANUP_OLDER_THAN_DAYS", value)
+
+			cfg, err := Load()
+
+			require.Zero(t, cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "CACHE_CLEANUP_OLDER_THAN_DAYS")
 			require.Contains(t, err.Error(), value)
 		})
 	}
