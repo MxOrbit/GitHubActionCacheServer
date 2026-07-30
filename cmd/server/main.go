@@ -126,6 +126,7 @@ func main() {
 	serveResultReceived := false
 	select {
 	case <-ctx.Done():
+		stop()
 		logger.Info().Dur("timeout", shutdownTimeout).Msg("shutdown signal received")
 	case serveErr = <-errCh:
 		serveResultReceived = true
