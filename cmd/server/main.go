@@ -22,7 +22,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const shutdownTimeout = 60 * time.Second
+const (
+	shutdownTimeout         = 60 * time.Second
+	serverReadHeaderTimeout = 30 * time.Second
+	serverIdleTimeout       = 5 * time.Minute
+)
 
 func main() {
 	cfg, err := config.Load()
@@ -87,16 +91,13 @@ func main() {
 		Metrics:   metricsRegistry,
 	}), logger, storageSizeReady).Start(cleanupCtx)
 
-	server := &http.Server{
-		Addr: cfg.Server.Addr,
-		Handler: httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
-			DB:        dbClient,
-			Storage:   storageAdapter,
-			Cache:     cacheService,
-			Lifecycle: lifecycleService,
-			Metrics:   metricsRegistry,
-		}),
-	}
+	server := newHTTPServer(cfg.Server.Addr, httpapi.NewRouter(logger, cfg, httpapi.Dependencies{
+		DB:        dbClient,
+		Storage:   storageAdapter,
+		Cache:     cacheService,
+		Lifecycle: lifecycleService,
+		Metrics:   metricsRegistry,
+	}))
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -147,4 +148,13 @@ func main() {
 	}
 
 	logger.Info().Msg("server stopped")
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
 }

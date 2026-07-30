@@ -19,6 +19,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/downloadurl"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
+	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -159,6 +160,31 @@ func TestFallbackProxyForwardsUnknownPath(t *testing.T) {
 	require.Equal(t, "custom-value", got.Custom)
 	require.Equal(t, "text/plain", got.ContentType)
 	require.Equal(t, "payload", got.Body)
+}
+
+func TestFallbackProxyTimesOutWaitingForResponseHeaders(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		upstream.Close()
+	})
+
+	router := gin.New()
+	router.NoRoute(fallbackProxyWithResponseHeaderTimeout(zerolog.Nop(), upstream.URL, 20*time.Millisecond))
+	req := httptest.NewRequest(http.MethodGet, "/unknown", nil)
+	rec := httptest.NewRecorder()
+	startedAt := time.Now()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Less(t, time.Since(startedAt), time.Second)
 }
 
 func TestFallbackProxyDoesNotHandleManagementMisses(t *testing.T) {

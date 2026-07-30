@@ -5,13 +5,20 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )
 
+const fallbackProxyResponseHeaderTimeout = 60 * time.Second
+
 func fallbackProxy(logger zerolog.Logger, target string) gin.HandlerFunc {
+	return fallbackProxyWithResponseHeaderTimeout(logger, target, fallbackProxyResponseHeaderTimeout)
+}
+
+func fallbackProxyWithResponseHeaderTimeout(logger zerolog.Logger, target string, responseHeaderTimeout time.Duration) gin.HandlerFunc {
 	targetURL, err := url.Parse(target)
 	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" {
 		return func(c *gin.Context) {
@@ -19,9 +26,11 @@ func fallbackProxy(logger zerolog.Logger, target string) gin.HandlerFunc {
 		}
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	proxy := &httputil.ReverseProxy{
 		BufferPool: bufferpool.Default,
-		Transport:  bufferpool.WrapTransport(nil),
+		Transport:  bufferpool.WrapTransport(transport),
 		Rewrite: func(req *httputil.ProxyRequest) {
 			req.SetURL(targetURL)
 			req.SetXForwarded()
