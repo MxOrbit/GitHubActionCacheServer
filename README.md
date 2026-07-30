@@ -14,7 +14,22 @@ by default. The only intentional compatibility gap is GCS storage support.
 
 ## Quick Start
 
-Run locally with SQLite and filesystem storage:
+Download a prebuilt binary for your platform from
+[Releases](https://github.com/MxOrbit/GitHubActionCacheServer/releases):
+
+```sh
+curl -LO https://github.com/MxOrbit/GitHubActionCacheServer/releases/latest/download/action-cache-server_linux_amd64.tar.gz
+tar -xzf action-cache-server_linux_amd64.tar.gz
+API_BASE_URL=http://localhost:3000 ./action-cache-server
+```
+
+A multi-arch image is also available on Docker Hub (see [Docker](#docker)):
+
+```sh
+docker run --rm -p 3000:3000 -e API_BASE_URL=http://localhost:3000 mmx233/action-cache-server:latest
+```
+
+Or run from source with SQLite and filesystem storage:
 
 ```sh
 go mod download
@@ -33,13 +48,9 @@ unsigned or test JWTs. Do not use it for production.
 
 ## Docker
 
-Image: `mmx233/action-cache-server`
-
-Build the image:
-
-```sh
-docker build -t mmx233/action-cache-server .
-```
+Image: `mmx233/action-cache-server` on Docker Hub, built for
+`linux/amd64`, `linux/arm64`, `linux/arm/v7`, and `linux/arm/v6`. Tags are
+`latest` and each release version (for example `v1.0.6`).
 
 Run a disposable local instance:
 
@@ -54,6 +65,12 @@ docker run --rm -p 3000:3000 \
 For persistent deployments, mount a writable data directory and point
 `DB_SQLITE_PATH` and `STORAGE_FILESYSTEM_PATH` at that directory, or use an
 external SQL database plus S3 storage.
+
+To build the image locally instead:
+
+```sh
+docker build -t mmx233/action-cache-server .
+```
 
 ## Configuration
 
