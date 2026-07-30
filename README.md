@@ -120,14 +120,12 @@ are used for restores.
 | `DB_MYSQL_PASSWORD`    | empty             | MySQL password.                                       |
 | `DB_MYSQL_TLS`         | `preferred`       | MySQL TLS mode.                                       |
 
-Schema migrations run automatically at startup.
+Schema migrations run automatically at startup and are serialized across instances.
 
-`DB_POSTGRES_URL` controls its own TLS parameters and ignores
-`DB_POSTGRES_SSLMODE`. PostgreSQL accepts `disable`, `allow`, `prefer`,
-`require`, `verify-ca`, and `verify-full`; MySQL accepts `false`, `true`,
-`skip-verify`, and `preferred`. The opportunistic defaults permit plaintext
-fallback; use PostgreSQL `verify-full` or MySQL `true` for authenticated TLS.
-Private CAs must be installed in the container or host trust store.
+`DB_POSTGRES_URL` sets its own TLS parameters and ignores
+`DB_POSTGRES_SSLMODE`. The opportunistic defaults permit plaintext fallback; use
+PostgreSQL `verify-full` or MySQL `true` with the CA in the system trust store
+for authenticated TLS.
 
 ### Storage
 
@@ -147,24 +145,9 @@ Private CAs must be installed in the container or host trust store.
 S3 credentials are loaded through the AWS SDK default credential chain.
 
 For S3 deployments, configure an `AbortIncompleteMultipartUpload` bucket
-lifecycle rule. It cleans up multipart uploads left incomplete if the server
-exits during composition; verify lifecycle support when using an S3-compatible
-endpoint.
-
-An AWS S3 lifecycle configuration can scope the rule to the cache prefix:
-
-```json
-{
-  "Rules": [
-    {
-      "ID": "abort-incomplete-cache-uploads",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "gh-actions-cache/" },
-      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
-    }
-  ]
-}
-```
+lifecycle rule scoped to the key prefix (for example, `DaysAfterInitiation: 1`)
+to clean up multipart uploads left incomplete if the server exits during
+composition; verify lifecycle support when using an S3-compatible endpoint.
 
 ### Cache Behavior
 
@@ -177,34 +160,20 @@ An AWS S3 lifecycle configuration can scope the rule to the cache prefix:
 | `CACHE_FILESYSTEM_MAX_USAGE_PERCENT` | `90`                 | Filesystem volume usage that triggers eviction when no explicit byte budget is set. Range `(0, 100]`.          |
 
 Local signed download URLs and S3 direct download URLs expire after 10 minutes.
-Single-part S3 caches are presigned directly. Multi-part caches are presigned
-after composition when all non-final parts satisfy the backend's multipart
-upload size constraints (5 MiB on AWS S3); unsupported layouts transparently
-fall back to server-proxied downloads.
+Eligible caches are presigned directly; layouts that do not satisfy the
+backend's multipart constraints transparently fall back to server-proxied
+downloads.
 
 Capacity eviction runs after startup, every 10 minutes, and after finalize. It
 removes least-recently-used entries to 90% of the active budget. Filesystem
 usage includes non-cache data, in-progress uploads, and temporary files on the
-same volume; pending deletions receive a conservative logical-size credit until
-their grace period ends, after which the outbox physically removes them. S3 is
-unlimited unless an explicit byte budget is configured.
+same volume. S3 is unlimited unless an explicit byte budget is configured.
 
-Active downloads are protected by durable database reader leases. Proxied
-downloads renew a two-minute lease every 30 seconds and release it when the
-response closes. S3 direct-download leases last for the full signed URL TTL.
-Cache deletion first detaches the cache entry and fences its storage location;
-physical deletion waits for reader and materialization leases and for a
-10-minute compatibility grace period. This also protects direct URLs issued
-immediately before an upgrade to the lease-aware schema.
-
-Before returning either a local or S3 download URL, the server checks the
-selected representation's anchor object with one filesystem stat or S3 HEAD:
-`merged` for a completed materialization and `parts/0` otherwise. A confirmed
-missing object detaches the dangling cache entry through the same fenced
-deletion path and retries matching, allowing another restore key or scope to
-win. Storage probe errors preserve metadata and fail the lookup. This constant-
-cost check intentionally does not scan every part, so isolated external
-deletion of an interior part is detected only when that part is downloaded.
+Active downloads are protected by database reader leases. Deletion detaches the
+cache entry first and physically removes storage only after readers drain and a
+10-minute grace period ends. Before returning a download URL, the server stats
+the anchor object; a confirmed-missing object detaches the entry and retries
+matching.
 
 Upgrades from versions without reader leases must be coordinated: drain the old
 server instances before enabling the new ones. Old binaries do not honor part
@@ -222,27 +191,9 @@ A location expires only when its last download and every referencing entry's
 save time predate the cutoff. Active reader leases defer expiry, and proxied or
 direct-URL access refreshes recency at most once every 10 minutes.
 
-Cleanup intervals:
-
-- abandoned uploads: every 5 minutes
-- pending physical storage deletions: every 5 minutes
-- fenced storage locations waiting for leases or the deletion grace period: every 5 minutes
-- expired reader leases: every hour
-- expired cache entries: every 24 hours
-- orphan storage locations: every 24 hours
-- unreferenced physical storage folders: shortly after storage reconciliation, then every 24 hours
-- superseded parts: every hour, once the merged representation is at least one hour old
-
-Physical folder deletion uses a transactional database outbox after the
-location's deletion fence is ready. A failed or interrupted filesystem/S3
-deletion remains queued and is retried by the cleanup worker with exponential
-backoff from 5 minutes up to 24 hours. HTTP request paths only change database
-state, and database transactions are never held open across storage I/O.
-
-Each orphan reconciliation performs one O(objects) filesystem walk or S3 LIST,
-then rechecks grace-expired folders before queuing them in the same outbox.
-The database is authoritative, so restoring an older database can reclaim newer
-folders that it does not reference.
+Cleanup jobs run on fixed intervals from 5 minutes to 24 hours. The database is
+authoritative for storage reconciliation, so restoring an older database can
+reclaim newer folders that it does not reference.
 
 ### Metrics
 
@@ -257,10 +208,9 @@ exports Go and process metrics plus:
 - `storage_deletion_failures_total`
 
 `cache_storage_bytes` sums known logical payload sizes for every tracked storage
-location, including fenced rows until lifecycle finalization. Once a location is
-handed to the physical-deletion outbox its remaining work is represented by the
-pending-deletion metrics, so this gauge is not an exact physical-storage reading.
-Scrapes query persisted metadata and never walk the filesystem or list S3.
+location, including fenced rows until lifecycle finalization; it is not an exact
+physical-storage reading. Scrapes query persisted metadata and never walk the
+filesystem or list S3.
 
 Request, upload, and deletion-failure counters are per process; aggregate their
 rates across replicas with `sum`. The storage and outbox gauges read the shared
@@ -315,13 +265,6 @@ and S3 server-side composition:
 go test ./internal/cache ./internal/storage -run '^$' -bench 'Benchmark(Filesystem|Azure|S3)' -benchmem -count=5
 ```
 
-Streaming benchmarks run with 32 KiB, 128 KiB, 256 KiB, and 1 MiB buffers.
-The concurrent-runner benchmark also reports p95 latency and peak process RSS;
-the deterministic S3 protocol benchmark reports and asserts SDK HTTP requests
-per composition. When `E2E_S3_ENDPOINT_URL` and `E2E_S3_BUCKET` are configured,
-the same command also runs composition against that external S3-compatible
-backend to measure its wall-clock latency.
-
 The repository also contains a Go smoke test for the cache v2 HTTP protocol
 shape. Full runner-level compatibility should be tested with the patched
 falcondev runner container and a real GitHub Actions job.
@@ -347,111 +290,7 @@ memory**. Against Go v1.0.5, the same concurrent workload improves upload by
 The main exception is metadata miss throughput: at concurrency 32, Node leads
 with 7,093 requests/s versus 6,215 for v1.0.5 and 6,009 for v1.0.6.
 
-### Payload Size
-
-Each cell is aggregate `MiB/s / p95 whole-cache latency`. Concurrency is one;
-the upload of an individual cache can still use up to four block PUTs.
-
-| Operation        |         Node v9.6.2 |             Go v1.0.5 |               Go v1.0.6 |
-|------------------|--------------------:|----------------------:|------------------------:|
-| Upload 1 MiB     |   52.69 / 18.545 ms | 60.65 / **13.485 ms** |   **60.89** / 13.597 ms |
-| Download 1 MiB   |   26.91 / 41.848 ms |     122.95 / 9.015 ms |   **289.39 / 3.579 ms** |
-| Upload 32 MiB    |  336.56 / 96.029 ms |    451.21 / 64.312 ms |  **692.34 / 39.049 ms** |
-| Download 32 MiB  | 236.41 / 140.728 ms |    742.80 / 44.818 ms | **2684.56 / 12.395 ms** |
-| Upload 128 MiB   | 385.31 / 313.966 ms |   510.43 / 229.796 ms | **960.00 / 106.543 ms** |
-| Download 128 MiB | 273.52 / 502.549 ms |   879.12 / 155.499 ms | **3497.27 / 37.896 ms** |
-
-### Concurrency Scaling
-
-Each cache is 16 MiB. Cells are aggregate `upload MiB/s / download MiB/s`.
-
-| Concurrent caches |     Node v9.6.2 |        Go v1.0.5 |            Go v1.0.6 |
-|------------------:|----------------:|-----------------:|---------------------:|
-|                 1 | 336.58 / 198.02 |  415.31 / 569.65 | **629.30 / 2129.78** |
-|                 8 | 424.54 / 195.50 | 551.64 / 1594.68 | **798.00 / 3134.69** |
-|                32 | 353.92 / 197.00 | 565.71 / 1352.89 | **791.28 / 2776.57** |
-
-At concurrency 32, each direction transfers 1 GiB of logical payload.
-
-| Concurrency-32 resource metric   | Node v9.6.2 |   Go v1.0.5 |       Go v1.0.6 |
-|----------------------------------|------------:|------------:|----------------:|
-| Upload p95 whole-cache latency   |  2341.32 ms |  1115.69 ms |   **820.37 ms** |
-| Download p95 whole-cache latency |  2766.65 ms |   510.78 ms |   **306.31 ms** |
-| Upload server CPU                |  1.23 cores |  0.85 cores |  **0.73 cores** |
-| Download server CPU              |  2.96 cores |  2.39 cores |   **1.00 core** |
-| Server write I/O during upload   | 1047.18 MiB | 2070.70 MiB | **1043.97 MiB** |
-| Server write I/O during download | 1035.75 MiB | 1028.51 MiB |    **1.52 MiB** |
-
-### Startup and Memory
-
-Deployment payload is uncompressed. The Node value includes the 9.71 MiB
-application output and the 123.03 MiB Node executable, but not shared OS
-libraries; each Go value is one self-contained executable.
-
-| Metric                            |         Node v9.6.2 |            Go v1.0.5 |        Go v1.0.6 |
-|-----------------------------------|--------------------:|---------------------:|-----------------:|
-| Deployment payload                |        >=132.74 MiB |            43.87 MiB |        44.32 MiB |
-| Cold start p50 / p95              | 950.68 / 1298.00 ms | **10.49 / 33.01 ms** | 21.41 / 34.09 ms |
-| Idle process count                |                   2 |                **1** |            **1** |
-| Idle RSS p50                      |          399.68 MiB |        **26.28 MiB** |        28.41 MiB |
-| Peak RSS, 32 concurrent transfers |          820.52 MiB |        **48.89 MiB** |        49.64 MiB |
-
-### HTTP and Metadata
-
-The health test has no database or storage work. CPU is expressed as average
-fully utilized cores. Node uses upstream's shipped and recommended
-`NITRO_CLUSTER_WORKERS=1` topology.
-
-| Health metric (three-run median) | Node v9.6.2 |     Go v1.0.5 |    Go v1.0.6 |
-|----------------------------------|------------:|--------------:|-------------:|
-| 1 connection, requests/s         |      17,792 |        20,475 |   **20,737** |
-| 1 connection, p99 latency        |    2.530 ms |      0.177 ms | **0.173 ms** |
-| 64 connections, requests/s       |      38,140 |       313,255 |  **323,076** |
-| 64 connections, p99 latency      |    4.800 ms |      1.310 ms | **1.240 ms** |
-| 64 connections, server CPU       |  1.09 cores |    9.74 cores |   9.69 cores |
-| 64 connections, requests/s/core  |  **34,943** |        32,156 |       33,340 |
-| 64 connections, peak RSS         |  631.53 MiB | **46.89 MiB** |    48.03 MiB |
-
-Metadata cells are `requests/s / p95 latency`.
-
-| Cache v2 metadata operation |          Node v9.6.2 |            Go v1.0.5 |            Go v1.0.6 |
-|-----------------------------|---------------------:|---------------------:|---------------------:|
-| Hit, concurrency 1          |     1,947 / 0.663 ms |     2,821 / 0.470 ms | **3,040 / 0.416 ms** |
-| Miss, concurrency 1         | **2,302** / 0.550 ms |     2,293 / 0.620 ms | 2,250 / **0.542 ms** |
-| Hit, concurrency 32         |     5,666 / 7.822 ms | **6,520 / 6.558 ms** |     6,359 / 7.231 ms |
-| Miss, concurrency 32        | **7,093 / 6.786 ms** |     6,215 / 7.215 ms |     6,009 / 7.714 ms |
-
-### Test Setup
-
-| Item            | Value                                                                                  |
-|-----------------|----------------------------------------------------------------------------------------|
-| Date            | 2026-07-29                                                                             |
-| Host            | Intel Core i7-14700K, 28 logical CPUs exposed to WSL, 47.04 GiB available to WSL       |
-| Host OS         | Windows build 10.0.26200.0                                                             |
-| Guest           | Ubuntu 24.04.1 LTS on WSL2, kernel 6.18.33.2, ext4 virtual disk                        |
-| Common backend  | SQLite plus local filesystem storage on the WSL ext4 disk                              |
-| Network         | HTTP loopback (`127.0.0.1`), no TLS                                                    |
-| Server topology | One service instance; `NITRO_CLUSTER_WORKERS=1` for Node                               |
-| Data protocol   | Cache v2 JSON/Twirp, 4 MiB blocks, up to 4 parallel block PUTs per cache               |
-| Server settings | Cleanup disabled, token signature validation skipped, stdout sent to `/dev/null`       |
-| Toolchains      | Node 25.9.0 / pnpm 11.11.0; Go 1.26.5 with `CGO_ENABLED=0` and production linker flags |
-| Load tools      | wrk 4.1.0; Python 3.12.3 / aiohttp 3.9.1                                               |
-
-Each implementation was built from a separate clean clone:
-[`f892a36`](https://github.com/falcondev-oss/github-actions-cache-server/commit/f892a367d1e6603e3828e3e2d754616fa8c2bf9e)
-(Node v9.6.2),
-[`0460bf4`](https://github.com/MxOrbit/GitHubActionCacheServer/commit/0460bf439c976c62c587f29c0406697b6d0b5103)
-(v1.0.5), and
-[`49e0c41`](https://github.com/MxOrbit/GitHubActionCacheServer/commit/49e0c41bac71a67193cf642610575eebc608dd30)
-(v1.0.6). Each Go tag's Ent client was generated from its own tagged schema.
-
-Startup uses five fresh-database runs. Health results are three-run medians.
-Metadata uses 1,000 requests at concurrency 1 and 5,000 at concurrency 32. The
-size sweep uses 9, 5, and 3 caches at 1, 32, and 128 MiB. The concurrency sweep
-uses 8, 24, and 64 caches of 16 MiB at concurrency 1, 8, and 32. All groups
-completed with zero HTTP, size, or integrity errors.
-
+Detailed payload-size, concurrency-scaling, startup/memory, and HTTP/metadata
+tables, plus the test setup and methodology, are in [BENCHMARK.md](BENCHMARK.md).
 These local loopback, warm-page-cache results isolate server overhead; they are
-not forecasts for a real network or disk. The matrix excludes PostgreSQL,
-MySQL, S3, GCS, TLS, signature verification, cleanup contention, multiple
-replicas, and end-to-end archive compression.
+not forecasts for a real network or disk.
