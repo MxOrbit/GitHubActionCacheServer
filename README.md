@@ -95,13 +95,22 @@ are used for restores.
 | `DB_POSTGRES_PORT`     | `5432`            | PostgreSQL port.                                      |
 | `DB_POSTGRES_USER`     | empty             | PostgreSQL user.                                      |
 | `DB_POSTGRES_PASSWORD` | empty             | PostgreSQL password.                                  |
+| `DB_POSTGRES_SSLMODE`  | `prefer`          | TLS mode for discrete PostgreSQL parameters.          |
 | `DB_MYSQL_DATABASE`    | empty             | MySQL database.                                       |
 | `DB_MYSQL_HOST`        | empty             | MySQL host.                                           |
 | `DB_MYSQL_PORT`        | `3306`            | MySQL port.                                           |
 | `DB_MYSQL_USER`        | empty             | MySQL user.                                           |
 | `DB_MYSQL_PASSWORD`    | empty             | MySQL password.                                       |
+| `DB_MYSQL_TLS`         | `preferred`       | MySQL TLS mode.                                       |
 
 Schema migrations run automatically at startup.
+
+`DB_POSTGRES_URL` controls its own TLS parameters and ignores
+`DB_POSTGRES_SSLMODE`. PostgreSQL accepts `disable`, `allow`, `prefer`,
+`require`, `verify-ca`, and `verify-full`; MySQL accepts `false`, `true`,
+`skip-verify`, and `preferred`. The opportunistic defaults permit plaintext
+fallback; use PostgreSQL `verify-full` or MySQL `true` for authenticated TLS.
+Private CAs must be installed in the container or host trust store.
 
 ### Storage
 

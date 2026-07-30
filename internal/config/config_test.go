@@ -20,6 +20,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("DB_DRIVER", "")
 	t.Setenv("DB_SQLITE_PATH", "")
 	t.Setenv("DB_POSTGRES_URL", "")
+	t.Setenv("DB_POSTGRES_SSLMODE", "")
+	t.Setenv("DB_MYSQL_TLS", "")
 	t.Setenv("STORAGE_DRIVER", "")
 	t.Setenv("STORAGE_FILESYSTEM_PATH", "")
 	t.Setenv("STORAGE_S3_BUCKET", "")
@@ -52,6 +54,8 @@ func TestLoadDefaults(t *testing.T) {
 	require.False(t, cfg.Auth.SkipTokenValidation)
 	require.Equal(t, "sqlite", cfg.DB.Driver)
 	require.Equal(t, ".data/sqlite.db", cfg.DB.SQLitePath)
+	require.Equal(t, DefaultDBPostgresSSLMode, cfg.DB.PostgresSSLMode)
+	require.Equal(t, DefaultDBMySQLTLS, cfg.DB.MySQLTLS)
 	require.Equal(t, "filesystem", cfg.Storage.Driver)
 	require.Equal(t, ".data/storage/filesystem", cfg.Storage.FilesystemPath)
 	require.Equal(t, "us-east-1", cfg.Storage.S3Region)
@@ -84,6 +88,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	t.Setenv("DB_DRIVER", "postgres")
 	t.Setenv("DB_POSTGRES_URL", "postgres://example")
+	t.Setenv("DB_POSTGRES_SSLMODE", "VERIFY-FULL")
+	t.Setenv("DB_MYSQL_TLS", "TRUE")
 	t.Setenv("STORAGE_DRIVER", "s3")
 	t.Setenv("STORAGE_S3_BUCKET", "cache-bucket")
 	t.Setenv("AWS_REGION", "ap-east-1")
@@ -115,6 +121,8 @@ func TestLoadFromEnv(t *testing.T) {
 	require.True(t, cfg.Auth.SkipTokenValidation)
 	require.Equal(t, "postgres", cfg.DB.Driver)
 	require.Equal(t, "postgres://example", cfg.DB.PostgresURL)
+	require.Equal(t, "verify-full", cfg.DB.PostgresSSLMode)
+	require.Equal(t, "true", cfg.DB.MySQLTLS)
 	require.Equal(t, "s3", cfg.Storage.Driver)
 	require.Equal(t, "cache-bucket", cfg.Storage.S3Bucket)
 	require.Equal(t, "ap-east-1", cfg.Storage.S3Region)
@@ -218,6 +226,25 @@ func TestLoadRejectsMalformedS3UploadPartSize(t *testing.T) {
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "STORAGE_S3_UPLOAD_PART_SIZE_BYTES")
 			require.Contains(t, err.Error(), value)
+		})
+	}
+}
+
+func TestLoadRejectsInvalidDatabaseTLSModes(t *testing.T) {
+	tests := []struct {
+		key   string
+		value string
+	}{
+		{key: "DB_POSTGRES_SSLMODE", value: "sometimes"},
+		{key: "DB_MYSQL_TLS", value: "required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			require.ErrorContains(t, err, tt.key+" must be one of")
 		})
 	}
 }

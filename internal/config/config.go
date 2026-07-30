@@ -16,6 +16,8 @@ const (
 	DefaultAddr              = ":3000"
 	DefaultActionsResultsURL = "https://results-receiver.actions.githubusercontent.com"
 	DefaultTokenIssuer       = "https://token.actions.githubusercontent.com"
+	DefaultDBPostgresSSLMode = "prefer"
+	DefaultDBMySQLTLS        = "preferred"
 
 	MinS3UploadPartSizeBytes         = 5 * 1024 * 1024
 	DefaultS3KeyPrefix               = "gh-actions-cache"
@@ -62,12 +64,14 @@ type DBConfig struct {
 	PostgresPort     string
 	PostgresUser     string
 	PostgresPassword string
+	PostgresSSLMode  string
 
 	MySQLDatabase string
 	MySQLHost     string
 	MySQLPort     string
 	MySQLUser     string
 	MySQLPassword string
+	MySQLTLS      string
 }
 
 type StorageConfig struct {
@@ -107,6 +111,22 @@ type CleanupConfig struct {
 }
 
 func Load() (Config, error) {
+	postgresSSLMode, err := enumEnv(
+		"DB_POSTGRES_SSLMODE",
+		DefaultDBPostgresSSLMode,
+		"disable", "allow", "prefer", "require", "verify-ca", "verify-full",
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	mysqlTLS, err := enumEnv(
+		"DB_MYSQL_TLS",
+		DefaultDBMySQLTLS,
+		"false", "true", "skip-verify", "preferred",
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	s3UploadPartSizeBytes, s3UploadPartSizeBytesConfigured, err := int64Env("STORAGE_S3_UPLOAD_PART_SIZE_BYTES", DefaultS3UploadPartSizeBytes)
 	if err != nil {
 		return Config{}, err
@@ -158,12 +178,14 @@ func Load() (Config, error) {
 			PostgresPort:     tools.EnvOrDefault("DB_POSTGRES_PORT", "5432"),
 			PostgresUser:     tools.EnvOrDefault("DB_POSTGRES_USER", ""),
 			PostgresPassword: tools.EnvOrDefault("DB_POSTGRES_PASSWORD", ""),
+			PostgresSSLMode:  postgresSSLMode,
 
 			MySQLDatabase: tools.EnvOrDefault("DB_MYSQL_DATABASE", ""),
 			MySQLHost:     tools.EnvOrDefault("DB_MYSQL_HOST", ""),
 			MySQLPort:     tools.EnvOrDefault("DB_MYSQL_PORT", "3306"),
 			MySQLUser:     tools.EnvOrDefault("DB_MYSQL_USER", ""),
 			MySQLPassword: tools.EnvOrDefault("DB_MYSQL_PASSWORD", ""),
+			MySQLTLS:      mysqlTLS,
 		},
 		Storage: StorageConfig{
 			Driver:                          tools.EnvOrDefault("STORAGE_DRIVER", "filesystem"),
@@ -285,4 +307,18 @@ func positiveDurationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func enumEnv(key, fallback string, allowed ...string) (string, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("%s must be one of %s: %q", key, strings.Join(allowed, ", "), raw)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -369,8 +370,67 @@ func TestMySQLDSNEscapesDatabaseName(t *testing.T) {
 	require.Equal(t, "pa:ss@word?", parsed.Passwd)
 	require.Equal(t, "cache/db?name", parsed.DBName)
 	require.True(t, parsed.ParseTime)
+	require.Equal(t, config.DefaultDBMySQLTLS, parsed.TLSConfig)
 	require.Contains(t, dsn, "/cache%2Fdb%3Fname?")
 	require.False(t, strings.Contains(dsn, "/cache/db?name?"))
+}
+
+func TestPostgresDSNUsesConfiguredSSLMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		sslMode string
+		want    string
+	}{
+		{name: "default", want: config.DefaultDBPostgresSSLMode},
+		{name: "configured", sslMode: "verify-full", want: "verify-full"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dsn, err := postgresDSN(config.DBConfig{
+				PostgresDatabase: "cache/db",
+				PostgresHost:     "db.example",
+				PostgresPort:     "5432",
+				PostgresUser:     "cache",
+				PostgresPassword: "secret",
+				PostgresSSLMode:  tt.sslMode,
+			})
+			require.NoError(t, err)
+			parsed, err := url.Parse(dsn)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, parsed.Query().Get("sslmode"))
+			require.Equal(t, "/cache/db", parsed.Path)
+		})
+	}
+}
+
+func TestPostgresDSNLeavesFullURLUnchanged(t *testing.T) {
+	const dsn = "postgres://cache@db.example/cache?sslmode=disable&application_name=cache-server"
+
+	got, err := postgresDSN(config.DBConfig{
+		PostgresURL:     dsn,
+		PostgresSSLMode: "verify-full",
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, dsn, got)
+}
+
+func TestMySQLDSNUsesConfiguredTLSMode(t *testing.T) {
+	for _, tlsMode := range []string{"false", "true", "skip-verify", "preferred"} {
+		t.Run(tlsMode, func(t *testing.T) {
+			dsn := mysqlDSN(config.DBConfig{
+				MySQLHost:     "db.example",
+				MySQLPort:     "3306",
+				MySQLDatabase: "cache",
+				MySQLUser:     "cache",
+				MySQLTLS:      tlsMode,
+			})
+			parsed, err := mysql.ParseDSN(dsn)
+			require.NoError(t, err)
+			require.Equal(t, tlsMode, parsed.TLSConfig)
+		})
+	}
 }
 
 func columnNames(columns []*entschema.Column) []string {

@@ -84,21 +84,9 @@ func openSQLite(ctx context.Context, path string) (*ent.Client, error) {
 }
 
 func openPostgres(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
-	dsn := cfg.PostgresURL
-	if dsn == "" {
-		if cfg.PostgresDatabase == "" || cfg.PostgresHost == "" || cfg.PostgresUser == "" {
-			return nil, fmt.Errorf("postgres requires DB_POSTGRES_URL or DB_POSTGRES_DATABASE, DB_POSTGRES_HOST and DB_POSTGRES_USER")
-		}
-		values := url.Values{}
-		values.Set("sslmode", "disable")
-		u := url.URL{
-			Scheme:   "postgres",
-			User:     url.UserPassword(cfg.PostgresUser, cfg.PostgresPassword),
-			Host:     net.JoinHostPort(cfg.PostgresHost, cfg.PostgresPort),
-			Path:     cfg.PostgresDatabase,
-			RawQuery: values.Encode(),
-		}
-		dsn = u.String()
+	dsn, err := postgresDSN(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	sqlDB, err := sql.Open("pgx", dsn)
@@ -139,5 +127,32 @@ func mysqlDSN(cfg config.DBConfig) string {
 	mysqlCfg.Addr = net.JoinHostPort(cfg.MySQLHost, cfg.MySQLPort)
 	mysqlCfg.DBName = cfg.MySQLDatabase
 	mysqlCfg.ParseTime = true
+	mysqlCfg.TLSConfig = cfg.MySQLTLS
+	if mysqlCfg.TLSConfig == "" {
+		mysqlCfg.TLSConfig = config.DefaultDBMySQLTLS
+	}
 	return mysqlCfg.FormatDSN()
+}
+
+func postgresDSN(cfg config.DBConfig) (string, error) {
+	if cfg.PostgresURL != "" {
+		return cfg.PostgresURL, nil
+	}
+	if cfg.PostgresDatabase == "" || cfg.PostgresHost == "" || cfg.PostgresUser == "" {
+		return "", fmt.Errorf("postgres requires DB_POSTGRES_URL or DB_POSTGRES_DATABASE, DB_POSTGRES_HOST and DB_POSTGRES_USER")
+	}
+	sslMode := cfg.PostgresSSLMode
+	if sslMode == "" {
+		sslMode = config.DefaultDBPostgresSSLMode
+	}
+	values := url.Values{}
+	values.Set("sslmode", sslMode)
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(cfg.PostgresUser, cfg.PostgresPassword),
+		Host:     net.JoinHostPort(cfg.PostgresHost, cfg.PostgresPort),
+		Path:     cfg.PostgresDatabase,
+		RawQuery: values.Encode(),
+	}
+	return u.String(), nil
 }
