@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const maxBlockListRequestBodyBytes = 8 << 20
+
 func (h *Handler) UploadPart(c *gin.Context) {
 	if c.Query("comp") == "blocklist" {
 		uploadID, err := strconv.ParseInt(c.Param("uploadId"), 10, 64)
@@ -25,12 +27,27 @@ func (h *Handler) UploadPart(c *gin.Context) {
 			response.JSON(c, response.Error(http.StatusBadRequest, "invalid upload id"))
 			return
 		}
+		commit, err := h.cache.PrepareBlockListCommit(c.Request.Context(), uploadID)
+		if err != nil {
+			writeCacheError(c, err)
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBlockListRequestBodyBytes)
 		blockIDs, err := parseBlockList(c.Request.Body)
 		if err != nil {
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) {
+				response.JSON(c, response.Error(http.StatusRequestEntityTooLarge, "block list body too large"))
+				return
+			}
+			if errors.Is(err, cache.ErrBlockListTooLarge) {
+				writeCacheError(c, err)
+				return
+			}
 			response.JSON(c, response.Error(http.StatusBadRequest, "invalid block list"))
 			return
 		}
-		if err := h.cache.CommitBlockList(c.Request.Context(), uploadID, blockIDs); err != nil {
+		if err := commit.Commit(c.Request.Context(), blockIDs); err != nil {
 			writeCacheError(c, err)
 			return
 		}
@@ -170,6 +187,7 @@ func isValidBase64BlockID(blockIDBase64 string) bool {
 func parseBlockList(stream io.Reader) ([]string, error) {
 	decoder := xml.NewDecoder(stream)
 	var blockIDs []string
+	blockCount := 0
 
 	for {
 		token, err := decoder.Token()
@@ -184,6 +202,10 @@ func parseBlockList(stream io.Reader) ([]string, error) {
 		if !ok || !isBlockListElement(start.Name.Local) {
 			continue
 		}
+		if blockCount == cache.MaxBlockListEntries {
+			return nil, cache.ErrBlockListTooLarge
+		}
+		blockCount++
 
 		var blockID string
 		if err := decoder.DecodeElement(&blockID, &start); err != nil {

@@ -40,14 +40,26 @@ const (
 	maxDanglingPurgeAttempts       = 10
 )
 
+// MaxBlockListEntries is the Azure block blob protocol limit.
+const MaxBlockListEntries = 50_000
+
 var (
 	ErrNoWriteScope        = errors.New("no scope with write permission found")
 	ErrUploadAlreadyExists = errors.New("upload already exists")
 	ErrUploadNotFound      = errors.New("upload not found")
 	ErrNoPartsUploaded     = errors.New("no parts have been uploaded")
 	ErrPartCountMismatch   = errors.New("uploaded part count does not match actual part count in storage")
+	ErrBlockListTooLarge   = errors.New("block list exceeds 50000 entries")
 	ErrCacheNotFound       = errors.New("cache not found")
 )
+
+// BlockListCommit is an upload-scoped capability prepared before the block
+// list request body is parsed. Its upload snapshot is intentionally opaque to
+// callers.
+type BlockListCommit struct {
+	service *Service
+	upload  *ent.Upload
+}
 
 type Service struct {
 	db                    *ent.Client
@@ -220,20 +232,34 @@ func (s *Service) UploadBlock(ctx context.Context, uploadID int64, blockID strin
 }
 
 func (s *Service) CommitBlockList(ctx context.Context, uploadID int64, blockIDs []string) error {
+	commit, err := s.PrepareBlockListCommit(ctx, uploadID)
+	if err != nil {
+		return err
+	}
+	return commit.Commit(ctx, blockIDs)
+}
+
+func (s *Service) PrepareBlockListCommit(ctx context.Context, uploadID int64) (*BlockListCommit, error) {
+	currentUpload, err := s.uploadByID(ctx, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	return &BlockListCommit{service: s, upload: currentUpload}, nil
+}
+
+func (c *BlockListCommit) Commit(ctx context.Context, blockIDs []string) error {
+	if len(blockIDs) > MaxBlockListEntries {
+		return ErrBlockListTooLarge
+	}
 	if len(blockIDs) == 0 {
 		return nil
 	}
 
-	currentUpload, err := s.uploadByID(ctx, uploadID)
-	if err != nil {
-		return err
-	}
-
 	for index, blockID := range blockIDs {
-		err := s.storage.CopyObject(
+		err := c.service.storage.CopyObject(
 			ctx,
-			blockObjectName(currentUpload.FolderName, blockID),
-			partObjectName(currentUpload.FolderName, index),
+			blockObjectName(c.upload.FolderName, blockID),
+			partObjectName(c.upload.FolderName, index),
 		)
 		if err != nil {
 			if errors.Is(err, storage.ErrObjectNotFound) {
@@ -242,7 +268,7 @@ func (s *Service) CommitBlockList(ctx context.Context, uploadID int64, blockIDs 
 			return err
 		}
 	}
-	if err := s.db.Upload.UpdateOneID(currentUpload.ID).
+	if err := c.service.db.Upload.UpdateOneID(c.upload.ID).
 		SetCommittedPartCount(len(blockIDs)).
 		Exec(ctx); err != nil {
 		return fmt.Errorf("record committed block list: %w", err)

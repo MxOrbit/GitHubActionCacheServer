@@ -73,7 +73,7 @@ func writeCacheError(c *gin.Context, err error) {
 		response.JSON(c, response.CacheMiss())
 	case errors.Is(err, cache.ErrUploadNotFound), errors.Is(err, cache.ErrCacheNotFound):
 		response.JSON(c, response.Error(http.StatusNotFound, err.Error()))
-	case errors.Is(err, cache.ErrNoPartsUploaded), errors.Is(err, cache.ErrPartCountMismatch):
+	case errors.Is(err, cache.ErrNoPartsUploaded), errors.Is(err, cache.ErrPartCountMismatch), errors.Is(err, cache.ErrBlockListTooLarge):
 		response.JSON(c, response.Error(http.StatusBadRequest, err.Error()))
 	default:
 		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))

@@ -8,10 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/downloadurl"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
@@ -54,6 +57,42 @@ func TestUploadRouteIsRegistered(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, rec.Body.String())
+}
+
+func TestBlockListRejectsMissingUploadBeforeReadingBody(t *testing.T) {
+	router := newTestRouter(t)
+	body := &readCountingBody{}
+	req := httptest.NewRequest(http.MethodPut, "/upload/123?comp=blocklist", body)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, body.reads)
+}
+
+func TestBlockListRejectsOversizedBody(t *testing.T) {
+	ctx, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	cacheService := cache.NewService(cache.Options{DB: client, Storage: storageAdapter})
+	upload, err := cacheService.CreateUpload(ctx, "key", "version", auth.CacheScope{
+		RepoID: "repository",
+		Scopes: []auth.Scope{{Scope: "refs/heads/main", Permission: 3}},
+	})
+	require.NoError(t, err)
+	router := NewRouter(zerolog.Nop(), newTestConfig(t), Dependencies{
+		DB:      client,
+		Storage: storageAdapter,
+		Cache:   cacheService,
+	})
+	body := "<BlockList>" + strings.Repeat(" ", (8<<20)+1) + "</BlockList>"
+	req := httptest.NewRequest(http.MethodPut, "/upload/"+strconv.FormatInt(upload.UploadID, 10)+"?comp=blocklist", strings.NewReader(body))
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"block list body too large"}`, rec.Body.String())
 }
 
 func TestFallbackProxyForwardsUnknownPath(t *testing.T) {
@@ -276,6 +315,15 @@ func newTestConfig(t *testing.T) config.Config {
 }
 
 var errComposeFailed = errors.New("compose failed")
+
+type readCountingBody struct {
+	reads int
+}
+
+func (b *readCountingBody) Read([]byte) (int, error) {
+	b.reads++
+	return 0, errors.New("body should not be read")
+}
 
 type failComposeStorage struct {
 	storage.Adapter

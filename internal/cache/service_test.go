@@ -94,6 +94,19 @@ func TestCommitBlockListReportsMissingBlock(t *testing.T) {
 	require.ErrorIs(t, err, ErrPartCountMismatch)
 }
 
+func TestBlockListCommitRejectsMoreThanProtocolLimit(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+
+	upload, err := service.CreateUpload(ctx, "key", "version", writableScope())
+	require.NoError(t, err)
+	commit, err := service.PrepareBlockListCommit(ctx, upload.UploadID)
+	require.NoError(t, err)
+
+	err = commit.Commit(ctx, make([]string, MaxBlockListEntries+1))
+	require.ErrorIs(t, err, ErrBlockListTooLarge)
+}
+
 func TestCompleteUploadTrustsPersistedPartCount(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
