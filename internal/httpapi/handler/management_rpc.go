@@ -15,6 +15,7 @@ import (
 	entpredicate "github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/managementauth"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	"github.com/gin-gonic/gin"
 )
 
@@ -80,7 +81,7 @@ func (h *Handler) managementRPCListCacheEntries(c *gin.Context, input map[string
 
 	result, err := h.listManagementCacheEntries(c, filters, page, itemsPerPage)
 	if err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 
@@ -102,7 +103,7 @@ func (h *Handler) managementRPCGetCacheEntry(c *gin.Context, input map[string]an
 			managementRPCErrorResponse(c, http.StatusNotFound, "NOT_FOUND", "cache entry not found", true)
 			return
 		}
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 
@@ -122,7 +123,7 @@ func (h *Handler) managementRPCMatchCacheEntry(c *gin.Context, input map[string]
 
 	match, matchType, err := h.matchManagementCacheEntry(c, primaryKey, restoreKeys, version, scopes, repoID)
 	if err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 	if match == nil {
@@ -141,7 +142,7 @@ func (h *Handler) managementRPCDeleteCacheEntry(c *gin.Context, input map[string
 	}
 
 	if err := h.deleteManagementCacheEntry(c, id); err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 
@@ -150,7 +151,7 @@ func (h *Handler) managementRPCDeleteCacheEntry(c *gin.Context, input map[string
 
 func (h *Handler) managementRPCDeleteCacheEntries(c *gin.Context, input map[string]any) {
 	if err := h.deleteManagementCacheEntries(c.Request.Context(), managementRPCCacheEntryFilters(input)); err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 
@@ -175,7 +176,7 @@ func (h *Handler) managementRPCGetStorageLocation(c *gin.Context, input map[stri
 			managementRPCErrorResponse(c, http.StatusNotFound, "NOT_FOUND", "storage location not found", true)
 			return
 		}
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 
@@ -190,7 +191,7 @@ func (h *Handler) managementRPCDeleteStorageLocation(c *gin.Context, input map[s
 	}
 
 	if err := h.deleteManagementStorageLocation(c, id); err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
+		managementRPCInternalError(c, err)
 		return
 	}
 
@@ -389,4 +390,15 @@ func managementRPCErrorResponse(c *gin.Context, status int, code string, message
 		},
 		Meta: []any{},
 	})
+}
+
+func managementRPCInternalError(c *gin.Context, err error) {
+	response.RecordInternalError(c, err)
+	managementRPCErrorResponse(
+		c,
+		http.StatusInternalServerError,
+		"INTERNAL_SERVER_ERROR",
+		response.InternalServerErrorMessage,
+		false,
+	)
 }

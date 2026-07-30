@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -21,8 +23,12 @@ func fallbackProxy(logger zerolog.Logger, target string) gin.HandlerFunc {
 func fallbackProxyWithResponseHeaderTimeout(logger zerolog.Logger, target string, responseHeaderTimeout time.Duration) gin.HandlerFunc {
 	targetURL, err := url.Parse(target)
 	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" {
+		if err == nil {
+			err = fmt.Errorf("fallback proxy target requires a scheme and host")
+		}
+		logger.Error().Err(err).Msg("invalid fallback proxy target")
 		return func(c *gin.Context) {
-			c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "invalid fallback proxy target"})
+			c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "bad gateway"})
 		}
 	}
 
@@ -37,18 +43,32 @@ func fallbackProxyWithResponseHeaderTimeout(logger zerolog.Logger, target string
 		},
 	}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		logger.Error().
+		event := logger.Error()
+		if isExpectedRequestCancellation(req.Context(), err) {
+			event = logger.Debug()
+		}
+		event.
 			Err(err).
 			Str("method", req.Method).
 			Str("path", req.URL.Path).
 			Msg("fallback proxy failed")
-		writeFallbackProxyError(rw, http.StatusBadGateway, err.Error())
+		if writeErr := writeFallbackProxyError(rw, http.StatusBadGateway, "bad gateway"); writeErr != nil {
+			event := logger.Error()
+			if isExpectedRequestCancellation(req.Context(), writeErr) {
+				event = logger.Debug()
+			}
+			event.
+				Err(errors.Join(err, writeErr)).
+				Str("method", req.Method).
+				Str("path", req.URL.Path).
+				Msg("fallback proxy error response failed")
+		}
 	}
 
 	return func(c *gin.Context) {
 		logger.Debug().
 			Str("method", c.Request.Method).
-			Str("path", c.Request.URL.RequestURI()).
+			Str("path", c.Request.URL.Path).
 			Str("target", targetURL.String()).
 			Msg("proxying unknown path")
 		proxy.ServeHTTP(proxyResponseWriter{ResponseWriter: c.Writer}, c.Request)
@@ -65,10 +85,10 @@ func (w proxyResponseWriter) Flush() {
 	}
 }
 
-func writeFallbackProxyError(rw http.ResponseWriter, status int, message string) {
+func writeFallbackProxyError(rw http.ResponseWriter, status int, message string) error {
 	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 	rw.WriteHeader(status)
-	_ = json.NewEncoder(rw).Encode(struct {
+	return json.NewEncoder(rw).Encode(struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}{

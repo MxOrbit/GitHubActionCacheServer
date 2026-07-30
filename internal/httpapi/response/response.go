@@ -99,6 +99,8 @@ type ErrorPayload struct {
 	Error string `json:"error"`
 }
 
+const InternalServerErrorMessage = "internal server error"
+
 func JSON[T Payload](c *gin.Context, response JSONResponse[T]) {
 	c.JSON(response.StatusCode(), response.Body())
 }
@@ -176,6 +178,17 @@ func Error(status int, message string) JSONResponse[ErrorPayload] {
 			Error:       message,
 		},
 	}
+}
+
+// InternalError records the private cause for the request logger and sends a
+// response that does not expose internal details.
+func InternalError(c *gin.Context, err error) {
+	RecordInternalError(c, err)
+	JSON(c, Error(http.StatusInternalServerError, InternalServerErrorMessage))
+}
+
+func RecordInternalError(c *gin.Context, err error) {
+	c.Error(err).SetType(gin.ErrorTypePrivate)
 }
 
 func NotImplemented() JSONResponse[ErrorPayload] {

@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	stdsql "database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -39,7 +41,7 @@ func (h *Handler) ListCacheEntries(c *gin.Context) {
 
 	result, err := h.listManagementCacheEntries(c, filters, page, itemsPerPage)
 	if err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 
@@ -48,7 +50,7 @@ func (h *Handler) ListCacheEntries(c *gin.Context) {
 
 func (h *Handler) DeleteCacheEntries(c *gin.Context) {
 	if err := h.deleteManagementCacheEntries(c.Request.Context(), cacheEntryFilters(c)); err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 
@@ -68,7 +70,7 @@ func (h *Handler) MatchCacheEntry(c *gin.Context) {
 
 	match, matchType, err := h.matchManagementCacheEntry(c, primaryKey, restoreKeys, version, scopes, repoID)
 	if err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 	if match == nil {
@@ -88,7 +90,7 @@ func (h *Handler) GetCacheEntry(c *gin.Context) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache entry not found"))
 			return
 		}
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 
@@ -97,7 +99,7 @@ func (h *Handler) GetCacheEntry(c *gin.Context) {
 
 func (h *Handler) DeleteCacheEntry(c *gin.Context) {
 	if err := h.deleteManagementCacheEntry(c, c.Param("id")); err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 
@@ -116,7 +118,7 @@ func (h *Handler) GetStorageLocation(c *gin.Context) {
 			response.JSON(c, response.Error(http.StatusNotFound, "storage location not found"))
 			return
 		}
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 
@@ -125,7 +127,7 @@ func (h *Handler) GetStorageLocation(c *gin.Context) {
 
 func (h *Handler) DeleteStorageLocation(c *gin.Context) {
 	if err := h.deleteManagementStorageLocation(c, c.Param("id")); err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 		return
 	}
 
@@ -235,7 +237,13 @@ func (h *Handler) deleteManagementCacheEntryBatch(ctx context.Context, predicate
 	committed := false
 	defer func() {
 		if !committed {
-			_ = tx.Rollback()
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, stdsql.ErrTxDone) {
+				event := h.logger.Error()
+				if ctx.Err() != nil {
+					event = h.logger.Debug()
+				}
+				event.Err(rollbackErr).Msg("management cache deletion rollback failed")
+			}
 		}
 	}()
 

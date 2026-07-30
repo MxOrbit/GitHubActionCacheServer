@@ -63,7 +63,7 @@ func (h *Handler) CreateCacheEntry(c *gin.Context) {
 
 	upload, err := h.cache.CreateUpload(c.Request.Context(), body.cacheKey(), body.cacheVersion(), scope)
 	if err != nil {
-		writeCacheError(c, err)
+		h.writeCacheError(c, err)
 		return
 	}
 
@@ -85,17 +85,24 @@ func (h *Handler) GetCacheEntryDownloadURL(c *gin.Context) {
 
 	keys := append([]string{body.cacheKey()}, nonBlankStrings(body.RestoreKeys)...)
 	base := baseurl.FromRequest(c.Request, h.cfg.Server.APIBaseURL)
+	var fallbackSignErr error
 	match, err := h.cache.GetCacheEntryWithDownloadURL(
 		c.Request.Context(),
 		keys,
 		body.cacheVersion(),
 		scope,
 		func(cacheEntryID string) string {
-			return h.downloadSigner.Sign(base+"/download/"+cacheEntryID, cacheEntryID)
+			var signedURL string
+			signedURL, fallbackSignErr = h.downloadSigner.Sign(base+"/download/"+cacheEntryID, cacheEntryID)
+			return signedURL
 		},
 	)
 	if err != nil {
-		writeCacheError(c, err)
+		h.writeCacheError(c, err)
+		return
+	}
+	if fallbackSignErr != nil {
+		response.InternalError(c, fallbackSignErr)
 		return
 	}
 	h.metrics.RecordCacheRequest(match != nil)
@@ -129,7 +136,7 @@ func (h *Handler) FinalizeCacheEntryUpload(c *gin.Context) {
 
 	uploadID, err := h.cache.CompleteUpload(c.Request.Context(), body.cacheKey(), body.cacheVersion(), scope)
 	if err != nil {
-		writeCacheError(c, err)
+		h.writeCacheError(c, err)
 		return
 	}
 	h.metrics.RecordCacheUpload()

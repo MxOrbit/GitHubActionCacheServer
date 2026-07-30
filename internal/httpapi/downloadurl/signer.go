@@ -28,18 +28,18 @@ func New(secret string, ttl time.Duration) *Signer {
 	return &Signer{secret: generated, ttl: ttl, now: time.Now}
 }
 
-func (s *Signer) Sign(rawURL string, cacheEntryID string) string {
+func (s *Signer) Sign(rawURL string, cacheEntryID string) (string, error) {
 	expires := s.now().Add(s.ttl).Unix()
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL
+		return "", err
 	}
 
 	query := parsed.Query()
 	query.Set("expires", strconv.FormatInt(expires, 10))
 	query.Set("signature", s.signature(cacheEntryID, expires))
 	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return parsed.String(), nil
 }
 
 func (s *Signer) Verify(cacheEntryID string, expiresValue string, signature string) bool {

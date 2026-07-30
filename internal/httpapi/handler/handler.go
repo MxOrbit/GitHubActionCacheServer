@@ -65,17 +65,39 @@ func New(options Options) *Handler {
 	}
 }
 
-func writeCacheError(c *gin.Context, err error) {
+func (h *Handler) writeCacheError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, cache.ErrNoWriteScope):
-		response.JSON(c, response.Error(http.StatusForbidden, err.Error()))
+		h.logExpectedCacheError(c, err)
+		response.JSON(c, response.Error(http.StatusForbidden, cache.ErrNoWriteScope.Error()))
 	case errors.Is(err, cache.ErrUploadAlreadyExists):
 		response.JSON(c, response.CacheMiss())
 	case errors.Is(err, cache.ErrUploadNotFound), errors.Is(err, cache.ErrCacheNotFound):
-		response.JSON(c, response.Error(http.StatusNotFound, err.Error()))
+		h.logExpectedCacheError(c, err)
+		message := cache.ErrCacheNotFound.Error()
+		if errors.Is(err, cache.ErrUploadNotFound) {
+			message = cache.ErrUploadNotFound.Error()
+		}
+		response.JSON(c, response.Error(http.StatusNotFound, message))
 	case errors.Is(err, cache.ErrNoPartsUploaded), errors.Is(err, cache.ErrPartCountMismatch), errors.Is(err, cache.ErrBlockListTooLarge):
-		response.JSON(c, response.Error(http.StatusBadRequest, err.Error()))
+		h.logExpectedCacheError(c, err)
+		message := cache.ErrNoPartsUploaded.Error()
+		switch {
+		case errors.Is(err, cache.ErrPartCountMismatch):
+			message = cache.ErrPartCountMismatch.Error()
+		case errors.Is(err, cache.ErrBlockListTooLarge):
+			message = cache.ErrBlockListTooLarge.Error()
+		}
+		response.JSON(c, response.Error(http.StatusBadRequest, message))
 	default:
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
+		response.InternalError(c, err)
 	}
+}
+
+func (h *Handler) logExpectedCacheError(c *gin.Context, err error) {
+	h.logger.Debug().
+		Err(err).
+		Str("method", c.Request.Method).
+		Str("path", c.Request.URL.Path).
+		Msg("cache request rejected")
 }

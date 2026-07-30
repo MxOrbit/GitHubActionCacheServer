@@ -289,23 +289,23 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 	}
 
 	if currentUpload.FinishedPartUploadCount == 0 {
-		_ = s.deleteUpload(ctx, currentUpload)
+		s.deleteUploadBestEffort(ctx, currentUpload)
 		return 0, ErrNoPartsUploaded
 	}
 
 	partCount, err := s.committedPartCount(ctx, currentUpload)
 	if err != nil {
 		if errors.Is(err, ErrPartCountMismatch) {
-			_ = s.deleteUpload(ctx, currentUpload)
+			s.deleteUploadBestEffort(ctx, currentUpload)
 		}
 		return 0, err
 	}
 	if partCount == 0 {
-		_ = s.deleteUpload(ctx, currentUpload)
+		s.deleteUploadBestEffort(ctx, currentUpload)
 		return 0, ErrNoPartsUploaded
 	}
 	if partCount > currentUpload.FinishedPartUploadCount {
-		_ = s.deleteUpload(ctx, currentUpload)
+		s.deleteUploadBestEffort(ctx, currentUpload)
 		return 0, fmt.Errorf(
 			"%w: committed part count %d exceeds finished upload count %d",
 			ErrPartCountMismatch,
@@ -319,7 +319,7 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 	}
 	sizeBytes, err := parts.LogicalIndexedSize(partCount)
 	if err != nil {
-		_ = s.deleteUpload(ctx, currentUpload)
+		s.deleteUploadBestEffort(ctx, currentUpload)
 		return 0, fmt.Errorf("%w: %v", ErrPartCountMismatch, err)
 	}
 
@@ -379,7 +379,7 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 			continue
 		}
 
-		downloadURL := fallbackDownloadURL(cacheEntry.ID)
+		downloadURL := ""
 		if s.enableDirectDownloads && directDownloads {
 			lease, leaseErr := s.lifecycle.AcquireReader(ctx, cacheEntry.ID, storagelifecycle.AcquireReaderOptions{Direct: true})
 			switch {
@@ -417,6 +417,9 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 			default:
 				return nil, leaseErr
 			}
+		}
+		if downloadURL == "" {
+			downloadURL = fallbackDownloadURL(cacheEntry.ID)
 		}
 
 		return &MatchResult{CacheEntry: cacheEntry, DownloadURL: downloadURL}, nil
@@ -615,7 +618,7 @@ func (s *Service) touchStorageLocationIfStale(ctx context.Context, location *ent
 		return
 	}
 
-	_, _ = s.db.StorageLocation.Update().
+	_, err := s.db.StorageLocation.Update().
 		Where(
 			storagelocation.ID(location.ID),
 			storagelocation.Or(
@@ -625,6 +628,16 @@ func (s *Service) touchStorageLocationIfStale(ctx context.Context, location *ent
 		).
 		SetLastDownloadedAt(now.UnixMilli()).
 		Save(ctx)
+	if err != nil {
+		event := s.logger.Error()
+		if ctx.Err() != nil {
+			event = s.logger.Debug()
+		}
+		event.
+			Err(err).
+			Str("storage_location_id", location.ID).
+			Msg("storage location access timestamp update failed")
+	}
 }
 
 func uploadTuple(key, version, scope, repoID string) []entpredicate.Upload {
@@ -678,6 +691,20 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 	}
 	committed = true
 	return nil
+}
+
+func (s *Service) deleteUploadBestEffort(ctx context.Context, currentUpload *ent.Upload) {
+	if err := s.deleteUpload(ctx, currentUpload); err != nil {
+		event := s.logger.Error()
+		if ctx.Err() != nil {
+			event = s.logger.Debug()
+		}
+		event.
+			Err(err).
+			Int64("upload_id", currentUpload.ID).
+			Str("folder", currentUpload.FolderName).
+			Msg("invalid upload cleanup failed")
+	}
 }
 
 func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.Upload, scope, repoID string, partCount int, sizeBytes int64) (*ent.StorageLocation, string, error) {
@@ -989,7 +1016,12 @@ func (s *Service) finishReservedMerge() {
 func (s *Service) releaseReaderLease(leaseID string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
 	defer cancel()
-	_ = s.lifecycle.ReleaseReader(cleanupCtx, leaseID)
+	if err := s.lifecycle.ReleaseReader(cleanupCtx, leaseID); err != nil {
+		s.logger.Error().
+			Err(err).
+			Str("reader_lease_id", leaseID).
+			Msg("cache reader lease release failed")
+	}
 }
 
 func (s *Service) releaseMaterializationLease(cacheEntryID, locationID, token string) {

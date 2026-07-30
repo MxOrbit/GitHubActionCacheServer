@@ -13,6 +13,7 @@ import (
 	twirppb "github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/twirp"
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -51,6 +52,10 @@ func bindCacheRequest[T keyedCacheRequest](
 			response.JSON(c, response.Error(http.StatusRequestEntityTooLarge, "request body too large"))
 			return body, auth.CacheScope{}, wireFormat, false
 		}
+		zerolog.Ctx(c.Request.Context()).Debug().
+			Err(err).
+			Str("wire_format", wireFormat.String()).
+			Msg("cache request body rejected")
 		response.JSON(c, response.Error(http.StatusBadRequest, "invalid body"))
 		return body, auth.CacheScope{}, wireFormat, false
 	}
@@ -61,6 +66,7 @@ func bindCacheRequest[T keyedCacheRequest](
 
 	scope, ok := middleware.CacheScope(c)
 	if !ok {
+		response.RecordInternalError(c, errors.New("cache scope missing from authenticated request context"))
 		response.JSON(c, response.Error(http.StatusUnauthorized, "cache scope missing"))
 		return body, auth.CacheScope{}, wireFormat, false
 	}
@@ -89,10 +95,17 @@ func writeCacheResponse[T response.Payload](
 
 	body, err := proto.Marshal(protobufResponse)
 	if err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, "failed to encode response"))
+		response.InternalError(c, err)
 		return
 	}
 	c.Data(jsonResponse.StatusCode(), protobufContentType, body)
+}
+
+func (f cacheWireFormat) String() string {
+	if f == cacheWireProtobuf {
+		return "protobuf"
+	}
+	return "json"
 }
 
 func decodeCreateCacheEntryRequest(raw []byte) (createCacheEntryRequest, error) {

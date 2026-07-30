@@ -2,8 +2,12 @@ package response
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,4 +52,18 @@ func TestJSONResponseBodyMarshal(t *testing.T) {
 			require.JSONEq(t, tt.want, string(got))
 		})
 	}
+}
+
+func TestInternalErrorHidesAndRecordsCause(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	internalErr := errors.New("sensitive database detail")
+
+	InternalError(c, internalErr)
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
+	require.JSONEq(t, `{"ok":false,"error":"internal server error"}`, recorder.Body.String())
+	require.NotContains(t, recorder.Body.String(), internalErr.Error())
+	require.Len(t, c.Errors.ByType(gin.ErrorTypePrivate), 1)
+	require.ErrorIs(t, c.Errors[0].Err, internalErr)
 }

@@ -184,6 +184,7 @@ func TestFallbackProxyTimesOutWaitingForResponseHeaders(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"bad gateway"}`, rec.Body.String())
 	require.Less(t, time.Since(startedAt), time.Second)
 }
 
@@ -309,7 +310,8 @@ func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 		Storage: failComposeStorage{Adapter: filesystem},
 	})
 
-	signedURL := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodGet, signedURL, nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

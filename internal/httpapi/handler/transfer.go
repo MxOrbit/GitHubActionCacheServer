@@ -29,7 +29,7 @@ func (h *Handler) UploadPart(c *gin.Context) {
 		}
 		commit, err := h.cache.PrepareBlockListCommit(c.Request.Context(), uploadID)
 		if err != nil {
-			writeCacheError(c, err)
+			h.writeCacheError(c, err)
 			return
 		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBlockListRequestBodyBytes)
@@ -41,14 +41,19 @@ func (h *Handler) UploadPart(c *gin.Context) {
 				return
 			}
 			if errors.Is(err, cache.ErrBlockListTooLarge) {
-				writeCacheError(c, err)
+				h.writeCacheError(c, err)
 				return
 			}
+			h.logger.Debug().
+				Err(err).
+				Str("method", c.Request.Method).
+				Str("path", c.Request.URL.Path).
+				Msg("block list request body rejected")
 			response.JSON(c, response.Error(http.StatusBadRequest, "invalid block list"))
 			return
 		}
 		if err := commit.Commit(c.Request.Context(), blockIDs); err != nil {
-			writeCacheError(c, err)
+			h.writeCacheError(c, err)
 			return
 		}
 		response.Empty(c, response.AzureCreated(uuid.NewString()))
@@ -77,12 +82,12 @@ func (h *Handler) UploadPart(c *gin.Context) {
 
 	if blockID != "" {
 		if err := h.cache.UploadBlock(c.Request.Context(), uploadID, blockID, c.Request.Body); err != nil {
-			writeCacheError(c, err)
+			h.writeCacheError(c, err)
 			return
 		}
 	} else {
 		if err := h.cache.UploadPart(c.Request.Context(), uploadID, c.Request.Body); err != nil {
-			writeCacheError(c, err)
+			h.writeCacheError(c, err)
 			return
 		}
 	}
@@ -108,7 +113,7 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 			return
 		}
 		h.logDownloadFailure(c.Request.Context(), err, downloadFailureMetadata(err, cacheEntryID), "open")
-		writeCacheError(c, err)
+		response.JSON(c, response.Error(http.StatusInternalServerError, response.InternalServerErrorMessage))
 		return
 	}
 
@@ -133,7 +138,7 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
 			return
 		}
-		writeCacheError(c, copyErr)
+		response.JSON(c, response.Error(http.StatusInternalServerError, response.InternalServerErrorMessage))
 		return
 	}
 }

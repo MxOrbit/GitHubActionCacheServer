@@ -9,6 +9,7 @@
 *.swp
 *.swo
 *~
+/todo.*.md
 
 # AI tools
 .aider*

@@ -30,7 +30,7 @@ func TestCacheServiceRequiresBearerToken(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"authorization header missing or malformed"}`, rec.Body.String())
+	require.JSONEq(t, `{"ok":false,"error":"unauthorized"}`, rec.Body.String())
 }
 
 func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testing.T) {

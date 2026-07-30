@@ -1,7 +1,11 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
@@ -71,7 +75,7 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 			Issuer:         cfg.Auth.TokenIssuer,
 			JWKSURL:        cfg.Auth.TokenJWKSURL,
 			SkipValidation: cfg.Auth.SkipTokenValidation,
-		})),
+		}), logger),
 	)
 	cacheService.POST("/CreateCacheEntry", handlers.CreateCacheEntry)
 	cacheService.POST("/GetCacheEntryDownloadURL", handlers.GetCacheEntryDownloadURL)
@@ -118,10 +122,20 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 func requestLogger(logger zerolog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
+		c.Request = c.Request.WithContext(logger.WithContext(c.Request.Context()))
 		c.Next()
 
 		event := logger.Info()
-		if c.Request.URL.Path == "/metrics" {
+		message := "http request"
+		internalErr := privateRequestErrors(c)
+		switch {
+		case internalErr != nil && isExpectedRequestCancellation(c.Request.Context(), internalErr):
+			event = logger.Debug().Err(internalErr)
+			message = "http request interrupted"
+		case internalErr != nil:
+			event = logger.Error().Err(internalErr)
+			message = "http request failed"
+		case c.Request.URL.Path == "/metrics":
 			event = logger.Debug()
 		}
 		event.
@@ -129,6 +143,23 @@ func requestLogger(logger zerolog.Logger) gin.HandlerFunc {
 			Str("path", c.Request.URL.Path).
 			Int("status", c.Writer.Status()).
 			Dur("duration", time.Since(start)).
-			Msg("http request")
+			Msg(message)
 	}
+}
+
+func privateRequestErrors(c *gin.Context) error {
+	privateErrors := c.Errors.ByType(gin.ErrorTypePrivate)
+	errs := make([]error, 0, len(privateErrors))
+	for _, requestErr := range privateErrors {
+		errs = append(errs, requestErr.Err)
+	}
+	return errors.Join(errs...)
+}
+
+func isExpectedRequestCancellation(ctx context.Context, err error) bool {
+	return ctx.Err() != nil ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
