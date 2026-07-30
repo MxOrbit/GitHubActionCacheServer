@@ -170,16 +170,29 @@ func (s *Service) WaitForMerges(ctx context.Context) error {
 		close(done)
 	}()
 
+	if waitForMergeCompletion(ctx, done) {
+		return nil
+	}
+
+	s.mergeCancel()
 	select {
 	case <-done:
-		return nil
+	case <-time.After(mergeCleanupTimeout):
+	}
+	return ctx.Err()
+}
+
+func waitForMergeCompletion(ctx context.Context, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
 	case <-ctx.Done():
-		s.mergeCancel()
 		select {
 		case <-done:
-		case <-time.After(mergeCleanupTimeout):
+			return true
+		default:
+			return false
 		}
-		return ctx.Err()
 	}
 }
 

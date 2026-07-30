@@ -1033,6 +1033,15 @@ func TestWaitForMergesCancelsInFlightMergeAndReleasesLease(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
+func TestWaitForMergeCompletionPrefersDoneWhenContextIsAlsoCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	close(done)
+
+	require.True(t, waitForMergeCompletion(ctx, done))
+}
+
 func TestFinalizeQueuesCleanupWithoutStorageIO(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &failDeleteStorage{Adapter: filesystem}
