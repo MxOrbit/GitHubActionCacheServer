@@ -2,7 +2,9 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -34,6 +36,13 @@ import (
 
 const externalS3CacheSize = 5*1024*1024 + 1024
 
+const postgresMigrationLockKey = int64(2389201325396535817)
+
+type externalMigrationResult struct {
+	client *ent.Client
+	err    error
+}
+
 func TestExternalPostgresFilesystemSaveAndRestore(t *testing.T) {
 	dbCfg, ok := externalPostgresConfig()
 	if !ok {
@@ -60,6 +69,65 @@ func TestExternalMySQLFilesystemSaveAndRestore(t *testing.T) {
 	router := newExternalRouter(t, client, filesystem)
 
 	runSaveRestoreFlow(t, router, uniqueIntegrationCacheKey("mysql"), "mysql-cache-content")
+}
+
+func TestExternalPgBouncerSchemaMigrationSerialization(t *testing.T) {
+	dbCfg, ok := externalPgBouncerConfig()
+	if !ok {
+		t.Skip("set E2E_PGBOUNCER_URL to run PgBouncer migration serialization coverage")
+	}
+
+	ctx := context.Background()
+	prepareExternalSizeColumnMigration(t, ctx, dbCfg)
+	blockerDB := openExternalSQLDB(t, ctx, dbCfg)
+	t.Cleanup(func() { require.NoError(t, blockerDB.Close()) })
+	blockerTx, err := blockerDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = blockerTx.Rollback() }()
+	_, err = blockerTx.ExecContext(ctx, "select pg_advisory_xact_lock($1)", postgresMigrationLockKey)
+	require.NoError(t, err)
+
+	resultCh := startExternalMigration(ctx, dbCfg)
+	requireMigrationStillWaiting(t, resultCh)
+	require.NoError(t, blockerTx.Commit())
+	requireExternalMigrationSuccess(t, resultCh)
+	requireExternalSizeColumn(t, ctx, dbCfg)
+}
+
+func TestExternalMySQLSchemaMigrationSerialization(t *testing.T) {
+	dbCfg, ok := externalMySQLConfig()
+	if !ok {
+		t.Skip("set E2E_MYSQL_HOST, E2E_MYSQL_DATABASE and E2E_MYSQL_USER to run MySQL migration serialization coverage")
+	}
+
+	ctx := context.Background()
+	prepareExternalSizeColumnMigration(t, ctx, dbCfg)
+	blockerDB := openExternalSQLDB(t, ctx, dbCfg)
+	t.Cleanup(func() { require.NoError(t, blockerDB.Close()) })
+	blockerConn, err := blockerDB.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, blockerConn.Close()) })
+	lockName := externalMySQLMigrationLockName(dbCfg.MySQLDatabase)
+	var acquired sql.NullInt64
+	require.NoError(t, blockerConn.QueryRowContext(ctx, "select get_lock(?, 0)", lockName).Scan(&acquired))
+	require.True(t, acquired.Valid)
+	require.Equal(t, int64(1), acquired.Int64)
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			_, _ = blockerConn.ExecContext(context.Background(), "select release_lock(?)", lockName)
+		}
+	}()
+
+	resultCh := startExternalMigration(ctx, dbCfg)
+	requireMigrationStillWaiting(t, resultCh)
+	var released sql.NullInt64
+	require.NoError(t, blockerConn.QueryRowContext(ctx, "select release_lock(?)", lockName).Scan(&released))
+	require.True(t, released.Valid)
+	require.Equal(t, int64(1), released.Int64)
+	lockHeld = false
+	requireExternalMigrationSuccess(t, resultCh)
+	requireExternalSizeColumn(t, ctx, dbCfg)
 }
 
 func TestSQLiteCacheKeyMatching(t *testing.T) {
@@ -560,6 +628,17 @@ func externalPostgresConfig() (config.DBConfig, bool) {
 	}, true
 }
 
+func externalPgBouncerConfig() (config.DBConfig, bool) {
+	dsn := strings.TrimSpace(os.Getenv("E2E_PGBOUNCER_URL"))
+	if dsn == "" {
+		return config.DBConfig{}, false
+	}
+	return config.DBConfig{
+		Driver:      db.DriverPostgres,
+		PostgresURL: dsn,
+	}, true
+}
+
 func externalMySQLConfig() (config.DBConfig, bool) {
 	host := strings.TrimSpace(os.Getenv("E2E_MYSQL_HOST"))
 	database := strings.TrimSpace(os.Getenv("E2E_MYSQL_DATABASE"))
@@ -575,6 +654,92 @@ func externalMySQLConfig() (config.DBConfig, bool) {
 		MySQLUser:     user,
 		MySQLPassword: os.Getenv("E2E_MYSQL_PASSWORD"),
 	}, true
+}
+
+func externalMySQLMigrationLockName(database string) string {
+	digest := sha256.Sum256([]byte(database))
+	return "gacs:schema-migration:" + hex.EncodeToString(digest[:20])
+}
+
+func startExternalMigration(ctx context.Context, cfg config.DBConfig) <-chan externalMigrationResult {
+	resultCh := make(chan externalMigrationResult, 1)
+	go func() {
+		client, err := db.OpenAndMigrate(ctx, cfg)
+		resultCh <- externalMigrationResult{client: client, err: err}
+	}()
+	return resultCh
+}
+
+func requireMigrationStillWaiting(t *testing.T, resultCh <-chan externalMigrationResult) {
+	t.Helper()
+	select {
+	case result := <-resultCh:
+		if result.client != nil {
+			require.NoError(t, result.client.Close())
+		}
+		require.FailNow(t, "migration returned before the database lock was released", "error: %v", result.err)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func requireExternalMigrationSuccess(t *testing.T, resultCh <-chan externalMigrationResult) {
+	t.Helper()
+	select {
+	case result := <-resultCh:
+		require.NoError(t, result.err)
+		if result.client != nil {
+			require.NoError(t, result.client.Close())
+		}
+	case <-time.After(15 * time.Second):
+		require.FailNow(t, "migration did not finish after the database lock was released")
+	}
+}
+
+func prepareExternalSizeColumnMigration(t *testing.T, ctx context.Context, cfg config.DBConfig) {
+	t.Helper()
+	t.Cleanup(func() {
+		client, err := db.OpenAndMigrate(context.Background(), cfg)
+		require.NoError(t, err)
+		if client != nil {
+			require.NoError(t, client.Close())
+		}
+	})
+	client, err := db.OpenAndMigrate(ctx, cfg)
+	require.NoError(t, err)
+	require.NoError(t, client.Close())
+
+	sqlDB := openExternalSQLDB(t, ctx, cfg)
+	dropSizeColumn := `alter table storage_locations drop column "sizeBytes"`
+	if cfg.Driver == db.DriverMySQL {
+		dropSizeColumn = "alter table storage_locations drop column `sizeBytes`"
+	}
+	_, err = sqlDB.ExecContext(ctx, dropSizeColumn)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+}
+
+func requireExternalSizeColumn(t *testing.T, ctx context.Context, cfg config.DBConfig) {
+	t.Helper()
+	sqlDB := openExternalSQLDB(t, ctx, cfg)
+	defer func() { require.NoError(t, sqlDB.Close()) }()
+
+	query := `select exists(
+		select 1 from information_schema.columns
+		where table_schema = current_schema()
+			and table_name = 'storage_locations'
+			and column_name = 'sizeBytes'
+	)`
+	if cfg.Driver == db.DriverMySQL {
+		query = `select exists(
+			select 1 from information_schema.columns
+			where table_schema = database()
+				and table_name = 'storage_locations'
+				and column_name = 'sizeBytes'
+		)`
+	}
+	var exists bool
+	require.NoError(t, sqlDB.QueryRowContext(ctx, query).Scan(&exists))
+	require.True(t, exists)
 }
 
 func externalS3Config() (config.StorageConfig, bool) {

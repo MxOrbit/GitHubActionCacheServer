@@ -40,7 +40,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("configuration load failed")
 	}
 
-	dbClient, err := db.OpenAndMigrate(context.Background(), cfg.DB)
+	dbClient, err := db.OpenAndMigrate(logger.WithContext(context.Background()), cfg.DB)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("database initialization failed")
 	}

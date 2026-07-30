@@ -51,6 +51,36 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      - name: Start PgBouncer in transaction pooling mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pgbouncer
+          cat > "$RUNNER_TEMP/pgbouncer-users.txt" <<'EOF'
+          "cache" "cache"
+          EOF
+          cat > "$RUNNER_TEMP/pgbouncer.ini" <<EOF
+          [databases]
+          cache_test = host=127.0.0.1 port=5432 dbname=cache_test user=cache password=cache
+
+          [pgbouncer]
+          listen_addr = 127.0.0.1
+          listen_port = 6432
+          auth_type = trust
+          auth_file = $RUNNER_TEMP/pgbouncer-users.txt
+          pool_mode = transaction
+          pidfile = $RUNNER_TEMP/pgbouncer.pid
+          logfile = $RUNNER_TEMP/pgbouncer.log
+          EOF
+          pgbouncer -d "$RUNNER_TEMP/pgbouncer.ini"
+          for i in {1..30}; do
+            if pg_isready -h 127.0.0.1 -p 6432 -U cache -d cache_test; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/pgbouncer.log"
+          exit 1
+
       - name: Unit and SQLite e2e tests
         run: go test ./...
 
@@ -76,6 +106,7 @@ jobs:
       - name: External service integration tests
         env:
           E2E_POSTGRES_URL: postgres://cache:cache@127.0.0.1:5432/cache_test?sslmode=disable
+          E2E_PGBOUNCER_URL: "postgres://cache:cache@127.0.0.1:6432/cache_test?sslmode=disable&default_query_exec_mode=exec"
           E2E_MYSQL_HOST: 127.0.0.1
           E2E_MYSQL_PORT: "3306"
           E2E_MYSQL_DATABASE: cache_test
@@ -87,4 +118,4 @@ jobs:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_EC2_METADATA_DISABLED: "true"
-        run: go test ./e2e -run 'TestExternal((Postgres|MySQL)(FilesystemSaveAndRestore|CacheKeyMatching|CleanupRetention|StorageSizeMigration|CapacityEviction)|S3MinIOSaveAndRestore)' -count=1
+        run: go test ./e2e -run 'TestExternal((Postgres|MySQL)(FilesystemSaveAndRestore|CacheKeyMatching|CleanupRetention|StorageSizeMigration|CapacityEviction|SchemaMigrationSerialization)|PgBouncerSchemaMigrationSerialization|S3MinIOSaveAndRestore)' -count=1

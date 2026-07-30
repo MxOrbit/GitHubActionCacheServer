@@ -167,6 +167,40 @@ func TestStorageDeletionIDUsesDatabaseIdentity(t *testing.T) {
 	require.True(t, migrate.StorageDeletionsColumns[0].Increment)
 }
 
+func TestMySQLMigrationLockResult(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     sql.NullInt64
+		acquired   bool
+		wantErr    bool
+		errorMatch string
+	}{
+		{name: "acquired", result: sql.NullInt64{Int64: 1, Valid: true}, acquired: true},
+		{name: "timeout", result: sql.NullInt64{Int64: 0, Valid: true}},
+		{name: "null", result: sql.NullInt64{}, wantErr: true, errorMatch: "returned NULL"},
+		{name: "unexpected", result: sql.NullInt64{Int64: 2, Valid: true}, wantErr: true, errorMatch: "unexpected GET_LOCK result"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			acquired, err := mysqlLockAcquired(test.result)
+			require.Equal(t, test.acquired, acquired)
+			if test.wantErr {
+				require.ErrorContains(t, err, test.errorMatch)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestMySQLMigrationLockNameIsDatabaseScopedAndBounded(t *testing.T) {
+	first := mysqlMigrationLockName("cache-a")
+	require.Equal(t, first, mysqlMigrationLockName("cache-a"))
+	require.NotEqual(t, first, mysqlMigrationLockName("cache-b"))
+	require.LessOrEqual(t, len(first), 64)
+}
+
 func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 	require.Equal(t, []string{
 		"id", "key", "version", "scope", "repoId", "updatedAt", "locationId",

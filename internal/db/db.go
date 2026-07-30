@@ -2,15 +2,19 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
+	entsqldialect "entgo.io/ent/dialect/sql"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
@@ -18,6 +22,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/rs/zerolog"
 	_ "modernc.org/sqlite"
 )
 
@@ -25,9 +30,19 @@ const (
 	DriverSQLite   = "sqlite"
 	DriverPostgres = "postgres"
 	DriverMySQL    = "mysql"
+
+	// First 63 bits of SHA-256("github.com/MxOrbit/GitHubActionCacheServer:schema-migration").
+	postgresMigrationLockKey      = int64(2389201325396535817)
+	mysqlMigrationLockWaitSeconds = 10
+	migrationUnlockTimeout        = 5 * time.Second
 )
 
-func Open(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
+type openedDatabase struct {
+	client *ent.Client
+	sqlDB  *sql.DB
+}
+
+func openDatabase(ctx context.Context, cfg config.DBConfig) (*openedDatabase, error) {
 	switch cfg.Driver {
 	case DriverSQLite:
 		return openSQLite(ctx, cfg.SQLitePath)
@@ -41,24 +56,32 @@ func Open(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
 }
 
 func OpenAndMigrate(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
-	client, err := Open(ctx, cfg)
+	opened, err := openDatabase(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := Migrate(ctx, client); err != nil {
-		_ = client.Close()
+	switch cfg.Driver {
+	case DriverPostgres:
+		err = migratePostgresWithLock(ctx, opened.sqlDB)
+	case DriverMySQL:
+		err = migrateMySQLWithLock(ctx, cfg, opened.client)
+	default:
+		err = migrateSchema(ctx, opened.client)
+	}
+	if err != nil {
+		_ = opened.client.Close()
 		return nil, err
 	}
 
-	return client, nil
+	return opened.client, nil
 }
 
-func Migrate(ctx context.Context, client *ent.Client) error {
+func migrateSchema(ctx context.Context, client *ent.Client) error {
 	return client.Schema.Create(ctx, migrate.WithForeignKeys(true))
 }
 
-func openSQLite(ctx context.Context, path string) (*ent.Client, error) {
+func openSQLite(ctx context.Context, path string) (*openedDatabase, error) {
 	if path == "" {
 		return nil, fmt.Errorf("DB_SQLITE_PATH is required")
 	}
@@ -80,10 +103,13 @@ func openSQLite(ctx context.Context, path string) (*ent.Client, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
-	return ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, sqlDB))), nil
+	return &openedDatabase{
+		client: ent.NewClient(ent.Driver(entsqldialect.OpenDB(dialect.SQLite, sqlDB))),
+		sqlDB:  sqlDB,
+	}, nil
 }
 
-func openPostgres(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
+func openPostgres(ctx context.Context, cfg config.DBConfig) (*openedDatabase, error) {
 	dsn, err := postgresDSN(cfg)
 	if err != nil {
 		return nil, err
@@ -98,10 +124,13 @@ func openPostgres(ctx context.Context, cfg config.DBConfig) (*ent.Client, error)
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	return ent.NewClient(ent.Driver(entsql.OpenDB(dialect.Postgres, sqlDB))), nil
+	return &openedDatabase{
+		client: ent.NewClient(ent.Driver(entsqldialect.OpenDB(dialect.Postgres, sqlDB))),
+		sqlDB:  sqlDB,
+	}, nil
 }
 
-func openMySQL(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
+func openMySQL(ctx context.Context, cfg config.DBConfig) (*openedDatabase, error) {
 	if cfg.MySQLDatabase == "" || cfg.MySQLHost == "" || cfg.MySQLUser == "" {
 		return nil, fmt.Errorf("mysql requires DB_MYSQL_DATABASE, DB_MYSQL_HOST and DB_MYSQL_USER")
 	}
@@ -116,7 +145,166 @@ func openMySQL(ctx context.Context, cfg config.DBConfig) (*ent.Client, error) {
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
 
-	return ent.NewClient(ent.Driver(entsql.OpenDB(dialect.MySQL, sqlDB))), nil
+	return &openedDatabase{
+		client: ent.NewClient(ent.Driver(entsqldialect.OpenDB(dialect.MySQL, sqlDB))),
+		sqlDB:  sqlDB,
+	}, nil
+}
+
+type postgresMigrationDriver struct {
+	conn entsqldialect.Conn
+}
+
+func (d *postgresMigrationDriver) Exec(ctx context.Context, query string, args, value any) error {
+	return d.conn.Exec(ctx, query, args, value)
+}
+
+func (d *postgresMigrationDriver) Query(ctx context.Context, query string, args, value any) error {
+	return d.conn.Query(ctx, query, args, value)
+}
+
+func (d *postgresMigrationDriver) Tx(context.Context) (dialect.Tx, error) {
+	return dialect.NopTx(d), nil
+}
+
+func (*postgresMigrationDriver) Close() error {
+	return nil
+}
+
+func (*postgresMigrationDriver) Dialect() string {
+	return dialect.Postgres
+}
+
+func migratePostgresWithLock(ctx context.Context, sqlDB *sql.DB) (retErr error) {
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin postgres schema migration transaction: %w", err)
+	}
+	defer func() {
+		if tx == nil {
+			return
+		}
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback postgres schema migration: %w", err))
+		}
+	}()
+
+	logger := zerolog.Ctx(ctx)
+	waitStartedAt := time.Now()
+	logger.Info().Str("driver", DriverPostgres).Msg("waiting for database schema migration lock")
+	if _, err := tx.ExecContext(ctx, "select pg_advisory_xact_lock($1)", postgresMigrationLockKey); err != nil {
+		return fmt.Errorf("acquire postgres schema migration lock: %w", err)
+	}
+	logger.Info().Str("driver", DriverPostgres).Dur("wait", time.Since(waitStartedAt)).Msg("database schema migration lock acquired")
+
+	driver := &postgresMigrationDriver{
+		conn: entsqldialect.Conn{ExecQuerier: tx},
+	}
+	if err := migrate.NewSchema(driver).Create(ctx, migrate.WithForeignKeys(true)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit postgres schema migration: %w", err)
+	}
+	tx = nil
+	return nil
+}
+
+type mysqlMigrationLock struct {
+	db       *sql.DB
+	conn     *sql.Conn
+	lockName string
+}
+
+func migrateMySQLWithLock(ctx context.Context, cfg config.DBConfig, client *ent.Client) (retErr error) {
+	lock, err := acquireMySQLMigrationLock(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, lock.release())
+	}()
+	return migrateSchema(ctx, client)
+}
+
+func acquireMySQLMigrationLock(ctx context.Context, cfg config.DBConfig) (*mysqlMigrationLock, error) {
+	lockDB, err := sql.Open("mysql", mysqlDSN(cfg))
+	if err != nil {
+		return nil, fmt.Errorf("open mysql schema migration lock connection: %w", err)
+	}
+	lockDB.SetMaxOpenConns(1)
+	lockDB.SetMaxIdleConns(1)
+
+	conn, err := lockDB.Conn(ctx)
+	if err != nil {
+		_ = lockDB.Close()
+		return nil, fmt.Errorf("reserve mysql schema migration lock connection: %w", err)
+	}
+
+	lockName := mysqlMigrationLockName(cfg.MySQLDatabase)
+	lock := &mysqlMigrationLock{db: lockDB, conn: conn, lockName: lockName}
+	logger := zerolog.Ctx(ctx)
+	waitStartedAt := time.Now()
+	logger.Info().Str("driver", DriverMySQL).Msg("waiting for database schema migration lock")
+	for {
+		var result sql.NullInt64
+		if err := conn.QueryRowContext(
+			ctx,
+			"select get_lock(?, ?)",
+			lockName,
+			mysqlMigrationLockWaitSeconds,
+		).Scan(&result); err != nil {
+			_ = lock.close()
+			return nil, fmt.Errorf("acquire mysql schema migration lock: %w", err)
+		}
+		acquired, err := mysqlLockAcquired(result)
+		if err != nil {
+			_ = lock.close()
+			return nil, err
+		}
+		if acquired {
+			logger.Info().Str("driver", DriverMySQL).Dur("wait", time.Since(waitStartedAt)).Msg("database schema migration lock acquired")
+			return lock, nil
+		}
+	}
+}
+
+func mysqlLockAcquired(result sql.NullInt64) (bool, error) {
+	if !result.Valid {
+		return false, fmt.Errorf("acquire mysql schema migration lock: GET_LOCK returned NULL")
+	}
+	switch result.Int64 {
+	case 1:
+		return true, nil
+	case 0:
+		return false, nil
+	default:
+		return false, fmt.Errorf("acquire mysql schema migration lock: unexpected GET_LOCK result %d", result.Int64)
+	}
+}
+
+func mysqlMigrationLockName(database string) string {
+	digest := sha256.Sum256([]byte(database))
+	return "gacs:schema-migration:" + hex.EncodeToString(digest[:20])
+}
+
+func (l *mysqlMigrationLock) release() error {
+	ctx, cancel := context.WithTimeout(context.Background(), migrationUnlockTimeout)
+	defer cancel()
+
+	var errs []error
+	var result sql.NullInt64
+	if err := l.conn.QueryRowContext(ctx, "select release_lock(?)", l.lockName).Scan(&result); err != nil {
+		errs = append(errs, fmt.Errorf("release mysql schema migration lock: %w", err))
+	} else if !result.Valid || result.Int64 != 1 {
+		errs = append(errs, fmt.Errorf("release mysql schema migration lock: unexpected RELEASE_LOCK result %v", result))
+	}
+	errs = append(errs, l.close())
+	return errors.Join(errs...)
+}
+
+func (l *mysqlMigrationLock) close() error {
+	return errors.Join(l.conn.Close(), l.db.Close())
 }
 
 func mysqlDSN(cfg config.DBConfig) string {
