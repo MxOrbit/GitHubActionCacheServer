@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -11,10 +12,14 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	twirppb "github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/twirp"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"google.golang.org/protobuf/proto"
 )
 
-const protobufContentType = "application/protobuf"
+const (
+	protobufContentType             = "application/protobuf"
+	maxCacheServiceRequestBodyBytes = 128 << 10
+)
 
 type cacheWireFormat uint8
 
@@ -31,17 +36,25 @@ func bindCacheRequest[T keyedCacheRequest](
 ) (T, auth.CacheScope, cacheWireFormat, bool) {
 	var body T
 	wireFormat := cacheRequestWireFormat(c.GetHeader("Content-Type"))
-	var err error
-	if wireFormat == cacheWireProtobuf {
-		var raw []byte
-		raw, err = io.ReadAll(c.Request.Body)
-		if err == nil {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCacheServiceRequestBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err == nil {
+		if wireFormat == cacheWireProtobuf {
 			body, err = decodeProtobuf(raw)
+		} else {
+			err = binding.JSON.BindBody(raw, &body)
 		}
-	} else {
-		err = c.ShouldBindJSON(&body)
 	}
-	if err != nil || body.cacheKey() == "" || body.cacheVersion() == "" {
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			response.JSON(c, response.Error(http.StatusRequestEntityTooLarge, "request body too large"))
+			return body, auth.CacheScope{}, wireFormat, false
+		}
+		response.JSON(c, response.Error(http.StatusBadRequest, "invalid body"))
+		return body, auth.CacheScope{}, wireFormat, false
+	}
+	if body.cacheKey() == "" || body.cacheVersion() == "" {
 		response.JSON(c, response.Error(http.StatusBadRequest, "invalid body"))
 		return body, auth.CacheScope{}, wireFormat, false
 	}
