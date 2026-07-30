@@ -19,6 +19,7 @@ import (
 const (
 	defaultManagementItemsPerPage = 20
 	maxManagementItemsPerPage     = 100
+	managementDeletionBatchSize   = 256
 )
 
 type cacheEntryListResponse struct {
@@ -46,19 +47,7 @@ func (h *Handler) ListCacheEntries(c *gin.Context) {
 }
 
 func (h *Handler) DeleteCacheEntries(c *gin.Context) {
-	entries, err := h.db.CacheEntry.Query().
-		Where(cacheEntryFilters(c)...).
-		All(c.Request.Context())
-	if err != nil {
-		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
-		return
-	}
-	if len(entries) == 0 {
-		c.Status(http.StatusNoContent)
-		return
-	}
-
-	if err := h.deleteManagementCacheEntries(c.Request.Context(), cacheEntryIDs(entries)); err != nil {
+	if err := h.deleteManagementCacheEntries(c.Request.Context(), cacheEntryFilters(c)); err != nil {
 		response.JSON(c, response.Error(http.StatusInternalServerError, err.Error()))
 		return
 	}
@@ -221,10 +210,27 @@ func (h *Handler) deleteManagementStorageLocation(c *gin.Context, id string) err
 	return err
 }
 
+// deleteManagementCacheEntries deletes matching entries in independently
+// committed batches until a transaction observes no remaining matches. Entries
+// recreated concurrently can extend the operation. If a later batch fails,
+// earlier batches remain committed and the caller receives an error; retrying
+// the same predicates is safe.
 func (h *Handler) deleteManagementCacheEntries(ctx context.Context, predicates []entpredicate.CacheEntry) error {
+	for {
+		deleted, err := h.deleteManagementCacheEntryBatch(ctx, predicates)
+		if err != nil {
+			return err
+		}
+		if deleted == 0 {
+			return nil
+		}
+	}
+}
+
+func (h *Handler) deleteManagementCacheEntryBatch(ctx context.Context, predicates []entpredicate.CacheEntry) (int, error) {
 	tx, err := h.db.Tx(ctx)
 	if err != nil {
-		return fmt.Errorf("start management cache deletion transaction: %w", err)
+		return 0, fmt.Errorf("start management cache deletion transaction: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -233,30 +239,34 @@ func (h *Handler) deleteManagementCacheEntries(ctx context.Context, predicates [
 		}
 	}()
 
-	entries, err := tx.CacheEntry.Query().Where(predicates...).All(ctx)
+	entries, err := tx.CacheEntry.Query().
+		Where(predicates...).
+		Select(cacheentry.FieldID, cacheentry.FieldLocationId).
+		Limit(managementDeletionBatchSize).
+		All(ctx)
 	if err != nil {
-		return fmt.Errorf("query management cache entries for deletion: %w", err)
+		return 0, fmt.Errorf("query management cache entries for deletion: %w", err)
 	}
 	if len(entries) == 0 {
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit empty management cache deletion: %w", err)
+			return 0, fmt.Errorf("commit empty management cache deletion: %w", err)
 		}
 		committed = true
-		return nil
+		return 0, nil
 	}
 	if _, err := tx.CacheEntry.Delete().Where(cacheEntryIDs(entries)...).Exec(ctx); err != nil {
-		return fmt.Errorf("delete management cache entries: %w", err)
+		return 0, fmt.Errorf("delete management cache entries: %w", err)
 	}
 	for _, locationID := range cacheEntryLocationIDs(entries) {
 		if _, err := h.lifecycle.FenceDetachedLocation(ctx, tx.Client(), locationID); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit management cache deletion: %w", err)
+		return 0, fmt.Errorf("commit management cache deletion: %w", err)
 	}
 	committed = true
-	return nil
+	return len(entries), nil
 }
 
 func cacheEntryFilters(c *gin.Context) []entpredicate.CacheEntry {

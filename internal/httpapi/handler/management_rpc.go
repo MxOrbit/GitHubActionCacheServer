@@ -148,19 +148,7 @@ func (h *Handler) managementRPCDeleteCacheEntry(c *gin.Context, input map[string
 }
 
 func (h *Handler) managementRPCDeleteCacheEntries(c *gin.Context, input map[string]any) {
-	entries, err := h.db.CacheEntry.Query().
-		Where(managementRPCCacheEntryFilters(input)...).
-		All(c.Request.Context())
-	if err != nil {
-		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
-		return
-	}
-	if len(entries) == 0 {
-		managementRPCUndefined(c)
-		return
-	}
-
-	if err := h.deleteManagementCacheEntries(c.Request.Context(), cacheEntryIDs(entries)); err != nil {
+	if err := h.deleteManagementCacheEntries(c.Request.Context(), managementRPCCacheEntryFilters(input)); err != nil {
 		managementRPCErrorResponse(c, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", err.Error(), false)
 		return
 	}
