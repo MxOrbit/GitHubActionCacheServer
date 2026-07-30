@@ -18,14 +18,15 @@ func RequireCacheScope(verifier *auth.Verifier, logger zerolog.Logger) gin.Handl
 		if err != nil {
 			if errors.Is(err, auth.ErrVerifierInitialization) {
 				response.RecordInternalError(c, err)
+				response.JSON(c, response.Error(http.StatusServiceUnavailable, "service unavailable"))
 			} else {
 				logger.Debug().
 					Err(err).
 					Str("method", c.Request.Method).
 					Str("path", c.Request.URL.Path).
 					Msg("cache authentication rejected")
+				response.JSON(c, response.Error(http.StatusUnauthorized, "unauthorized"))
 			}
-			response.JSON(c, response.Error(http.StatusUnauthorized, "unauthorized"))
 			c.Abort()
 			return
 		}

@@ -33,6 +33,25 @@ func TestCacheServiceRequiresBearerToken(t *testing.T) {
 	require.JSONEq(t, `{"ok":false,"error":"unauthorized"}`, rec.Body.String())
 }
 
+func TestCacheServiceReturnsUnavailableWhenVerifierCannotInitialize(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "false")
+	t.Setenv("GITHUB_ACTIONS_TOKEN_JWKS_URL", "://invalid")
+	router := newTestRouter(t)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry",
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"service unavailable"}`, rec.Body.String())
+}
+
 func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
