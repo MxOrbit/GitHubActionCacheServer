@@ -71,6 +71,7 @@ func (h *Handler) writeCacheError(c *gin.Context, err error) {
 		h.logExpectedCacheError(c, err)
 		response.JSON(c, response.Error(http.StatusForbidden, cache.ErrNoWriteScope.Error()))
 	case errors.Is(err, cache.ErrUploadAlreadyExists):
+		h.logExpectedCacheError(c, err)
 		response.JSON(c, response.CacheMiss())
 	case errors.Is(err, cache.ErrUploadNotFound), errors.Is(err, cache.ErrCacheNotFound):
 		h.logExpectedCacheError(c, err)

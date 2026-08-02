@@ -13,17 +13,16 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagedeletion"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/metrics"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/uploadsession"
 	"github.com/rs/zerolog"
 )
 
 const (
 	itemsPerPage               = 10
-	abandonedUploadThreshold   = time.Minute
 	materializedPartsRetention = time.Hour
 	storageDeletionRetryBase   = 5 * time.Minute
 	storageDeletionRetryMax    = 24 * time.Hour
@@ -78,18 +77,12 @@ func NewService(options Options) *Service {
 }
 
 func (s *Service) RunUploads(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-abandonedUploadThreshold).UnixMilli()
+	cutoff := s.now().Add(-uploadsession.CleanupIdleTimeout).UnixMilli()
 	deleted := 0
 
 	for {
 		uploads, err := s.db.Upload.Query().
-			Where(
-				upload.CreatedAtLT(cutoff),
-				upload.Or(
-					upload.LastPartUploadedAtIsNil(),
-					upload.LastPartUploadedAtLT(cutoff),
-				),
-			).
+			Where(uploadsession.Inactive(cutoff)...).
 			Limit(itemsPerPage).
 			All(ctx)
 		if err != nil {
@@ -100,10 +93,14 @@ func (s *Service) RunUploads(ctx context.Context) (int, error) {
 		}
 
 		for _, currentUpload := range uploads {
-			if err := s.deleteUpload(ctx, currentUpload); err != nil {
+			result, err := uploadsession.DeleteIfInactive(ctx, s.db, currentUpload.ID, currentUpload.FolderName, cutoff)
+			if err != nil {
 				return deleted, err
 			}
-			deleted++
+			if result.Deleted {
+				_ = s.processStorageDeletion(ctx, result.Task)
+				deleted++
+			}
 		}
 	}
 }
@@ -331,34 +328,6 @@ func storageDeletionRetryDelay(attemptCount int) time.Duration {
 		delay *= 2
 	}
 	return delay
-}
-
-func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) error {
-	tx, err := s.db.Tx(ctx)
-	if err != nil {
-		return fmt.Errorf("start upload cleanup transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	task, err := storageoutbox.Enqueue(ctx, tx.Client(), currentUpload.FolderName)
-	if err != nil {
-		return err
-	}
-	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return fmt.Errorf("delete upload: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit upload cleanup: %w", err)
-	}
-	committed = true
-
-	_ = s.processStorageDeletion(ctx, task)
-	return nil
 }
 
 func (s *Service) deleteStorageLocation(ctx context.Context, location *ent.StorageLocation, deleteCacheEntries bool) error {

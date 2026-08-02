@@ -18,14 +18,15 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/uploadsession"
 	"github.com/stretchr/testify/require"
 )
 
 func TestRunUploadsDeletesInactiveUploads(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
-	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}})
-	now := time.Now().UnixMilli()
-	old := time.Now().Add(-2 * time.Minute).UnixMilli()
+	now := time.Now()
+	service := NewService(Options{DB: client, Storage: filesystem, Config: config.CleanupConfig{CacheOlderThanDays: 90}, Now: func() time.Time { return now }})
+	old := now.Add(-uploadsession.CleanupIdleTimeout - time.Minute).UnixMilli()
 
 	require.NoError(t, filesystem.UploadStream(ctx, "old-upload/parts/0", bytes.NewBufferString("old")))
 	require.NoError(t, filesystem.UploadStream(ctx, "active-upload/parts/0", bytes.NewBufferString("active")))
@@ -45,7 +46,7 @@ func TestRunUploadsDeletesInactiveUploads(t *testing.T) {
 		SetScope("scope").
 		SetRepoId("repo").
 		SetCreatedAt(old).
-		SetLastPartUploadedAt(now).
+		SetLastPartUploadedAt(now.UnixMilli()).
 		SetFolderName("active-upload").
 		SaveX(ctx)
 
@@ -67,13 +68,15 @@ func TestRunStorageDeletionsRetriesFailedUploadCleanup(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	failingStorage := &failingDeleteStorage{Adapter: filesystem}
 	metricRecorder := &recordedMetrics{}
+	now := time.Now()
 	service := NewService(Options{
 		DB:      client,
 		Storage: failingStorage,
 		Config:  config.CleanupConfig{CacheOlderThanDays: 90},
 		Metrics: metricRecorder,
+		Now:     func() time.Time { return now },
 	})
-	old := time.Now().Add(-2 * time.Minute).UnixMilli()
+	old := now.Add(-uploadsession.CleanupIdleTimeout - time.Minute).UnixMilli()
 
 	require.NoError(t, filesystem.UploadStream(ctx, "old-upload/parts/0", bytes.NewBufferString("old")))
 	client.Upload.Create().
@@ -110,6 +113,34 @@ func TestRunStorageDeletionsRetriesFailedUploadCleanup(t *testing.T) {
 	count, err := filesystem.CountFilesInFolder(ctx, "old-upload/parts")
 	require.NoError(t, err)
 	require.Zero(t, count)
+}
+
+func TestDeleteUploadIfInactiveSkipsRefreshedUploadAndQueuesNothing(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	now := time.Now()
+	currentUpload := client.Upload.Create().
+		SetID(1).
+		SetKey("old").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetCreatedAt(now.Add(-uploadsession.CleanupIdleTimeout - time.Minute).UnixMilli()).
+		SetFolderName("old-upload").
+		SaveX(ctx)
+	staleSnapshot := client.Upload.GetX(ctx, currentUpload.ID)
+	client.Upload.UpdateOneID(currentUpload.ID).SetLastPartUploadedAt(now.UnixMilli()).ExecX(ctx)
+
+	result, err := uploadsession.DeleteIfInactive(
+		ctx,
+		client,
+		staleSnapshot.ID,
+		staleSnapshot.FolderName,
+		now.Add(-uploadsession.CleanupIdleTimeout).UnixMilli(),
+	)
+	require.NoError(t, err)
+	require.False(t, result.Deleted)
+	require.Equal(t, currentUpload.ID, client.Upload.Query().OnlyX(ctx).ID)
+	require.Zero(t, client.StorageDeletion.Query().CountX(ctx))
 }
 
 func TestStorageDeletionRetryBackoff(t *testing.T) {

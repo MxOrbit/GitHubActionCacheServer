@@ -28,6 +28,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storageoutbox"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/uploadsession"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
@@ -35,9 +36,10 @@ import (
 const (
 	directDownloadTTL              = storagelifecycle.DirectDownloadLeaseDuration
 	lastDownloadedAtUpdateInterval = 10 * time.Minute
-	abandonedUploadLifetime        = 24 * time.Hour
+	uploadHeartbeatInterval        = 30 * time.Second
 	mergeCleanupTimeout            = 10 * time.Second
 	maxDanglingPurgeAttempts       = 10
+	maxUploadContentionAttempts    = 5
 )
 
 // MaxBlockListEntries is the Azure block blob protocol limit.
@@ -76,6 +78,8 @@ type Service struct {
 	acceptingMerges       bool
 	capacity              CapacityTrigger
 	readerLeaseReleaser   *readerLeaseReleaser
+	now                   func() time.Time
+	uploadHeartbeat       time.Duration
 }
 
 type CapacityTrigger interface {
@@ -83,13 +87,15 @@ type CapacityTrigger interface {
 }
 
 type Options struct {
-	DB                    *ent.Client
-	Storage               storage.Adapter
-	EnableDirectDownloads bool
-	MergeConcurrency      int
-	Lifecycle             *storagelifecycle.Service
-	Logger                *zerolog.Logger
-	Capacity              CapacityTrigger
+	DB                      *ent.Client
+	Storage                 storage.Adapter
+	EnableDirectDownloads   bool
+	MergeConcurrency        int
+	Lifecycle               *storagelifecycle.Service
+	Logger                  *zerolog.Logger
+	Capacity                CapacityTrigger
+	Now                     func() time.Time
+	UploadHeartbeatInterval time.Duration
 }
 
 type CreateUploadResult struct {
@@ -149,6 +155,14 @@ func NewService(options Options) *Service {
 	if options.Logger != nil {
 		logger = *options.Logger
 	}
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	heartbeatInterval := options.UploadHeartbeatInterval
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = uploadHeartbeatInterval
+	}
 
 	service := &Service{
 		db:                    options.DB,
@@ -162,6 +176,8 @@ func NewService(options Options) *Service {
 		mergeSlots:            make(chan struct{}, mergeConcurrency),
 		acceptingMerges:       true,
 		capacity:              options.Capacity,
+		now:                   now,
+		uploadHeartbeat:       heartbeatInterval,
 	}
 	service.readerLeaseReleaser = newReaderLeaseReleaser(lifecycle, logger)
 	return service
@@ -220,29 +236,45 @@ func (s *Service) CreateUpload(ctx context.Context, key, version string, scope a
 		return nil, ErrNoWriteScope
 	}
 
-	existingUploads, err := s.db.Upload.Query().
-		Where(uploadTuple(key, version, writeScope, scope.RepoID)...).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query existing uploads: %w", err)
-	}
-
-	for _, existingUpload := range existingUploads {
-		if s.isUploadAbandoned(existingUpload) {
-			if err := s.deleteUpload(ctx, existingUpload); err != nil {
-				return nil, err
+	// Removing an inactive legacy row is progress, not contention. Only races
+	// that leave this request without a row or reservation consume the budget.
+	contentionAttempts := 0
+	for contentionAttempts < maxUploadContentionAttempts {
+		existingUpload, err := s.firstUploadByTuple(ctx, key, version, writeScope, scope.RepoID)
+		switch {
+		case err == nil:
+			cutoff := s.now().Add(-uploadsession.TakeoverIdleTimeout).UnixMilli()
+			result, deleteErr := uploadsession.DeleteIfInactive(ctx, s.db, existingUpload.ID, existingUpload.FolderName, cutoff)
+			if deleteErr != nil {
+				return nil, deleteErr
+			}
+			if !result.Deleted {
+				_, queryErr := s.uploadByID(ctx, existingUpload.ID)
+				switch {
+				case queryErr == nil:
+					return nil, ErrUploadAlreadyExists
+				case errors.Is(queryErr, ErrUploadNotFound):
+					contentionAttempts++
+					continue
+				default:
+					return nil, queryErr
+				}
 			}
 			continue
+		case !errors.Is(err, ErrUploadNotFound):
+			return nil, err
 		}
-		return nil, ErrUploadAlreadyExists
-	}
 
-	uploadID, err := s.createUploadRecord(ctx, key, version, writeScope, scope.RepoID)
-	if err != nil {
-		return nil, err
+		uploadID, createErr := s.createUploadRecord(ctx, key, version, writeScope, scope.RepoID)
+		if createErr == nil {
+			return &CreateUploadResult{UploadID: uploadID}, nil
+		}
+		if !errors.Is(createErr, ErrUploadAlreadyExists) {
+			return nil, createErr
+		}
+		contentionAttempts++
 	}
-
-	return &CreateUploadResult{UploadID: uploadID}, nil
+	return nil, ErrUploadAlreadyExists
 }
 
 func (s *Service) UploadPart(ctx context.Context, uploadID int64, stream io.Reader) error {
@@ -286,23 +318,28 @@ func (c *BlockListCommit) Commit(ctx context.Context, blockIDs []string) error {
 		return nil
 	}
 
-	for index, blockID := range blockIDs {
-		err := c.service.storage.CopyObject(
-			ctx,
-			blockObjectName(c.upload.FolderName, blockID),
-			partObjectName(c.upload.FolderName, index),
-		)
-		if err != nil {
-			if errors.Is(err, storage.ErrObjectNotFound) {
-				return fmt.Errorf("%w: missing block %d", ErrPartCountMismatch, index)
+	if err := c.service.withUploadActivity(ctx, c.upload.ID, func(activityCtx context.Context) error {
+		for index, blockID := range blockIDs {
+			err := c.service.storage.CopyObject(
+				activityCtx,
+				blockObjectName(c.upload.FolderName, blockID),
+				partObjectName(c.upload.FolderName, index),
+			)
+			if err != nil {
+				if errors.Is(err, storage.ErrObjectNotFound) {
+					return fmt.Errorf("%w: missing block %d", ErrPartCountMismatch, index)
+				}
+				return err
 			}
-			return err
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if err := c.service.db.Upload.UpdateOneID(c.upload.ID).
 		SetCommittedPartCount(len(blockIDs)).
 		Exec(ctx); err != nil {
-		return fmt.Errorf("record committed block list: %w", err)
+		return wrapUploadRowError("record committed block list", err)
 	}
 
 	return nil
@@ -324,34 +361,40 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 		return 0, ErrNoPartsUploaded
 	}
 
-	partCount, err := s.committedPartCount(ctx, currentUpload)
+	var partCount int
+	var sizeBytes int64
+	err = s.withUploadActivity(ctx, currentUpload.ID, func(activityCtx context.Context) error {
+		var validationErr error
+		partCount, validationErr = s.committedPartCount(activityCtx, currentUpload)
+		if validationErr != nil {
+			return validationErr
+		}
+		if partCount == 0 {
+			return ErrNoPartsUploaded
+		}
+		if partCount > currentUpload.FinishedPartUploadCount {
+			return fmt.Errorf(
+				"%w: committed part count %d exceeds finished upload count %d",
+				ErrPartCountMismatch,
+				partCount,
+				currentUpload.FinishedPartUploadCount,
+			)
+		}
+		parts, inspectErr := s.storage.InspectFolder(activityCtx, partsFolderName(currentUpload.FolderName))
+		if inspectErr != nil {
+			return fmt.Errorf("inspect finalized cache parts: %w", inspectErr)
+		}
+		sizeBytes, validationErr = parts.LogicalIndexedSize(partCount)
+		if validationErr != nil {
+			return fmt.Errorf("%w: %v", ErrPartCountMismatch, validationErr)
+		}
+		return nil
+	})
 	if err != nil {
-		if errors.Is(err, ErrPartCountMismatch) {
+		if errors.Is(err, ErrNoPartsUploaded) || errors.Is(err, ErrPartCountMismatch) {
 			s.deleteUploadBestEffort(ctx, currentUpload)
 		}
 		return 0, err
-	}
-	if partCount == 0 {
-		s.deleteUploadBestEffort(ctx, currentUpload)
-		return 0, ErrNoPartsUploaded
-	}
-	if partCount > currentUpload.FinishedPartUploadCount {
-		s.deleteUploadBestEffort(ctx, currentUpload)
-		return 0, fmt.Errorf(
-			"%w: committed part count %d exceeds finished upload count %d",
-			ErrPartCountMismatch,
-			partCount,
-			currentUpload.FinishedPartUploadCount,
-		)
-	}
-	parts, err := s.storage.InspectFolder(ctx, partsFolderName(currentUpload.FolderName))
-	if err != nil {
-		return 0, fmt.Errorf("inspect finalized cache parts: %w", err)
-	}
-	sizeBytes, err := parts.LogicalIndexedSize(partCount)
-	if err != nil {
-		s.deleteUploadBestEffort(ctx, currentUpload)
-		return 0, fmt.Errorf("%w: %v", ErrPartCountMismatch, err)
 	}
 
 	location, cacheEntryID, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount, sizeBytes)
@@ -585,7 +628,7 @@ func (s *Service) createUploadRecord(ctx context.Context, key, version, scope, r
 			SetID(id).
 			SetFolderName(strconv.FormatInt(id, 10)).
 			SetCommittedPartCount(0).
-			SetCreatedAt(time.Now().UnixMilli()).
+			SetCreatedAt(s.now().UnixMilli()).
 			SetKey(key).
 			SetVersion(version).
 			SetScope(scope).
@@ -634,19 +677,35 @@ func (s *Service) uploadByTuple(ctx context.Context, key, version, scope, repoID
 	return currentUpload, nil
 }
 
+func (s *Service) firstUploadByTuple(ctx context.Context, key, version, scope, repoID string) (*ent.Upload, error) {
+	currentUpload, err := s.db.Upload.Query().
+		Where(uploadTuple(key, version, scope, repoID)...).
+		Order(upload.ByID()).
+		First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ErrUploadNotFound
+		}
+		return nil, fmt.Errorf("query first upload: %w", err)
+	}
+	return currentUpload, nil
+}
+
 func (s *Service) uploadObject(ctx context.Context, currentUpload *ent.Upload, objectName string, stream io.Reader, committedPartCount *int) error {
-	if err := s.storage.UploadStream(ctx, objectName, stream); err != nil {
+	if err := s.withUploadActivity(ctx, currentUpload.ID, func(activityCtx context.Context) error {
+		return s.storage.UploadStream(activityCtx, objectName, stream)
+	}); err != nil {
 		return err
 	}
 
 	update := s.db.Upload.UpdateOneID(currentUpload.ID).
-		SetLastPartUploadedAt(time.Now().UnixMilli()).
+		SetLastPartUploadedAt(s.now().UnixMilli()).
 		AddFinishedPartUploadCount(1)
 	if committedPartCount != nil {
 		update.SetCommittedPartCount(*committedPartCount)
 	}
 	if err := update.Exec(ctx); err != nil {
-		return fmt.Errorf("mark upload finished: %w", err)
+		return wrapUploadRowError("mark upload finished", err)
 	}
 
 	return nil
@@ -701,14 +760,6 @@ func uploadTupleHash(key, version, scope, repoID string) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (s *Service) isUploadAbandoned(currentUpload *ent.Upload) bool {
-	lastActivity := currentUpload.CreatedAt
-	if currentUpload.LastPartUploadedAt != nil {
-		lastActivity = *currentUpload.LastPartUploadedAt
-	}
-	return time.Since(time.UnixMilli(lastActivity)) > abandonedUploadLifetime
-}
-
 func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) error {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
@@ -721,11 +772,11 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 		}
 	}()
 
+	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
+		return wrapUploadRowError("delete upload", err)
+	}
 	if _, err := storageoutbox.Enqueue(ctx, tx.Client(), currentUpload.FolderName); err != nil {
 		return err
-	}
-	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return fmt.Errorf("delete upload: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit upload deletion: %w", err)
@@ -734,10 +785,17 @@ func (s *Service) deleteUpload(ctx context.Context, currentUpload *ent.Upload) e
 	return nil
 }
 
+func wrapUploadRowError(operation string, err error) error {
+	if ent.IsNotFound(err) {
+		return fmt.Errorf("%s: %w", operation, ErrUploadNotFound)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
 func (s *Service) deleteUploadBestEffort(ctx context.Context, currentUpload *ent.Upload) {
 	if err := s.deleteUpload(ctx, currentUpload); err != nil {
 		event := s.logger.Error()
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(err, ErrUploadNotFound) {
 			event = s.logger.Debug()
 		}
 		event.
@@ -819,7 +877,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 	}
 
 	if err := tx.Upload.DeleteOneID(currentUpload.ID).Exec(ctx); err != nil {
-		return nil, "", fmt.Errorf("delete upload: %w", err)
+		return nil, "", wrapUploadRowError("delete upload", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, "", fmt.Errorf("commit upload: %w", err)

@@ -33,6 +33,8 @@ func (Upload) Fields() []ent.Field {
 			StorageKey("repoId").
 			SchemaType(originalBoundedStringColumnType(255)),
 		field.Int64("createdAt").StorageKey("createdAt"),
+		// Kept under its legacy storage name for migration compatibility; this
+		// timestamp represents any upload-session activity, including heartbeats.
 		field.Int64("lastPartUploadedAt").Optional().Nillable().StorageKey("lastPartUploadedAt"),
 		field.Int("startedPartUploadCount").Default(0).NonNegative().StorageKey("startedPartUploadCount"),
 		field.Int("finishedPartUploadCount").Default(0).NonNegative().StorageKey("finishedPartUploadCount"),
