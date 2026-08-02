@@ -400,6 +400,51 @@ func TestSinglePartUsesPartsObjectForDirectDownload(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(storagelifecycle.DirectDownloadLeaseDuration), time.UnixMilli(lease.ExpiresAt), time.Second)
 }
 
+func TestMultipartDirectLookupFallsBackWithoutReaderLeaseWrite(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &directURLStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	location := client.StorageLocation.UpdateOneID(entry.LocationId).
+		SetPartCount(2).
+		SaveX(ctx)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(location.FolderName, 0), bytes.NewBufferString("data")))
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
+		return "fallback"
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "fallback", result.DownloadURL)
+	require.Empty(t, adapter.objectName)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+	require.Equal(t, location.LeaseVersion, client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
+}
+
+func TestMultipartDirectLookupSkipsFencedLocationBeforeFallback(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &directURLStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, EnableDirectDownloads: true})
+	entry := createMatchedCacheEntry(ctx, client, "entry-id", "key")
+	client.StorageLocation.UpdateOneID(entry.LocationId).
+		SetPartCount(2).
+		SetDeletionRequestedAt(time.Now().UnixMilli()).
+		ExecX(ctx)
+	fallbackCalled := false
+
+	result, err := service.GetCacheEntryWithDownloadURL(ctx, []string{"key"}, "version", writableScope(), func(string) string {
+		fallbackCalled = true
+		return "fallback"
+	})
+
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.False(t, fallbackCalled)
+	require.Empty(t, adapter.objectName)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
 func TestDirectDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	adapter := &directURLStorage{Adapter: filesystem}
@@ -459,7 +504,6 @@ func TestReplacementFencesOldLocationUntilLazyReaderCloses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "world", string(remainder))
 	require.NoError(t, oldStream.Close())
-	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
 
 	newStream, err := service.Download(ctx, "entry-id")
 	require.NoError(t, err)
@@ -467,6 +511,8 @@ func TestReplacementFencesOldLocationUntilLazyReaderCloses(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, newStream.Close())
 	require.Equal(t, "replacement", string(newBody))
+	require.NoError(t, service.ShutdownReaderLeaseReleaser(ctx))
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
 }
 
 func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {

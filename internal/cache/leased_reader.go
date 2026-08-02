@@ -14,6 +14,7 @@ type leasedReadCloser struct {
 	stream    io.ReadCloser
 	lifecycle *storagelifecycle.Service
 	lease     *storagelifecycle.ReaderLease
+	release   func(string)
 
 	renewCancel context.CancelFunc
 	renewDone   chan struct{}
@@ -23,12 +24,13 @@ type leasedReadCloser struct {
 	leaseErr    error
 }
 
-func newLeasedReadCloser(stream io.ReadCloser, lifecycle *storagelifecycle.Service, lease *storagelifecycle.ReaderLease) *leasedReadCloser {
+func newLeasedReadCloser(stream io.ReadCloser, lifecycle *storagelifecycle.Service, lease *storagelifecycle.ReaderLease, release func(string)) *leasedReadCloser {
 	renewCtx, renewCancel := context.WithCancel(context.Background())
 	reader := &leasedReadCloser{
 		stream:      stream,
 		lifecycle:   lifecycle,
 		lease:       lease,
+		release:     release,
 		renewCancel: renewCancel,
 		renewDone:   make(chan struct{}),
 	}
@@ -55,10 +57,8 @@ func (r *leasedReadCloser) Close() error {
 		r.renewCancel()
 		<-r.renewDone
 		streamErr := r.stream.Close()
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), mergeCleanupTimeout)
-		releaseErr := r.lifecycle.ReleaseReader(cleanupCtx, r.lease.ID)
-		cancel()
-		r.closeErr = errors.Join(streamErr, releaseErr, r.currentLeaseError())
+		r.release(r.lease.ID)
+		r.closeErr = errors.Join(streamErr, r.currentLeaseError())
 	})
 	return r.closeErr
 }

@@ -162,10 +162,14 @@ func main() {
 	}()
 
 	shutdownErr := <-shutdownErrCh
+	readerLeaseReleaseErr := cacheService.ShutdownReaderLeaseReleaser(shutdownCtx)
 	mergeErr := <-mergeErrCh
 	backgroundErr := <-backgroundErrCh
 	if shutdownErr != nil {
 		logger.Fatal().Err(shutdownErr).Msg("graceful shutdown failed")
+	}
+	if readerLeaseReleaseErr != nil {
+		logger.Error().Err(readerLeaseReleaseErr).Msg("waiting for reader lease releases failed")
 	}
 	if mergeErr != nil {
 		logger.Fatal().Err(mergeErr).Msg("waiting for in-flight merges failed")

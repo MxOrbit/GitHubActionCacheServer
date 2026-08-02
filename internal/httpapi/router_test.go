@@ -292,6 +292,7 @@ func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 		SetID("location-id").
 		SetFolderName("folder").
 		SetPartCount(2).
+		SetSizeBytes(int64(len("body-tail"))).
 		SaveX(ctx)
 	client.CacheEntry.Create().
 		SetID("entry-id").
@@ -317,11 +318,50 @@ func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, strconv.Itoa(len("body-tail")), rec.Header().Get("Content-Length"))
 	require.Equal(t, "body-tail", rec.Body.String())
 	require.Eventually(t, func() bool {
 		current := client.StorageLocation.GetX(ctx, location.ID)
 		return current.MergeStartedAt == nil && current.MergeLeaseToken == nil && current.MergeLeaseExpiresAt == nil && current.MergedAt == nil
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestDownloadLengthMismatchDoesNotReusePayloadContentLengthForError(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	mergedAt := time.Now().UnixMilli()
+	location := client.StorageLocation.Create().
+		SetID("location-id").
+		SetFolderName("folder").
+		SetPartCount(1).
+		SetSizeBytes(4).
+		SetMergedAt(mergedAt).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("entry-id").
+		SetKey("key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(ctx)
+
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
+		DB:      client,
+		Storage: shortDownloadStorage{Adapter: filesystem},
+	})
+
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NotEqual(t, "4", rec.Header().Get("Content-Length"))
+	require.JSONEq(t, `{"ok":false,"error":"internal server error"}`, rec.Body.String())
 }
 
 func newTestRouter(t *testing.T) http.Handler {
@@ -359,4 +399,12 @@ type failComposeStorage struct {
 
 func (s failComposeStorage) ComposeObjects(context.Context, string, []string) error {
 	return errComposeFailed
+}
+
+type shortDownloadStorage struct {
+	storage.Adapter
+}
+
+func (s shortDownloadStorage) CreateDownloadStream(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }

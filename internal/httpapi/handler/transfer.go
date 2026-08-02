@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -128,12 +129,21 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 		}
 	}()
 
+	if stream.ContentLength >= 0 {
+		c.Header("Content-Length", strconv.FormatInt(stream.ContentLength, 10))
+	}
 	written, copyErr := bufferpool.Copy(c.Writer, stream)
+	if copyErr == nil && stream.ContentLength >= 0 && written != stream.ContentLength {
+		copyErr = fmt.Errorf("download length mismatch: wrote %d bytes, expected %d", written, stream.ContentLength)
+	}
 	if copyErr != nil {
 		h.logDownloadFailure(c.Request.Context(), copyErr, metadata, "stream")
 		if written != 0 || c.Writer.Written() {
 			return
 		}
+		// The payload length no longer applies when the stream failed before the
+		// response began and we can still return a structured error body.
+		c.Writer.Header().Del("Content-Length")
 		if errors.Is(copyErr, cache.ErrCacheNotFound) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
 			return

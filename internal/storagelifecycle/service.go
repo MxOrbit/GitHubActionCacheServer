@@ -273,6 +273,19 @@ func (s *Service) ReleaseReader(ctx context.Context, leaseID string) error {
 	return nil
 }
 
+func (s *Service) ReleaseReaders(ctx context.Context, leaseIDs []string) (int, error) {
+	if len(leaseIDs) == 0 {
+		return 0, nil
+	}
+	deleted, err := s.db.StorageReaderLease.Delete().
+		Where(storagereaderlease.IDIn(leaseIDs...)).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("release storage reader leases: %w", err)
+	}
+	return deleted, nil
+}
+
 // PurgeDanglingCacheEntry removes an entry only if it still references the
 // storage location that was confirmed missing. The location is fenced only
 // after its final cache entry has been detached.

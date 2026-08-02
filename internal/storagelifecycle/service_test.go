@@ -2,7 +2,9 @@ package storagelifecycle
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,6 +128,78 @@ func TestDirectReaderLeaseProtectsFullSignedURLTTL(t *testing.T) {
 	result, err = service.RequestLocationDeletion(ctx, location.ID, false, true)
 	require.NoError(t, err)
 	require.True(t, result.Finalized)
+}
+
+func TestReleaseReadersDeletesBatchAndIgnoresMissingLeases(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	createLifecycleEntry(ctx, client, "first-entry", "first-location", 1)
+	createLifecycleEntry(ctx, client, "second-entry", "second-location", 1)
+	first, err := service.AcquireReader(ctx, "first-entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	second, err := service.AcquireReader(ctx, "second-entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+
+	deleted, err := service.ReleaseReaders(ctx, []string{first.ID, "missing-lease", second.ID})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, deleted)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func TestConcurrentReaderLeasesPreserveVersionAndAllowLookups(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	const readers = 32
+	location := client.StorageLocation.Create().
+		SetID("shared-location").
+		SetFolderName("shared-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	for index := range readers {
+		client.CacheEntry.Create().
+			SetID(fmt.Sprintf("entry-%02d", index)).
+			SetKey(fmt.Sprintf("key-%02d", index)).
+			SetVersion("version").
+			SetScope("scope").
+			SetRepoId("repo").
+			SetUpdatedAt(time.Now().UnixMilli()).
+			SetLocation(location).
+			SaveX(ctx)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, readers*2)
+	var wg sync.WaitGroup
+	for index := range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			lease, err := service.AcquireReader(ctx, fmt.Sprintf("entry-%02d", index), AcquireReaderOptions{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if _, err := client.CacheEntry.Query().Where(cacheentry.ID(fmt.Sprintf("entry-%02d", index))).Only(ctx); err != nil {
+				errs <- err
+			}
+			if err := service.ReleaseReader(ctx, lease.ID); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+	require.Equal(t, int64(readers), client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
 }
 
 func TestExpiredLocationDeletionRechecksAccessAndReaderLease(t *testing.T) {

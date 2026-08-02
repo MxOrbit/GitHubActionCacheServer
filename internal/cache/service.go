@@ -75,6 +75,7 @@ type Service struct {
 	mergeMu               sync.Mutex
 	acceptingMerges       bool
 	capacity              CapacityTrigger
+	readerLeaseReleaser   *readerLeaseReleaser
 }
 
 type CapacityTrigger interface {
@@ -105,6 +106,7 @@ type DownloadStream struct {
 	CacheEntryID      string
 	StorageLocationID string
 	Representation    string
+	ContentLength     int64
 }
 
 type DownloadError struct {
@@ -120,6 +122,13 @@ func (e *DownloadError) Error() string {
 
 func (e *DownloadError) Unwrap() error {
 	return e.Err
+}
+
+func contentLength(sizeBytes *int64) int64 {
+	if sizeBytes == nil || *sizeBytes < 0 {
+		return -1
+	}
+	return *sizeBytes
 }
 
 func NewService(options Options) *Service {
@@ -141,7 +150,7 @@ func NewService(options Options) *Service {
 		logger = *options.Logger
 	}
 
-	return &Service{
+	service := &Service{
 		db:                    options.DB,
 		storage:               options.Storage,
 		composer:              composer,
@@ -154,6 +163,8 @@ func NewService(options Options) *Service {
 		acceptingMerges:       true,
 		capacity:              options.Capacity,
 	}
+	service.readerLeaseReleaser = newReaderLeaseReleaser(lifecycle, logger)
+	return service
 }
 
 func (s *Service) StopAcceptingMerges() {
@@ -180,6 +191,13 @@ func (s *Service) WaitForMerges(ctx context.Context) error {
 	case <-time.After(mergeCleanupTimeout):
 	}
 	return ctx.Err()
+}
+
+// ShutdownReaderLeaseReleaser drains and stops the worker started by the first
+// lease release. Call it before closing the database; tests that close download
+// streams should register the same cleanup when goroutine leak checks are used.
+func (s *Service) ShutdownReaderLeaseReleaser(ctx context.Context) error {
+	return s.readerLeaseReleaser.Shutdown(ctx)
 }
 
 func waitForMergeCompletion(ctx context.Context, done <-chan struct{}) bool {
@@ -377,6 +395,11 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 			}
 			continue
 		}
+		// Fencing and detaching cache entries commit atomically, so retrying the
+		// match observes the settled entry state without an additional query.
+		if location.DeletionRequestedAt != nil {
+			continue
+		}
 
 		validatedObjectName, representationAvailable := representationObjectName(location)
 		if representationAvailable {
@@ -393,7 +416,11 @@ func (s *Service) GetCacheEntryWithDownloadURL(ctx context.Context, keys []strin
 		}
 
 		downloadURL := ""
-		if s.enableDirectDownloads && directDownloads {
+		directEligible := location.MergedAt != nil || location.PartCount == 1
+		if s.enableDirectDownloads && directDownloads && !directEligible {
+			s.tryStartMaterialization(location, cacheEntry.ID)
+		}
+		if s.enableDirectDownloads && directDownloads && directEligible {
 			lease, leaseErr := s.lifecycle.AcquireReader(ctx, cacheEntry.ID, storagelifecycle.AcquireReaderOptions{Direct: true})
 			switch {
 			case leaseErr == nil:
@@ -513,10 +540,11 @@ func (s *Service) Download(ctx context.Context, cacheEntryID string) (*DownloadS
 	}
 	s.touchStorageLocationIfStale(ctx, location)
 	return &DownloadStream{
-		ReadCloser:        newLeasedReadCloser(stream, s.lifecycle, lease),
+		ReadCloser:        newLeasedReadCloser(stream, s.lifecycle, lease, s.enqueueReaderLeaseRelease),
 		CacheEntryID:      cacheEntryID,
 		StorageLocationID: location.ID,
 		Representation:    representation,
+		ContentLength:     contentLength(location.SizeBytes),
 	}, nil
 }
 
@@ -1035,6 +1063,13 @@ func (s *Service) releaseReaderLease(leaseID string) {
 			Str("reader_lease_id", leaseID).
 			Msg("cache reader lease release failed")
 	}
+}
+
+func (s *Service) enqueueReaderLeaseRelease(leaseID string) {
+	if s.readerLeaseReleaser.Enqueue(leaseID) {
+		return
+	}
+	s.releaseReaderLease(leaseID)
 }
 
 func (s *Service) releaseMaterializationLease(cacheEntryID, locationID, token string) {
