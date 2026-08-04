@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -94,6 +95,46 @@ func TestFinalizeAcceptsOfficialToolkitJSONSizeBytes(t *testing.T) {
 	})
 	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
 	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
+}
+
+func TestDownloadPinsContentHeadersAgainstSniffing(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	payload := "<html><head><script>alert(1)</script></head><body>pwn</body></html>"
+
+	createBody := cacheBody("download-headers-cache")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+	uploadWholeCache(t, router, uploadURL, payload)
+	finalizeCacheEntry(t, router, token, createBody)
+
+	matchResponse := matchCacheEntry(t, router, token, map[string]any{
+		"key":     "download-headers-cache",
+		"version": defaultCacheEntryVersion,
+	})
+	require.Equal(t, "download-headers-cache", matchResponse.MatchedKey)
+
+	// Only a real net/http server reproduces the content sniffing this guards
+	// against: gin writes the status header before the body, and
+	// httptest.ResponseRecorder skips DetectContentType once that happens.
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
+	resp, err := http.Get(srv.URL + downloadURL.RequestURI())
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, payload, string(body))
+	require.Equal(t, "application/octet-stream", resp.Header.Get("Content-Type"))
+	require.NotContains(t, resp.Header.Get("Content-Type"), "text/html")
+	require.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+	require.Equal(t, "attachment", resp.Header.Get("Content-Disposition"))
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 }
 
 func TestPrometheusMetricsTrackCacheProtocolOutcomes(t *testing.T) {

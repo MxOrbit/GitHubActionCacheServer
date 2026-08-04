@@ -129,6 +129,12 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 		}
 	}()
 
+	// Opaque cache payloads: pin Content-Type so net/http never sniffs them;
+	// the rest is browser-side hardening.
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Disposition", "attachment")
+	c.Header("Cache-Control", "no-store")
 	if stream.ContentLength >= 0 {
 		c.Header("Content-Length", strconv.FormatInt(stream.ContentLength, 10))
 	}
@@ -141,9 +147,11 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 		if written != 0 || c.Writer.Written() {
 			return
 		}
-		// The payload length no longer applies when the stream failed before the
+		// The payload headers no longer apply when the stream failed before the
 		// response began and we can still return a structured error body.
 		c.Writer.Header().Del("Content-Length")
+		c.Writer.Header().Del("Content-Type")
+		c.Writer.Header().Del("Content-Disposition")
 		if errors.Is(copyErr, cache.ErrCacheNotFound) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
 			return
