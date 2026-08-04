@@ -138,7 +138,7 @@ func decodeFinalizeCacheEntryUploadRequest(raw []byte) (finalizeCacheEntryUpload
 	}
 	return finalizeCacheEntryUploadRequest{
 		Key:       message.GetKey(),
-		SizeBytes: message.GetSizeBytes(),
+		SizeBytes: jsonInt64(message.GetSizeBytes()),
 		Version:   message.GetVersion(),
 	}, nil
 }

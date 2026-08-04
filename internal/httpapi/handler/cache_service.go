@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/baseurl"
@@ -20,10 +23,31 @@ type getCacheEntryDownloadURLRequest struct {
 	Version     string   `json:"version"`
 }
 
+// jsonInt64 accepts both JSON forms of a proto3 int64 field: the official
+// Actions toolkit follows the proto3 JSON mapping and sends it as a quoted
+// string, while other clients send a bare number.
+type jsonInt64 int64
+
+func (v *jsonInt64) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || data[0] != '"' {
+		return json.Unmarshal(data, (*int64)(v))
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid int64 %q: %w", s, err)
+	}
+	*v = jsonInt64(n)
+	return nil
+}
+
 type finalizeCacheEntryUploadRequest struct {
-	Key       string `json:"key"`
-	SizeBytes int64  `json:"size_bytes"`
-	Version   string `json:"version"`
+	Key       string    `json:"key"`
+	SizeBytes jsonInt64 `json:"size_bytes"`
+	Version   string    `json:"version"`
 }
 
 type keyedCacheRequest interface {

@@ -70,6 +70,32 @@ func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
 	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
 }
 
+func TestFinalizeAcceptsOfficialToolkitJSONSizeBytes(t *testing.T) {
+	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
+	router := newTestRouter(t)
+	token := actionsToken(t)
+
+	createBody := cacheBody("toolkit-json-cache")
+	uploadURL := createCacheEntry(t, router, token, createBody)
+	uploadWholeCache(t, router, uploadURL, "cache-content")
+
+	// The official JavaScript toolkit follows the proto3 JSON mapping and
+	// sends int64 fields as quoted strings.
+	finalizeResponse := finalizeCacheEntry(t, router, token, map[string]string{
+		"key":        "toolkit-json-cache",
+		"version":    defaultCacheEntryVersion,
+		"size_bytes": "13",
+	})
+	require.NotEmpty(t, finalizeResponse.EntryID)
+
+	matchResponse := matchCacheEntry(t, router, token, map[string]any{
+		"key":     "toolkit-json-cache",
+		"version": defaultCacheEntryVersion,
+	})
+	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
+	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
+}
+
 func TestPrometheusMetricsTrackCacheProtocolOutcomes(t *testing.T) {
 	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)

@@ -67,6 +67,52 @@ func TestBindCacheRequestAcceptsLargestOfficialToolkitJSONShape(t *testing.T) {
 	require.Len(t, body.RestoreKeys, 9)
 }
 
+func TestBindCacheRequestFinalizeSizeBytesJSONForms(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantOK   bool
+		wantSize int64
+	}{
+		// The official JavaScript toolkit follows the proto3 JSON mapping and
+		// always sends int64 fields as quoted strings.
+		{name: "proto3 json string", body: `{"key":"k","version":"v","size_bytes":"145127213"}`, wantOK: true, wantSize: 145127213},
+		{name: "bare number", body: `{"key":"k","version":"v","size_bytes":145127213}`, wantOK: true, wantSize: 145127213},
+		{name: "absent", body: `{"key":"k","version":"v"}`, wantOK: true, wantSize: 0},
+		{name: "null stays zero", body: `{"key":"k","version":"v","size_bytes":null}`, wantOK: true, wantSize: 0},
+		// Accepted for consistency with the int64 proto field; the value is
+		// currently unused by the business logic.
+		{name: "negative number", body: `{"key":"k","version":"v","size_bytes":-1}`, wantOK: true, wantSize: -1},
+		{name: "empty string rejected", body: `{"key":"k","version":"v","size_bytes":""}`, wantOK: false},
+		{name: "non-numeric string rejected", body: `{"key":"k","version":"v","size_bytes":"abc"}`, wantOK: false},
+		{name: "overflow string rejected", body: `{"key":"k","version":"v","size_bytes":"9223372036854775808"}`, wantOK: false},
+		{name: "fractional number rejected", body: `{"key":"k","version":"v","size_bytes":1.5}`, wantOK: false},
+		// ProtoJSON would accept exponent forms, but the toolkit only ever
+		// sends plain decimal strings, so they stay rejected for now.
+		{name: "exponent string rejected", body: `{"key":"k","version":"v","size_bytes":"1e2"}`, wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, recorder := newCacheRequestTestContext(t, "application/json", bytes.NewReader([]byte(tt.body)))
+			c.Set("cache_scope", auth.CacheScope{RepoID: "repository"})
+
+			body, _, wireFormat, ok := bindCacheRequest(c, decodeFinalizeCacheEntryUploadRequest)
+
+			require.Equal(t, tt.wantOK, ok)
+			if !tt.wantOK {
+				require.Equal(t, http.StatusBadRequest, recorder.Code)
+				require.JSONEq(t, `{"ok":false,"error":"invalid body"}`, recorder.Body.String())
+				return
+			}
+			require.Equal(t, cacheWireJSON, wireFormat)
+			require.Equal(t, "k", body.Key)
+			require.Equal(t, "v", body.Version)
+			require.Equal(t, tt.wantSize, int64(body.SizeBytes))
+		})
+	}
+}
+
 func newCacheRequestTestContext(t *testing.T, contentType string, body *bytes.Reader) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 
