@@ -16,8 +16,13 @@ func RequireCacheScope(verifier *auth.Verifier, logger zerolog.Logger) gin.Handl
 	return func(c *gin.Context) {
 		scope, err := verifier.CacheScope(c.Request.Context(), c.GetHeader("Authorization"))
 		if err != nil {
-			if errors.Is(err, auth.ErrVerifierInitialization) {
-				response.RecordInternalError(c, err)
+			if errors.Is(err, auth.ErrKeyUnavailable) {
+				logger.Warn().
+					Err(err).
+					Str("method", c.Request.Method).
+					Str("path", c.Request.URL.Path).
+					Msg("cache authentication key unavailable")
+				c.Header("Retry-After", "300")
 				response.JSON(c, response.Error(http.StatusServiceUnavailable, "service unavailable"))
 			} else {
 				logger.Debug().

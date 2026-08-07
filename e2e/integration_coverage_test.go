@@ -131,7 +131,6 @@ func TestExternalMySQLSchemaMigrationSerialization(t *testing.T) {
 }
 
 func TestSQLiteCacheKeyMatching(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	app := newTestApp(t)
 	runCacheKeyMatching(t, app.db, app.router)
 }
@@ -593,7 +592,6 @@ func newExternalRouter(t *testing.T, client *ent.Client, storageAdapter storage.
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
-	cfg.Auth.SkipTokenValidation = true
 	cfg.Cache.DownloadURLSigningSecret = "integration-test-secret"
 	lifecycle := storagelifecycle.New(client)
 	cacheService := cache.NewService(cache.Options{
@@ -614,6 +612,7 @@ func newExternalRouter(t *testing.T, client *ent.Client, storageAdapter storage.
 		Storage:   storageAdapter,
 		Cache:     cacheService,
 		Lifecycle: lifecycle,
+		Verifier:  newSkipVerifier(t),
 	})
 }
 

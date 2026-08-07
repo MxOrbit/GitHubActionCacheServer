@@ -81,9 +81,10 @@ func TestBlockListRejectsOversizedBody(t *testing.T) {
 	})
 	require.NoError(t, err)
 	router := NewRouter(zerolog.Nop(), newTestConfig(t), Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
-		Cache:   cacheService,
+		DB:       client,
+		Storage:  storageAdapter,
+		Cache:    cacheService,
+		Verifier: newSkipVerifier(t),
 	})
 	body := "<BlockList>" + strings.Repeat(" ", (8<<20)+1) + "</BlockList>"
 	req := httptest.NewRequest(http.MethodPut, "/upload/"+strconv.FormatInt(upload.UploadID, 10)+"?comp=blocklist", strings.NewReader(body))
@@ -132,8 +133,9 @@ func TestFallbackProxyForwardsUnknownPath(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.Server.DefaultActionsResultsURL = upstream.URL + "/api"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
 	})
 	cacheServer := httptest.NewServer(router)
 	defer cacheServer.Close()
@@ -201,8 +203,9 @@ func TestFallbackProxyDoesNotHandleManagementMisses(t *testing.T) {
 	cfg.Server.DefaultActionsResultsURL = upstream.URL
 	cfg.Management.APIKey = "secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/management-api/_missing", nil)
@@ -227,8 +230,9 @@ func TestManagementDocsAndSpec(t *testing.T) {
 	cfg.Management.APIKey = "secret"
 	cfg.Server.APIBaseURL = "https://cache.example"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
 	})
 
 	docsReq := httptest.NewRequest(http.MethodGet, "/management-api/_docs", nil)
@@ -268,8 +272,9 @@ func TestManagementCORSPreflightDoesNotRequireAPIKey(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.Management.APIKey = "secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
 	})
 
 	req := httptest.NewRequest(http.MethodOptions, "/management-api/cache-entries/", nil)
@@ -307,8 +312,9 @@ func TestDownloadDoesNotSurfaceBackgroundMaterializationFailure(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.Cache.DownloadURLSigningSecret = "test-secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: failComposeStorage{Adapter: filesystem},
+		DB:       client,
+		Storage:  failComposeStorage{Adapter: filesystem},
+		Verifier: newSkipVerifier(t),
 	})
 
 	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
@@ -351,8 +357,9 @@ func TestDownloadWithoutSizeBytesStillPinsContentHeaders(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.Cache.DownloadURLSigningSecret = "test-secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: filesystem,
+		DB:       client,
+		Storage:  filesystem,
+		Verifier: newSkipVerifier(t),
 	})
 
 	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
@@ -393,8 +400,9 @@ func TestDownloadLengthMismatchDoesNotReusePayloadContentLengthForError(t *testi
 	cfg := newTestConfig(t)
 	cfg.Cache.DownloadURLSigningSecret = "test-secret"
 	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
-		DB:      client,
-		Storage: shortDownloadStorage{Adapter: filesystem},
+		DB:       client,
+		Storage:  shortDownloadStorage{Adapter: filesystem},
+		Verifier: newSkipVerifier(t),
 	})
 
 	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
@@ -417,9 +425,18 @@ func newTestRouter(t *testing.T) http.Handler {
 
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
 	return NewRouter(zerolog.Nop(), newTestConfig(t), Dependencies{
-		DB:      client,
-		Storage: storageAdapter,
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
 	})
+}
+
+func newSkipVerifier(t *testing.T) *auth.Verifier {
+	t.Helper()
+
+	verifier, err := auth.NewVerifier(context.Background(), auth.Options{SkipValidation: true})
+	require.NoError(t, err)
+	return verifier
 }
 
 func newTestConfig(t *testing.T) config.Config {

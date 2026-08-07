@@ -40,7 +40,6 @@ type matchCacheResponse struct {
 }
 
 func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -72,7 +71,6 @@ func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
 }
 
 func TestFinalizeAcceptsOfficialToolkitJSONSizeBytes(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -98,7 +96,6 @@ func TestFinalizeAcceptsOfficialToolkitJSONSizeBytes(t *testing.T) {
 }
 
 func TestDownloadPinsContentHeadersAgainstSniffing(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -138,7 +135,6 @@ func TestDownloadPinsContentHeadersAgainstSniffing(t *testing.T) {
 }
 
 func TestPrometheusMetricsTrackCacheProtocolOutcomes(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -180,7 +176,6 @@ func TestPrometheusMetricsTrackCacheProtocolOutcomes(t *testing.T) {
 }
 
 func TestBlockUploadRetryIsIdempotent(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -201,7 +196,6 @@ func TestBlockUploadRetryIsIdempotent(t *testing.T) {
 }
 
 func TestOpaqueAzureBlockIDsUseBlockListOrder(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -249,7 +243,6 @@ func TestOpaqueAzureBlockIDsUseBlockListOrder(t *testing.T) {
 }
 
 func TestBlankRestoreKeysAreIgnored(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 
@@ -268,7 +261,6 @@ func TestBlankRestoreKeysAreIgnored(t *testing.T) {
 }
 
 func TestJSONLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	app := newTestApp(t)
 	token := actionsToken(t)
 	body := cacheBody("dangling-json-cache")
@@ -290,7 +282,6 @@ func TestJSONLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
 }
 
 func TestAbandonedUploadDoesNotBlockNewSave(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	app := newTestApp(t)
 	token := actionsToken(t)
 

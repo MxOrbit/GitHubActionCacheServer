@@ -27,9 +27,14 @@ type Dependencies struct {
 	Cache     *cache.Service
 	Lifecycle *storagelifecycle.Service
 	Metrics   *metrics.Registry
+	Verifier  *auth.Verifier
 }
 
 func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http.Handler {
+	if deps.Verifier == nil {
+		panic("httpapi: Dependencies.Verifier is required")
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
@@ -71,11 +76,7 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 
 	cacheService := router.Group(
 		"/twirp/github.actions.results.api.v1.CacheService",
-		middleware.RequireCacheScope(auth.NewVerifier(auth.Options{
-			Issuer:         cfg.Auth.TokenIssuer,
-			JWKSURL:        cfg.Auth.TokenJWKSURL,
-			SkipValidation: cfg.Auth.SkipTokenValidation,
-		}), logger),
+		middleware.RequireCacheScope(deps.Verifier, logger),
 	)
 	cacheService.POST("/CreateCacheEntry", handlers.CreateCacheEntry)
 	cacheService.POST("/GetCacheEntryDownloadURL", handlers.GetCacheEntryDownloadURL)

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cache"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/cleanup"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
@@ -80,6 +81,17 @@ func main() {
 
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	defer backgroundCancel()
+
+	verifier, err := auth.NewVerifier(backgroundCtx, auth.Options{
+		Issuer:         cfg.Auth.TokenIssuer,
+		JWKSURL:        cfg.Auth.TokenJWKSURL,
+		SkipValidation: cfg.Auth.SkipTokenValidation,
+		Logger:         &logger,
+	})
+	if err != nil {
+		logger.Fatal().Err(err).Str("jwks_url", cfg.Auth.TokenJWKSURL).Msg("token verifier initialization failed")
+	}
+
 	storageSizeReady := make(chan struct{})
 	var backgroundServices sync.WaitGroup
 	backgroundServices.Go(func() {
@@ -116,6 +128,7 @@ func main() {
 		Cache:     cacheService,
 		Lifecycle: lifecycleService,
 		Metrics:   metricsRegistry,
+		Verifier:  verifier,
 	}))
 
 	errCh := make(chan error, 1)

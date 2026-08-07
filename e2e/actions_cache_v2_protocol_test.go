@@ -20,7 +20,6 @@ import (
 // This mirrors the v2 HTTP shape used by actions/cache. Runner-level
 // compatibility still needs coverage with falcondev's patched runner image.
 func TestActionsCacheV2CompatibleHTTPProtocolSaveAndRestore(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	app := newTestApp(t)
 	server := httptest.NewServer(app.router)
 	t.Cleanup(server.Close)

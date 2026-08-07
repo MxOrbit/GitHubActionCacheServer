@@ -21,7 +21,6 @@ type protobufField struct {
 }
 
 func TestSccacheCompatibleProtobufSaveAndRestore(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 	token := actionsToken(t)
 	key := "sccache-protobuf-key"
@@ -81,7 +80,6 @@ func TestSccacheCompatibleProtobufSaveAndRestore(t *testing.T) {
 }
 
 func TestSccacheCompatibleProtobufCacheMiss(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 
 	rec := postProtobuf(
@@ -104,7 +102,6 @@ func TestSccacheCompatibleProtobufCacheMiss(t *testing.T) {
 }
 
 func TestProtobufLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	app := newTestApp(t)
 	token := actionsToken(t)
 	key := "dangling-protobuf-cache"
@@ -135,7 +132,6 @@ func TestProtobufLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
 }
 
 func TestProtobufFinalizeMissingUploadReachesDomainHandling(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 
 	rec := postProtobuf(
@@ -156,7 +152,6 @@ func TestProtobufFinalizeMissingUploadReachesDomainHandling(t *testing.T) {
 }
 
 func TestMalformedProtobufCacheRequestReturnsBadRequest(t *testing.T) {
-	t.Setenv("SKIP_TOKEN_VALIDATION", "true")
 	router := newTestRouter(t)
 
 	// Field 2 claims a five-byte string but contains only one byte.
