@@ -31,6 +31,7 @@ const (
 	jwksRateLimitWaitMax      = 15 * time.Second
 	jwksRefreshInterval       = 15 * time.Minute
 	jwksRefreshUnknownKIDRate = 5 * time.Minute
+	tokenClockSkewLeeway      = 30 * time.Second
 )
 
 type Scope struct {
@@ -145,12 +146,14 @@ func (v *Verifier) verify(ctx context.Context, tokenString string) (*claims, err
 		v.keyfuncFor(ctx),
 		jwt.WithIssuer(v.issuer),
 		jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
+		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(tokenClockSkewLeeway),
 	)
 	if err != nil {
 		if errors.Is(err, ErrKeyUnavailable) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	if !token.Valid {
 		return nil, ErrInvalidToken

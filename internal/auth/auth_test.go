@@ -109,6 +109,37 @@ func TestCacheScopeRejectsExpiredToken(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidToken)
 }
 
+func TestCacheScopeRejectsTokenWithoutExpiration(t *testing.T) {
+	jwks := testutil.NewJWKS(t)
+	verifier := newJWKSVerifier(t, jwks)
+
+	claims := validClaims()
+	delete(claims, "exp")
+	_, err := verifier.CacheScope(context.Background(), bearer(jwks.Sign(t, jwks.KID, claims)))
+	require.ErrorIs(t, err, ErrInvalidToken)
+}
+
+func TestCacheScopeAcceptsJustExpiredTokenWithinLeeway(t *testing.T) {
+	jwks := testutil.NewJWKS(t)
+	verifier := newJWKSVerifier(t, jwks)
+
+	claims := validClaims()
+	claims["exp"] = time.Now().Add(-10 * time.Second).Unix()
+	scope, err := verifier.CacheScope(context.Background(), bearer(jwks.Sign(t, jwks.KID, claims)))
+	require.NoError(t, err)
+	require.Equal(t, "123", scope.RepoID)
+}
+
+func TestCacheScopeRejectsTokenExpiredBeyondLeeway(t *testing.T) {
+	jwks := testutil.NewJWKS(t)
+	verifier := newJWKSVerifier(t, jwks)
+
+	claims := validClaims()
+	claims["exp"] = time.Now().Add(-40 * time.Second).Unix()
+	_, err := verifier.CacheScope(context.Background(), bearer(jwks.Sign(t, jwks.KID, claims)))
+	require.ErrorIs(t, err, ErrInvalidToken)
+}
+
 func TestCacheScopeRejectsWrongIssuer(t *testing.T) {
 	jwks := testutil.NewJWKS(t)
 	verifier := newJWKSVerifier(t, jwks)

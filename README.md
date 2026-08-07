@@ -96,9 +96,9 @@ Unless explicitly overridden, the JWKS URL is
 `{effective issuer}/.well-known/jwks`. Trailing slashes are removed from the
 effective issuer before JWT validation and JWKS derivation.
 
-The token must contain `repository_id` and an `ac` claim with cache scopes. A
-scope with permission `>= 2` is required for saves; scopes with permission `>= 1`
-are used for restores.
+The token must contain `repository_id`, an `ac` claim with cache scopes, and a
+valid `exp` claim. A scope with permission `>= 2` is required for saves; scopes
+with permission `>= 1` are used for restores.
 
 ### Database
 
