@@ -76,12 +76,12 @@ docker build -t mmx233/action-cache-server .
 
 ### Server
 
-| Variable                      | Default                                                  | Description                                                           |
-|-------------------------------|----------------------------------------------------------|-----------------------------------------------------------------------|
-| `ADDR`                        | `:3000`                                                  | HTTP listen address.                                                  |
-| `API_BASE_URL`                | empty                                                    | Public base URL used when generating signed upload and download URLs. |
-| `DEFAULT_ACTIONS_RESULTS_URL` | `https://results-receiver.actions.githubusercontent.com` | Upstream target for fallback proxy requests.                          |
-| `DEBUG`                       | `false`                                                  | Enables debug log level.                                              |
+| Variable                      | Default                                                  | Description                                                                                                                                                                                                                                                      |
+|-------------------------------|----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ADDR`                        | `:3000`                                                  | HTTP listen address.                                                                                                                                                                                                                                             |
+| `API_BASE_URL`                | empty                                                    | Public base URL for signed upload/download URLs and the OpenAPI server URL. When empty, signed URLs are derived from request headers, which the requester controls, and the OpenAPI server URL falls back to a relative path; set this explicitly in production. |
+| `DEFAULT_ACTIONS_RESULTS_URL` | `https://results-receiver.actions.githubusercontent.com` | Upstream target for fallback proxy requests.                                                                                                                                                                                                                     |
+| `DEBUG`                       | `false`                                                  | Enables debug log level.                                                                                                                                                                                                                                         |
 
 ### Authentication
 

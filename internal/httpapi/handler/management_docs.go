@@ -3,8 +3,8 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/baseurl"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi/response"
 	"github.com/gin-gonic/gin"
 )
@@ -56,6 +56,7 @@ func (h *Handler) ManagementDocs(c *gin.Context) {
 	}
 
 	specURL := "./_docs/spec.json"
+	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(fmt.Sprintf(managementDocsHTML, specURL, specURL)))
 }
 
@@ -64,7 +65,8 @@ func (h *Handler) ManagementOpenAPISpec(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, h.managementOpenAPISpec(c))
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, h.managementOpenAPISpec())
 }
 
 func (h *Handler) managementAPIEnabled(c *gin.Context) bool {
@@ -75,12 +77,11 @@ func (h *Handler) managementAPIEnabled(c *gin.Context) bool {
 	return true
 }
 
-func (h *Handler) managementOpenAPISpec(c *gin.Context) map[string]any {
-	serverURL := baseurl.FromRequest(c.Request, h.cfg.Server.APIBaseURL)
-	if serverURL == "" {
-		serverURL = "/management-api"
-	} else {
-		serverURL += "/management-api"
+func (h *Handler) managementOpenAPISpec() map[string]any {
+	// Never reflect request headers into the spec; tooling would send API keys to a spoofed origin.
+	serverURL := "/management-api"
+	if base := strings.TrimRight(strings.TrimSpace(h.cfg.Server.APIBaseURL), "/"); base != "" {
+		serverURL = base + "/management-api"
 	}
 
 	return map[string]any{

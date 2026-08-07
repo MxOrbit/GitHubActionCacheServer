@@ -45,6 +45,11 @@ func main() {
 			Str("environment_variable", "DOWNLOAD_URL_SIGNING_SECRET").
 			Msg("download URL signing secret is unset; using a random per-process key, so issued URLs will fail after restart or on another replica")
 	}
+	if cfg.Server.APIBaseURL == "" {
+		logger.Warn().
+			Str("environment_variable", "API_BASE_URL").
+			Msg("public base URL is unset; generated URLs are derived from request headers, set this explicitly in production")
+	}
 
 	dbClient, err := db.OpenAndMigrate(logger.WithContext(context.Background()), cfg.DB)
 	if err != nil {

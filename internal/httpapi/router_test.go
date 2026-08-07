@@ -267,6 +267,41 @@ func TestManagementDocsAndSpec(t *testing.T) {
 	require.Contains(t, spec.Paths, "/storage-locations/{id}")
 }
 
+func TestManagementDocsIgnoresForwardedHeaders(t *testing.T) {
+	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	cfg := newTestConfig(t)
+	cfg.Management.APIKey = "secret"
+	cfg.Server.APIBaseURL = ""
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
+	})
+
+	specReq := httptest.NewRequest(http.MethodGet, "/management-api/_docs/spec.json", nil)
+	specReq.Header.Set("X-Forwarded-Host", "attacker.example")
+	specReq.Header.Set("X-Forwarded-Proto", "https")
+	specRec := httptest.NewRecorder()
+	router.ServeHTTP(specRec, specReq)
+
+	require.Equal(t, http.StatusOK, specRec.Code)
+	require.Equal(t, "no-store", specRec.Header().Get("Cache-Control"))
+	var spec struct {
+		Servers []struct {
+			URL string `json:"url"`
+		} `json:"servers"`
+	}
+	require.NoError(t, json.Unmarshal(specRec.Body.Bytes(), &spec))
+	require.Equal(t, "/management-api", spec.Servers[0].URL)
+
+	docsReq := httptest.NewRequest(http.MethodGet, "/management-api/_docs", nil)
+	docsRec := httptest.NewRecorder()
+	router.ServeHTTP(docsRec, docsReq)
+
+	require.Equal(t, http.StatusOK, docsRec.Code)
+	require.Equal(t, "no-store", docsRec.Header().Get("Cache-Control"))
+}
+
 func TestManagementCORSPreflightDoesNotRequireAPIKey(t *testing.T) {
 	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
 	cfg := newTestConfig(t)
@@ -442,6 +477,7 @@ func newSkipVerifier(t *testing.T) *auth.Verifier {
 func newTestConfig(t *testing.T) config.Config {
 	t.Helper()
 
+	t.Setenv("API_BASE_URL", "")
 	cfg, err := config.Load()
 	require.NoError(t, err)
 	return cfg
