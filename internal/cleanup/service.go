@@ -149,6 +149,12 @@ func (s *Service) RunCacheEntries(ctx context.Context) (int, error) {
 			cursor = location.ID
 			result, err := s.lifecycle.RequestExpiredLocationDeletion(ctx, location.ID, cutoff)
 			if err != nil {
+				if ent.IsConstraintError(err) {
+					// A reader lease committed past the fence's recheck; the
+					// transaction rolled back, so defer this location instead
+					// of aborting the pass.
+					continue
+				}
 				return deleted, err
 			}
 			if !result.Fenced {
@@ -254,6 +260,10 @@ func (s *Service) RunPendingStorageLocations(ctx context.Context) (int, error) {
 			cursor = location.ID
 			result, err := s.lifecycle.RequestLocationDeletion(ctx, location.ID, false, true)
 			if err != nil {
+				if ent.IsConstraintError(err) {
+					// Same deferred-on-conflict semantics as RunCacheEntries.
+					continue
+				}
 				return finalized, err
 			}
 			if result.Task != nil {

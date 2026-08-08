@@ -41,6 +41,7 @@ type Service struct {
 	directDownloadLeaseDuration  time.Duration
 	deletionGracePeriod          time.Duration
 	materializationLeaseDuration time.Duration
+	materializationDisabled      bool
 	readerAcquireRetryBackoff    time.Duration
 }
 
@@ -51,7 +52,11 @@ type Options struct {
 	DirectDownloadLeaseDuration  time.Duration
 	DeletionGracePeriod          time.Duration
 	MaterializationLeaseDuration time.Duration
-	ReaderAcquireRetryBackoff    time.Duration
+	// MaterializationDisabled marks deployments without a storage composer, where
+	// locations never merge and parts deletion never runs; reader acquisitions
+	// then skip the parts row lock regardless of part count.
+	MaterializationDisabled   bool
+	ReaderAcquireRetryBackoff time.Duration
 }
 
 type ReaderLease struct {
@@ -113,6 +118,7 @@ func NewWithOptions(db *ent.Client, options Options) *Service {
 		directDownloadLeaseDuration:  durationOrDefault(options.DirectDownloadLeaseDuration, DirectDownloadLeaseDuration),
 		deletionGracePeriod:          durationOrDefault(options.DeletionGracePeriod, DeletionGracePeriod),
 		materializationLeaseDuration: durationOrDefault(options.MaterializationLeaseDuration, MaterializationLeaseDuration),
+		materializationDisabled:      options.MaterializationDisabled,
 		readerAcquireRetryBackoff:    durationOrDefault(options.ReaderAcquireRetryBackoff, readerAcquireRetryBackoff),
 	}
 }
@@ -159,30 +165,25 @@ func (s *Service) acquireReaderOnce(ctx context.Context, cacheEntryID string, op
 		return nil, false, fmt.Errorf("query cache entry for reader lease: %w", err)
 	}
 
-	affected, err := tx.StorageLocation.Update().
-		Where(
-			storagelocation.ID(entry.LocationId),
-			storagelocation.DeletionRequestedAtIsNil(),
-		).
-		AddLeaseVersion(1).
-		Save(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("lock storage location for reader lease: %w", err)
-	}
-	if affected == 0 {
-		if err := tx.Rollback(); err != nil {
-			return nil, false, fmt.Errorf("rollback unavailable reader lease: %w", err)
-		}
-		committed = true
-		return nil, true, nil
-	}
-
 	location, err := tx.StorageLocation.Query().Where(storagelocation.ID(entry.LocationId)).Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return nil, false, ErrLocationUnavailable
+			if err := tx.Rollback(); err != nil {
+				return nil, false, fmt.Errorf("rollback missing location reader lease: %w", err)
+			}
+			committed = true
+			return nil, true, nil
 		}
 		return nil, false, fmt.Errorf("query storage location for reader lease: %w", err)
+	}
+
+	// A set deletionRequestedAt never clears, so this snapshot check is final.
+	if location.DeletionRequestedAt != nil {
+		if err := tx.Rollback(); err != nil {
+			return nil, false, fmt.Errorf("rollback fenced reader lease: %w", err)
+		}
+		committed = true
+		return nil, true, nil
 	}
 
 	scope := storagereaderlease.ScopeParts
@@ -199,6 +200,31 @@ func (s *Service) acquireReaderOnce(ctx context.Context, cacheEntryID string, op
 			committed = true
 			return nil, false, ErrDirectRepresentation
 		}
+		// The row lock is only paid while a future merge (and thus parts
+		// deletion, which has no grace period) is still possible; merged,
+		// single-part, unsupported and composer-less locations are covered by
+		// the lease row alone (fence recheck, deletion grace, FK restrict).
+		if !s.materializationDisabled && location.PartCount >= 2 && location.MaterializationUnsupportedAt == nil {
+			affected, err := tx.StorageLocation.Update().
+				Where(
+					storagelocation.ID(location.ID),
+					storagelocation.DeletionRequestedAtIsNil(),
+					storagelocation.MergedAtIsNil(),
+					storagelocation.PartsDeletedAtIsNil(),
+				).
+				AddLeaseVersion(1).
+				Save(ctx)
+			if err != nil {
+				return nil, false, fmt.Errorf("lock storage location for parts reader lease: %w", err)
+			}
+			if affected == 0 {
+				if err := tx.Rollback(); err != nil {
+					return nil, false, fmt.Errorf("rollback unavailable parts reader lease: %w", err)
+				}
+				committed = true
+				return nil, true, nil
+			}
+		}
 	}
 
 	duration := s.readerLeaseDuration
@@ -213,6 +239,14 @@ func (s *Service) acquireReaderOnce(ctx context.Context, cacheEntryID string, op
 		SetScope(scope).
 		SetExpiresAt(expiresAt.UnixMilli()).
 		Save(ctx); err != nil {
+		if ent.IsConstraintError(err) {
+			// Parent location deleted between the read above and this insert.
+			if err := tx.Rollback(); err != nil {
+				return nil, false, fmt.Errorf("rollback conflicting reader lease: %w", err)
+			}
+			committed = true
+			return nil, true, nil
+		}
 		return nil, false, fmt.Errorf("create storage reader lease: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -324,8 +358,9 @@ func (s *Service) PurgeDanglingCacheEntry(ctx context.Context, cacheEntryID, loc
 
 // PurgeDanglingCacheEntryIfUnchanged removes an entry only while the storage
 // representation and materialization ownership still match the state that was
-// inspected before the missing object was confirmed. The conditional update is
-// also the cross-dialect write lock used by the rest of the fencing model.
+// inspected before the missing object was confirmed. Reader leases no longer
+// invalidate the observation on merged locations; active readers are handled
+// by the fence's lease recheck and deletion grace instead.
 func (s *Service) PurgeDanglingCacheEntryIfUnchanged(ctx context.Context, cacheEntryID string, observed *ent.StorageLocation) (bool, error) {
 	if observed == nil || activeMaterialization(observed, s.now()) {
 		return false, nil
@@ -456,8 +491,9 @@ func (s *Service) RequestLocationDeletion(ctx context.Context, locationID string
 }
 
 // RequestCapacityEviction removes a location only while its access observation
-// is still current. Active readers pin the location instead of merely delaying
-// its physical deletion, which preserves capacity eviction's LRU contract.
+// is still current. Committed active readers pin the location, preserving
+// capacity eviction's LRU contract; an acquisition still in flight may be
+// missed, in which case the fence defers physical deletion instead.
 func (s *Service) RequestCapacityEviction(ctx context.Context, observed CapacityObservation) (CapacityEvictionResult, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
@@ -567,7 +603,7 @@ func (s *Service) detachCacheEntriesAndFence(ctx context.Context, db *ent.Client
 }
 
 // RequestExpiredLocationDeletion atomically rechecks retention eligibility
-// after fencing concurrent readers and cache-entry replacement transactions.
+// against active reader leases and cache-entry replacement transactions.
 func (s *Service) RequestExpiredLocationDeletion(ctx context.Context, locationID string, cutoff int64) (DeletionResult, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {

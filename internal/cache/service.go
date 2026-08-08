@@ -149,7 +149,7 @@ func NewService(options Options) *Service {
 	composer, _ := options.Storage.(storage.ComposeAdapter)
 	lifecycle := options.Lifecycle
 	if lifecycle == nil {
-		lifecycle = storagelifecycle.New(options.DB)
+		lifecycle = storagelifecycle.NewWithOptions(options.DB, storagelifecycle.Options{MaterializationDisabled: composer == nil})
 	}
 	logger := zerolog.Nop()
 	if options.Logger != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagecapacity"
@@ -69,6 +70,42 @@ func TestExternalMySQLFilesystemSaveAndRestore(t *testing.T) {
 	router := newExternalRouter(t, client, filesystem)
 
 	runSaveRestoreFlow(t, router, uniqueIntegrationCacheKey("mysql"), "mysql-cache-content")
+}
+
+func TestExternalPostgresReaderLeaseForeignKeyIsClassified(t *testing.T) {
+	dbCfg, ok := externalPostgresConfig()
+	if !ok {
+		t.Skip("set E2E_POSTGRES_URL to run PostgreSQL integration coverage")
+	}
+
+	ctx := context.Background()
+	client := openExternalDB(t, ctx, dbCfg)
+
+	_, err := client.StorageReaderLease.Create().
+		SetID("orphan-lease").
+		SetStorageLocationId("missing-location").
+		SetScope(storagereaderlease.ScopeStorage).
+		SetExpiresAt(time.Now().Add(time.Minute).UnixMilli()).
+		Save(ctx)
+	require.True(t, ent.IsConstraintError(err))
+}
+
+func TestExternalMySQLReaderLeaseForeignKeyIsClassified(t *testing.T) {
+	dbCfg, ok := externalMySQLConfig()
+	if !ok {
+		t.Skip("set E2E_MYSQL_HOST, E2E_MYSQL_DATABASE and E2E_MYSQL_USER to run MySQL integration coverage")
+	}
+
+	ctx := context.Background()
+	client := openExternalDB(t, ctx, dbCfg)
+
+	_, err := client.StorageReaderLease.Create().
+		SetID("orphan-lease").
+		SetStorageLocationId("missing-location").
+		SetScope(storagereaderlease.ScopeStorage).
+		SetExpiresAt(time.Now().Add(time.Minute).UnixMilli()).
+		Save(ctx)
+	require.True(t, ent.IsConstraintError(err))
 }
 
 func TestExternalPgBouncerSchemaMigrationSerialization(t *testing.T) {

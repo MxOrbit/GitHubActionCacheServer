@@ -543,6 +543,24 @@ func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
 	require.GreaterOrEqual(t, *refreshed, touchedAfter)
 }
 
+func TestDownloadSkipsLocationWriteWithoutComposer(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+
+	// Multi-part and unmerged: only the composer-less wiring (filesystem has no
+	// ComposeAdapter) excuses this download from the parts row lock.
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(location.FolderName, 0), bytes.NewBufferString("hello")))
+	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(location.FolderName, 1), bytes.NewBufferString(" world")))
+
+	stream, err := service.Download(ctx, "entry-id")
+	require.NoError(t, err)
+	_, err = io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Zero(t, client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
+}
+
 func TestFailedMergedDownloadDoesNotUpdateLastDownloadedAt(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: &downloadErrorStorage{Adapter: filesystem}})

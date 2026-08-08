@@ -153,10 +153,12 @@ func TestConcurrentReaderLeasesPreserveVersionAndAllowLookups(t *testing.T) {
 	_, client, _ := testutil.NewSQLiteFilesystem(t)
 	service := New(client)
 	const readers = 32
+	// PartCount 2 keeps the location mergeable, so acquisitions still take the
+	// row lock this test pins.
 	location := client.StorageLocation.Create().
 		SetID("shared-location").
 		SetFolderName("shared-folder").
-		SetPartCount(1).
+		SetPartCount(2).
 		SaveX(ctx)
 	for index := range readers {
 		client.CacheEntry.Create().
@@ -200,6 +202,152 @@ func TestConcurrentReaderLeasesPreserveVersionAndAllowLookups(t *testing.T) {
 
 	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
 	require.Equal(t, int64(readers), client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
+}
+
+func TestMergedReaderLeaseSkipsRowWriteAndFencesDeletion(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	now := time.Now().Truncate(time.Millisecond)
+	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
+	location := createLifecycleEntry(ctx, client, "entry", "location", 1)
+	client.StorageLocation.UpdateOneID(location.ID).SetMergedAt(now.UnixMilli()).ExecX(ctx)
+	versionBefore := client.StorageLocation.GetX(ctx, location.ID).LeaseVersion
+
+	lease, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, storagereaderlease.ScopeStorage, lease.Scope)
+	require.Equal(t, versionBefore, client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
+
+	result, err := service.RequestLocationDeletion(ctx, location.ID, true, false)
+	require.NoError(t, err)
+	require.True(t, result.Fenced)
+	require.False(t, result.Finalized)
+
+	for step := 0; step < int(DeletionGracePeriod/time.Minute)+1; step++ {
+		now = now.Add(time.Minute)
+		require.NoError(t, service.RenewReader(ctx, lease.ID))
+	}
+	result, err = service.RequestLocationDeletion(ctx, location.ID, false, true)
+	require.NoError(t, err)
+	require.False(t, result.Finalized)
+
+	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
+	result, err = service.RequestLocationDeletion(ctx, location.ID, false, true)
+	require.NoError(t, err)
+	require.True(t, result.Finalized)
+}
+
+func TestAcquireReaderSkipsFencedMergedLocation(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := NewWithOptions(client, Options{ReaderAcquireRetryBackoff: time.Millisecond})
+	now := time.Now()
+	location := createLifecycleEntry(ctx, client, "entry", "location", 1)
+	client.StorageLocation.UpdateOneID(location.ID).
+		SetMergedAt(now.UnixMilli()).
+		SetDeletionRequestedAt(now.UnixMilli()).
+		ExecX(ctx)
+
+	_, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
+	require.ErrorIs(t, err, ErrLocationUnavailable)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+	require.Zero(t, client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
+}
+
+func TestUnmergeableLocationsSkipRowWrite(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	now := time.Now()
+	service := New(client)
+
+	singlePart := createLifecycleEntry(ctx, client, "single-entry", "single-location", 1)
+	unsupported := createLifecycleEntry(ctx, client, "unsupported-entry", "unsupported-location", 2)
+	client.StorageLocation.UpdateOneID(unsupported.ID).
+		SetMaterializationUnsupportedAt(now.UnixMilli()).
+		ExecX(ctx)
+
+	lease, err := service.AcquireReader(ctx, "single-entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, storagereaderlease.ScopeParts, lease.Scope)
+	lease, err = service.AcquireReader(ctx, "unsupported-entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, storagereaderlease.ScopeParts, lease.Scope)
+
+	require.Zero(t, client.StorageLocation.GetX(ctx, singlePart.ID).LeaseVersion)
+	require.Zero(t, client.StorageLocation.GetX(ctx, unsupported.ID).LeaseVersion)
+}
+
+func TestMaterializationDisabledReadersSkipRowWrite(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := NewWithOptions(client, Options{MaterializationDisabled: true})
+	location := createLifecycleEntry(ctx, client, "entry", "location", 2)
+
+	lease, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, storagereaderlease.ScopeParts, lease.Scope)
+	require.Zero(t, client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
+}
+
+func TestReaderLeaseInsertConstraintIsClassified(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+
+	_, err := client.StorageReaderLease.Create().
+		SetID("orphan-lease").
+		SetStorageLocationId("missing-location").
+		SetScope(storagereaderlease.ScopeStorage).
+		SetExpiresAt(time.Now().Add(time.Minute).UnixMilli()).
+		Save(ctx)
+	require.True(t, ent.IsConstraintError(err))
+}
+
+func TestConcurrentMergedReaderLeasesSkipLocationWrite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	const readers = 32
+	location := client.StorageLocation.Create().
+		SetID("shared-location").
+		SetFolderName("shared-folder").
+		SetPartCount(1).
+		SetMergedAt(time.Now().UnixMilli()).
+		SaveX(ctx)
+	for index := range readers {
+		client.CacheEntry.Create().
+			SetID(fmt.Sprintf("entry-%02d", index)).
+			SetKey(fmt.Sprintf("key-%02d", index)).
+			SetVersion("version").
+			SetScope("scope").
+			SetRepoId("repo").
+			SetUpdatedAt(time.Now().UnixMilli()).
+			SetLocation(location).
+			SaveX(ctx)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, readers*2)
+	var wg sync.WaitGroup
+	for index := range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			lease, err := service.AcquireReader(ctx, fmt.Sprintf("entry-%02d", index), AcquireReaderOptions{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if err := service.ReleaseReader(ctx, lease.ID); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+	require.Zero(t, client.StorageLocation.GetX(ctx, location.ID).LeaseVersion)
 }
 
 func TestExpiredLocationDeletionRechecksAccessAndReaderLease(t *testing.T) {
@@ -269,7 +417,7 @@ func TestCapacityEvictionSkipsActiveReaderAndStaleAccessObservation(t *testing.T
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	now := time.Now().Truncate(time.Millisecond)
 	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
-	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 1)
+	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 2)
 	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
 	entry := client.CacheEntry.GetX(ctx, "entry")
 
@@ -383,7 +531,7 @@ func TestPurgeDanglingCacheEntryLeavesSharedLocationAvailable(t *testing.T) {
 func TestConditionalDanglingPurgeTreatsReaderLeaseVersionChangeAsStale(t *testing.T) {
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	service := New(client)
-	observed := createLifecycleEntry(ctx, client, "entry", "location", 1)
+	observed := createLifecycleEntry(ctx, client, "entry", "location", 2)
 
 	lease, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
 	require.NoError(t, err)
@@ -397,6 +545,25 @@ func TestConditionalDanglingPurgeTreatsReaderLeaseVersionChangeAsStale(t *testin
 	require.NoError(t, err)
 	require.True(t, deleted)
 	require.NotNil(t, client.StorageLocation.GetX(ctx, observed.ID).DeletionRequestedAt)
+	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
+}
+
+func TestConditionalDanglingPurgeIgnoresMergedReaderAcquisition(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+	observed := createLifecycleEntry(ctx, client, "entry", "location", 2)
+	client.StorageLocation.UpdateOneID(observed.ID).SetMergedAt(time.Now().UnixMilli()).ExecX(ctx)
+	observed = client.StorageLocation.GetX(ctx, observed.ID)
+
+	// A merged reader no longer bumps leaseVersion, so the observation stays
+	// fresh and the purge proceeds; the fence defers physical deletion.
+	lease, err := service.AcquireReader(ctx, "entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	deleted, err := service.PurgeDanglingCacheEntryIfUnchanged(ctx, "entry", observed)
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, observed.ID).DeletionRequestedAt)
+	require.Equal(t, 1, client.StorageLocation.Query().CountX(ctx))
 	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
 }
 
