@@ -120,6 +120,12 @@ func init() {
 	storagelocation.DefaultLeaseVersion = storagelocationDescLeaseVersion.Default.(int64)
 	// storagelocation.LeaseVersionValidator is a validator for the "leaseVersion" field. It is called by the builders before save.
 	storagelocation.LeaseVersionValidator = storagelocationDescLeaseVersion.Validators[0].(func(int64) error)
+	// storagelocationDescRecencyAt is the schema descriptor for recencyAt field.
+	storagelocationDescRecencyAt := storagelocationFields[13].Descriptor()
+	// storagelocation.DefaultRecencyAt holds the default value on creation for the recencyAt field.
+	storagelocation.DefaultRecencyAt = storagelocationDescRecencyAt.Default.(int64)
+	// storagelocation.RecencyAtValidator is a validator for the "recencyAt" field. It is called by the builders before save.
+	storagelocation.RecencyAtValidator = storagelocationDescRecencyAt.Validators[0].(func(int64) error)
 	uploadFields := schema.Upload{}.Fields()
 	_ = uploadFields
 	// uploadDescKey is the schema descriptor for key field.

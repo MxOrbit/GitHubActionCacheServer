@@ -128,6 +128,23 @@ func TestCompleteUploadTrustsPersistedPartCount(t *testing.T) {
 	require.Zero(t, adapter.downloadCalls)
 }
 
+func TestCompleteUploadSeedsLocationRecency(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("data")))
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+
+	entry := client.CacheEntry.Query().OnlyX(ctx)
+	location := client.StorageLocation.GetX(ctx, entry.LocationId)
+	require.NotZero(t, location.RecencyAt)
+	require.Equal(t, entry.UpdatedAt, location.RecencyAt)
+}
+
 func TestCompleteUploadPersistsLogicalPartSizeOnly(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	capacity := &capacityTriggerCounter{}
@@ -527,7 +544,9 @@ func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
 	recentStream, err := service.Download(ctx, "recent-entry")
 	require.NoError(t, err)
 	require.NoError(t, recentStream.Close())
-	require.Equal(t, recent, *client.StorageLocation.GetX(ctx, recentLocation.ID).LastDownloadedAt)
+	recentRow := client.StorageLocation.GetX(ctx, recentLocation.ID)
+	require.Equal(t, recent, *recentRow.LastDownloadedAt)
+	require.Zero(t, recentRow.RecencyAt)
 
 	staleLocation := createCacheEntryForDownload(ctx, client, "stale-entry", "stale-folder")
 	require.NoError(t, filesystem.UploadStream(ctx, partObjectName(staleLocation.FolderName, 0), bytes.NewBufferString("stale")))
@@ -538,9 +557,11 @@ func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {
 	staleStream, err := service.Download(ctx, "stale-entry")
 	require.NoError(t, err)
 	require.NoError(t, staleStream.Close())
-	refreshed := client.StorageLocation.GetX(ctx, staleLocation.ID).LastDownloadedAt
+	staleRow := client.StorageLocation.GetX(ctx, staleLocation.ID)
+	refreshed := staleRow.LastDownloadedAt
 	require.NotNil(t, refreshed)
 	require.GreaterOrEqual(t, *refreshed, touchedAfter)
+	require.Equal(t, *refreshed, staleRow.RecencyAt)
 }
 
 func TestDownloadSkipsLocationWriteWithoutComposer(t *testing.T) {

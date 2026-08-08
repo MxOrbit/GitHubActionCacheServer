@@ -40,6 +40,8 @@ type StorageLocation struct {
 	PartsDeletedAt *int64 `json:"partsDeletedAt,omitempty"`
 	// LastDownloadedAt holds the value of the "lastDownloadedAt" field.
 	LastDownloadedAt *int64 `json:"lastDownloadedAt,omitempty"`
+	// RecencyAt holds the value of the "recencyAt" field.
+	RecencyAt int64 `json:"recencyAt,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the StorageLocationQuery when eager-loading is set.
 	Edges        StorageLocationEdges `json:"edges"`
@@ -80,7 +82,7 @@ func (*StorageLocation) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case storagelocation.FieldPartCount, storagelocation.FieldSizeBytes, storagelocation.FieldLeaseVersion, storagelocation.FieldDeletionRequestedAt, storagelocation.FieldMergeStartedAt, storagelocation.FieldMergeLeaseExpiresAt, storagelocation.FieldMergedAt, storagelocation.FieldMaterializationUnsupportedAt, storagelocation.FieldPartsDeletedAt, storagelocation.FieldLastDownloadedAt:
+		case storagelocation.FieldPartCount, storagelocation.FieldSizeBytes, storagelocation.FieldLeaseVersion, storagelocation.FieldDeletionRequestedAt, storagelocation.FieldMergeStartedAt, storagelocation.FieldMergeLeaseExpiresAt, storagelocation.FieldMergedAt, storagelocation.FieldMaterializationUnsupportedAt, storagelocation.FieldPartsDeletedAt, storagelocation.FieldLastDownloadedAt, storagelocation.FieldRecencyAt:
 			values[i] = new(sql.NullInt64)
 		case storagelocation.FieldID, storagelocation.FieldFolderName, storagelocation.FieldMergeLeaseToken:
 			values[i] = new(sql.NullString)
@@ -186,6 +188,12 @@ func (_m *StorageLocation) assignValues(columns []string, values []any) error {
 				_m.LastDownloadedAt = new(int64)
 				*_m.LastDownloadedAt = value.Int64
 			}
+		case storagelocation.FieldRecencyAt:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field recencyAt", values[i])
+			} else if value.Valid {
+				_m.RecencyAt = value.Int64
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -285,6 +293,9 @@ func (_m *StorageLocation) String() string {
 		builder.WriteString("lastDownloadedAt=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("recencyAt=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RecencyAt))
 	builder.WriteByte(')')
 	return builder.String()
 }

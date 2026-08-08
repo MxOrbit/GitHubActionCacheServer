@@ -7,10 +7,8 @@ import (
 	"math"
 	"time"
 
-	"entgo.io/ent/dialect/sql"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/config"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
-	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
@@ -300,87 +298,30 @@ func (s *Service) capacityCandidates(ctx context.Context, cursor *capacityCursor
 		storagelocation.HasCacheEntries(),
 	}
 	if cursor != nil {
-		predicates = append(predicates, capacityAfter(*cursor))
+		// The leading GTE lets the planner seek into (recencyAt, id); the
+		// residual term filters the tie band.
+		predicates = append(predicates, storagelocation.And(
+			storagelocation.RecencyAtGTE(cursor.recency),
+			storagelocation.Or(
+				storagelocation.RecencyAtGT(cursor.recency),
+				storagelocation.IDGT(cursor.locationID),
+			),
+		))
 	}
 	locations, err := s.db.StorageLocation.Query().
 		Where(predicates...).
-		Order(byCapacityRecency(), storagelocation.ByID()).
+		Order(storagelocation.ByRecencyAt(), storagelocation.ByID()).
 		Limit(candidatePageSize).
 		All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query capacity eviction candidates: %w", err)
 	}
-	if len(locations) == 0 {
-		return nil, nil
-	}
-
-	locationIDs := make([]string, len(locations))
-	for index, location := range locations {
-		locationIDs[index] = location.ID
-	}
-	var recencies []struct {
-		LocationID string `json:"locationId"`
-		RecencyAt  int64  `json:"recencyAt"`
-	}
-	err = s.db.CacheEntry.Query().
-		Where(cacheentry.LocationIdIn(locationIDs...)).
-		GroupBy(cacheentry.FieldLocationId).
-		Aggregate(ent.As(ent.Max(cacheentry.FieldUpdatedAt), "recencyAt")).
-		Scan(ctx, &recencies)
-	if err != nil {
-		return nil, fmt.Errorf("query capacity candidate save recency: %w", err)
-	}
-	recencyByLocation := make(map[string]int64, len(recencies))
-	for _, recency := range recencies {
-		recencyByLocation[recency.LocationID] = recency.RecencyAt
-	}
 
 	candidates := make([]capacityCandidate, 0, len(locations))
 	for _, location := range locations {
-		recency, ok := recencyByLocation[location.ID]
-		if !ok {
-			continue
-		}
-		if location.LastDownloadedAt != nil {
-			recency = *location.LastDownloadedAt
-		}
-		candidates = append(candidates, capacityCandidate{location: location, recency: recency})
+		candidates = append(candidates, capacityCandidate{location: location, recency: location.RecencyAt})
 	}
 	return candidates, nil
-}
-
-func byCapacityRecency() storagelocation.OrderOption {
-	return func(selector *sql.Selector) {
-		selector.OrderExpr(capacityRecencyExpression(selector))
-	}
-}
-
-func capacityAfter(cursor capacityCursor) predicate.StorageLocation {
-	return func(selector *sql.Selector) {
-		greaterRecency := sql.P(func(builder *sql.Builder) {
-			builder.Join(capacityRecencyExpression(selector)).WriteOp(sql.OpGT).Arg(cursor.recency)
-		})
-		equalRecencyAndGreaterID := sql.P(func(builder *sql.Builder) {
-			builder.Join(capacityRecencyExpression(selector)).WriteOp(sql.OpEQ).Arg(cursor.recency)
-			builder.WriteString(" AND ").Ident(selector.C(storagelocation.FieldID)).WriteOp(sql.OpGT).Arg(cursor.locationID)
-		})
-		selector.Where(sql.Or(greaterRecency, equalRecencyAndGreaterID))
-	}
-}
-
-func capacityRecencyExpression(selector *sql.Selector) sql.Querier {
-	return sql.ExprFunc(func(builder *sql.Builder) {
-		dialect := sql.Dialect(selector.Dialect())
-		entries := dialect.Table(cacheentry.Table)
-		newestEntry := dialect.Select(sql.Max(entries.C(cacheentry.FieldUpdatedAt))).
-			From(entries).
-			Where(sql.ColumnsEQ(entries.C(cacheentry.FieldLocationId), selector.C(storagelocation.FieldID)))
-		builder.WriteString("COALESCE(").
-			Ident(selector.C(storagelocation.FieldLastDownloadedAt)).
-			WriteString(", ").
-			Nested(func(nested *sql.Builder) { nested.Join(newestEntry) }).
-			WriteString(", 0)")
-	})
 }
 
 func sumLocationSizes(ctx context.Context, query *ent.StorageLocationQuery) (int64, error) {

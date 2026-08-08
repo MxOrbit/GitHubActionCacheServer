@@ -394,7 +394,7 @@ func TestCapacityEvictionClaimsOnlyUnchangedUnreadLocation(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
 	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 1)
-	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).SetRecencyAt(now.Add(-time.Hour).UnixMilli()).ExecX(ctx)
 	client.CacheEntry.UpdateOneID("entry").SetUpdatedAt(now.Add(-time.Hour).UnixMilli()).ExecX(ctx)
 	location = client.StorageLocation.GetX(ctx, location.ID)
 
@@ -418,8 +418,8 @@ func TestCapacityEvictionSkipsActiveReaderAndStaleAccessObservation(t *testing.T
 	now := time.Now().Truncate(time.Millisecond)
 	service := NewWithOptions(client, Options{Now: func() time.Time { return now }})
 	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 2)
-	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
 	entry := client.CacheEntry.GetX(ctx, "entry")
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).SetRecencyAt(entry.UpdatedAt).ExecX(ctx)
 
 	stale := client.StorageLocation.GetX(ctx, location.ID)
 	lease, err := service.AcquireReader(ctx, entry.ID, AcquireReaderOptions{})
@@ -450,15 +450,14 @@ func TestCapacityEvictionSkipsActiveReaderAndStaleAccessObservation(t *testing.T
 	require.NoError(t, service.ReleaseReader(ctx, lease.ID))
 }
 
-func TestCapacityEvictionRechecksFallbackSaveRecency(t *testing.T) {
+func TestCapacityEvictionRechecksMaterializedRecency(t *testing.T) {
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	service := New(client)
 	location := createLifecycleEntry(ctx, client, "entry", "capacity-location", 1)
-	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).ExecX(ctx)
 	entry := client.CacheEntry.GetX(ctx, "entry")
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(42).SetRecencyAt(entry.UpdatedAt).ExecX(ctx)
 	location = client.StorageLocation.GetX(ctx, location.ID)
-	newer := entry.UpdatedAt + 1
-	client.CacheEntry.UpdateOneID(entry.ID).SetUpdatedAt(newer).ExecX(ctx)
+	client.StorageLocation.UpdateOneID(location.ID).SetRecencyAt(entry.UpdatedAt + 1).ExecX(ctx)
 
 	result, err := service.RequestCapacityEviction(ctx, CapacityObservation{
 		LocationID:       location.ID,

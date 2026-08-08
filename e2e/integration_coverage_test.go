@@ -482,12 +482,17 @@ func runExternalCapacityEviction(t *testing.T, dbCfg config.DBConfig) {
 }
 
 func createExternalCapacityLocation(ctx context.Context, client *ent.Client, id string, updatedAt int64, lastDownloadedAt *int64) *ent.StorageLocation {
+	recency := updatedAt
+	if lastDownloadedAt != nil {
+		recency = *lastDownloadedAt
+	}
 	location := client.StorageLocation.Create().
 		SetID(id + "-location").
 		SetFolderName(id + "-folder").
 		SetPartCount(1).
 		SetSizeBytes(6).
 		SetNillableLastDownloadedAt(lastDownloadedAt).
+		SetRecencyAt(recency).
 		SaveX(ctx)
 	client.CacheEntry.Create().
 		SetID(id + "-entry").

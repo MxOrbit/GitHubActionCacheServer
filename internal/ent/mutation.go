@@ -1459,6 +1459,8 @@ type StorageLocationMutation struct {
 	addpartsDeletedAt               *int64
 	lastDownloadedAt                *int64
 	addlastDownloadedAt             *int64
+	recencyAt                       *int64
+	addrecencyAt                    *int64
 	clearedFields                   map[string]struct{}
 	cacheEntries                    map[string]struct{}
 	removedcacheEntries             map[string]struct{}
@@ -2332,6 +2334,62 @@ func (m *StorageLocationMutation) ResetLastDownloadedAt() {
 	delete(m.clearedFields, storagelocation.FieldLastDownloadedAt)
 }
 
+// SetRecencyAt sets the "recencyAt" field.
+func (m *StorageLocationMutation) SetRecencyAt(i int64) {
+	m.recencyAt = &i
+	m.addrecencyAt = nil
+}
+
+// RecencyAt returns the value of the "recencyAt" field in the mutation.
+func (m *StorageLocationMutation) RecencyAt() (r int64, exists bool) {
+	v := m.recencyAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRecencyAt returns the old "recencyAt" field's value of the StorageLocation entity.
+// If the StorageLocation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *StorageLocationMutation) OldRecencyAt(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRecencyAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRecencyAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRecencyAt: %w", err)
+	}
+	return oldValue.RecencyAt, nil
+}
+
+// AddRecencyAt adds i to the "recencyAt" field.
+func (m *StorageLocationMutation) AddRecencyAt(i int64) {
+	if m.addrecencyAt != nil {
+		*m.addrecencyAt += i
+	} else {
+		m.addrecencyAt = &i
+	}
+}
+
+// AddedRecencyAt returns the value that was added to the "recencyAt" field in this mutation.
+func (m *StorageLocationMutation) AddedRecencyAt() (r int64, exists bool) {
+	v := m.addrecencyAt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRecencyAt resets all changes to the "recencyAt" field.
+func (m *StorageLocationMutation) ResetRecencyAt() {
+	m.recencyAt = nil
+	m.addrecencyAt = nil
+}
+
 // AddCacheEntryIDs adds the "cacheEntries" edge to the CacheEntry entity by ids.
 func (m *StorageLocationMutation) AddCacheEntryIDs(ids ...string) {
 	if m.cacheEntries == nil {
@@ -2474,7 +2532,7 @@ func (m *StorageLocationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *StorageLocationMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 13)
 	if m.folderName != nil {
 		fields = append(fields, storagelocation.FieldFolderName)
 	}
@@ -2511,6 +2569,9 @@ func (m *StorageLocationMutation) Fields() []string {
 	if m.lastDownloadedAt != nil {
 		fields = append(fields, storagelocation.FieldLastDownloadedAt)
 	}
+	if m.recencyAt != nil {
+		fields = append(fields, storagelocation.FieldRecencyAt)
+	}
 	return fields
 }
 
@@ -2543,6 +2604,8 @@ func (m *StorageLocationMutation) Field(name string) (ent.Value, bool) {
 		return m.PartsDeletedAt()
 	case storagelocation.FieldLastDownloadedAt:
 		return m.LastDownloadedAt()
+	case storagelocation.FieldRecencyAt:
+		return m.RecencyAt()
 	}
 	return nil, false
 }
@@ -2576,6 +2639,8 @@ func (m *StorageLocationMutation) OldField(ctx context.Context, name string) (en
 		return m.OldPartsDeletedAt(ctx)
 	case storagelocation.FieldLastDownloadedAt:
 		return m.OldLastDownloadedAt(ctx)
+	case storagelocation.FieldRecencyAt:
+		return m.OldRecencyAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown StorageLocation field %s", name)
 }
@@ -2669,6 +2734,13 @@ func (m *StorageLocationMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLastDownloadedAt(v)
 		return nil
+	case storagelocation.FieldRecencyAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRecencyAt(v)
+		return nil
 	}
 	return fmt.Errorf("unknown StorageLocation field %s", name)
 }
@@ -2707,6 +2779,9 @@ func (m *StorageLocationMutation) AddedFields() []string {
 	if m.addlastDownloadedAt != nil {
 		fields = append(fields, storagelocation.FieldLastDownloadedAt)
 	}
+	if m.addrecencyAt != nil {
+		fields = append(fields, storagelocation.FieldRecencyAt)
+	}
 	return fields
 }
 
@@ -2735,6 +2810,8 @@ func (m *StorageLocationMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedPartsDeletedAt()
 	case storagelocation.FieldLastDownloadedAt:
 		return m.AddedLastDownloadedAt()
+	case storagelocation.FieldRecencyAt:
+		return m.AddedRecencyAt()
 	}
 	return nil, false
 }
@@ -2813,6 +2890,13 @@ func (m *StorageLocationMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddLastDownloadedAt(v)
+		return nil
+	case storagelocation.FieldRecencyAt:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRecencyAt(v)
 		return nil
 	}
 	return fmt.Errorf("unknown StorageLocation numeric field %s", name)
@@ -2933,6 +3017,9 @@ func (m *StorageLocationMutation) ResetField(name string) error {
 		return nil
 	case storagelocation.FieldLastDownloadedAt:
 		m.ResetLastDownloadedAt()
+		return nil
+	case storagelocation.FieldRecencyAt:
+		m.ResetRecencyAt()
 		return nil
 	}
 	return fmt.Errorf("unknown StorageLocation field %s", name)

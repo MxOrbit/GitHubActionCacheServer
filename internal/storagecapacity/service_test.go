@@ -20,7 +20,8 @@ func TestExplicitBudgetEvictsLeastRecentlyUsedToTarget(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	old := createCapacityLocation(ctx, client, "old", 6, nil, now.Add(-2*time.Hour).UnixMilli())
 	downloadedAt := now.Add(-time.Hour).UnixMilli()
-	recent := createCapacityLocation(ctx, client, "recent", 6, &downloadedAt, now.Add(-3*time.Hour).UnixMilli())
+	// The id order intentionally disagrees with the recency order.
+	recent := createCapacityLocation(ctx, client, "aaa-recent", 6, &downloadedAt, now.Add(-3*time.Hour).UnixMilli())
 	service := NewService(Options{
 		DB:        client,
 		Storage:   filesystem,
@@ -140,19 +141,10 @@ func TestExplicitBudgetSkipsPinnedCandidateAndContinues(t *testing.T) {
 	require.NoError(t, lifecycle.ReleaseReader(ctx, lease.ID))
 }
 
-func TestExplicitBudgetUsesNewestChildSaveAsFallbackRecency(t *testing.T) {
+func TestExplicitBudgetEvictsByMaterializedRecency(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
-	shared := createCapacityLocation(ctx, client, "shared", 6, nil, 1)
-	client.CacheEntry.Create().
-		SetID("shared-newer-entry").
-		SetKey("shared-newer-key").
-		SetVersion("version").
-		SetScope("scope").
-		SetRepoId("repo").
-		SetUpdatedAt(100).
-		SetLocation(shared).
-		SaveX(ctx)
-	middle := createCapacityLocation(ctx, client, "middle", 6, nil, 50)
+	newer := createCapacityLocation(ctx, client, "aaa-newer", 6, nil, 100)
+	older := createCapacityLocation(ctx, client, "zzz-older", 6, nil, 50)
 	service := NewService(Options{
 		DB:        client,
 		Storage:   filesystem,
@@ -164,8 +156,8 @@ func TestExplicitBudgetUsesNewestChildSaveAsFallbackRecency(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 1, result.ClaimedLocations)
-	require.Nil(t, client.StorageLocation.GetX(ctx, shared.ID).DeletionRequestedAt)
-	require.NotNil(t, client.StorageLocation.GetX(ctx, middle.ID).DeletionRequestedAt)
+	require.Nil(t, client.StorageLocation.GetX(ctx, newer.ID).DeletionRequestedAt)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, older.ID).DeletionRequestedAt)
 }
 
 func TestExplicitBudgetPaginatesMoreThanOneCandidatePage(t *testing.T) {
@@ -187,6 +179,56 @@ func TestExplicitBudgetPaginatesMoreThanOneCandidatePage(t *testing.T) {
 	require.Equal(t, int64(9), result.UsageAfterBytes)
 	require.False(t, result.Constrained)
 	require.Equal(t, 9, client.CacheEntry.Query().CountX(ctx))
+}
+
+func TestExplicitBudgetPaginatesRecencyTieBand(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	for index := range 60 {
+		createCapacityLocation(ctx, client, fmt.Sprintf("location-%02d", index), 1, nil, 7)
+	}
+	service := NewService(Options{
+		DB:        client,
+		Storage:   filesystem,
+		Config:    explicitCapacityConfig(10),
+		Lifecycle: storagelifecycle.New(client),
+	})
+
+	result, err := service.Enforce(ctx)
+
+	require.NoError(t, err)
+	require.Equal(t, 51, result.ClaimedLocations)
+	require.Equal(t, int64(9), result.UsageAfterBytes)
+	require.False(t, result.Constrained)
+	require.Equal(t, 9, client.CacheEntry.Query().CountX(ctx))
+}
+
+// The keyset residual (id > cursor) is load-bearing for termination: pinned
+// candidates stay claim-eligible in later queries, and only the residual keeps
+// the cursor moving past them.
+func TestExplicitBudgetAdvancesPastPinnedTieBandCandidates(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	lifecycle := storagelifecycle.New(client)
+	for index := range 60 {
+		createCapacityLocation(ctx, client, fmt.Sprintf("location-%02d", index), 1, nil, 7)
+	}
+	for index := 40; index < 50; index++ {
+		_, err := lifecycle.AcquireReader(ctx, fmt.Sprintf("location-%02d-entry", index), storagelifecycle.AcquireReaderOptions{})
+		require.NoError(t, err)
+	}
+	service := NewService(Options{
+		DB:        client,
+		Storage:   filesystem,
+		Config:    explicitCapacityConfig(10),
+		Lifecycle: lifecycle,
+	})
+
+	result, err := service.Enforce(ctx)
+
+	require.NoError(t, err)
+	require.Equal(t, 50, result.ClaimedLocations)
+	require.Equal(t, 10, result.PinnedLocations)
+	require.Equal(t, int64(10), result.UsageAfterBytes)
+	require.True(t, result.Constrained)
 }
 
 func TestRunCoalescesPreReadinessSignalIntoStartupPass(t *testing.T) {
@@ -219,12 +261,17 @@ func TestRunCoalescesPreReadinessSignalIntoStartupPass(t *testing.T) {
 }
 
 func createCapacityLocation(ctx context.Context, client *ent.Client, id string, size int64, lastDownloadedAt *int64, updatedAt int64) *ent.StorageLocation {
+	recency := updatedAt
+	if lastDownloadedAt != nil {
+		recency = *lastDownloadedAt
+	}
 	location := client.StorageLocation.Create().
 		SetID(id + "-location").
 		SetFolderName(id + "-folder").
 		SetPartCount(1).
 		SetSizeBytes(size).
 		SetNillableLastDownloadedAt(lastDownloadedAt).
+		SetRecencyAt(recency).
 		SaveX(ctx)
 	client.CacheEntry.Create().
 		SetID(id + "-entry").

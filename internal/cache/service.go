@@ -712,7 +712,7 @@ func (s *Service) uploadObject(ctx context.Context, currentUpload *ent.Upload, o
 }
 
 func (s *Service) touchStorageLocationIfStale(ctx context.Context, location *ent.StorageLocation) {
-	now := time.Now()
+	now := s.now()
 	staleBefore := now.Add(-lastDownloadedAtUpdateInterval).UnixMilli()
 	if location.LastDownloadedAt != nil && *location.LastDownloadedAt >= staleBefore {
 		return
@@ -727,6 +727,7 @@ func (s *Service) touchStorageLocationIfStale(ctx context.Context, location *ent
 			),
 		).
 		SetLastDownloadedAt(now.UnixMilli()).
+		SetRecencyAt(now.UnixMilli()).
 		Save(ctx)
 	if err != nil {
 		event := s.logger.Error()
@@ -818,12 +819,14 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 		}
 	}()
 
+	now := s.now().UnixMilli()
 	locationID := uuid.NewString()
 	location, err := tx.StorageLocation.Create().
 		SetID(locationID).
 		SetFolderName(currentUpload.FolderName).
 		SetPartCount(partCount).
 		SetSizeBytes(sizeBytes).
+		SetRecencyAt(now).
 		Save(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("create storage location: %w", err)
@@ -846,7 +849,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 	if existingCacheEntry != nil {
 		cacheEntryID = existingCacheEntry.ID
 		if _, err := tx.CacheEntry.UpdateOneID(existingCacheEntry.ID).
-			SetUpdatedAt(time.Now().UnixMilli()).
+			SetUpdatedAt(now).
 			SetLocation(location).
 			Save(ctx); err != nil {
 			return nil, "", fmt.Errorf("update cache entry: %w", err)
@@ -863,7 +866,7 @@ func (s *Service) completeUploadRecord(ctx context.Context, currentUpload *ent.U
 			SetVersion(currentUpload.Version).
 			SetScope(scope).
 			SetRepoId(repoID).
-			SetUpdatedAt(time.Now().UnixMilli()).
+			SetUpdatedAt(now).
 			SetLocation(location).
 			Save(ctx)
 		if err != nil {

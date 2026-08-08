@@ -36,6 +36,8 @@ const (
 	FieldPartsDeletedAt = "partsDeletedAt"
 	// FieldLastDownloadedAt holds the string denoting the lastdownloadedat field in the database.
 	FieldLastDownloadedAt = "lastDownloadedAt"
+	// FieldRecencyAt holds the string denoting the recencyat field in the database.
+	FieldRecencyAt = "recencyAt"
 	// EdgeCacheEntries holds the string denoting the cacheentries edge name in mutations.
 	EdgeCacheEntries = "cacheEntries"
 	// EdgeReaderLeases holds the string denoting the readerleases edge name in mutations.
@@ -73,6 +75,7 @@ var Columns = []string{
 	FieldMaterializationUnsupportedAt,
 	FieldPartsDeletedAt,
 	FieldLastDownloadedAt,
+	FieldRecencyAt,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -96,6 +99,10 @@ var (
 	DefaultLeaseVersion int64
 	// LeaseVersionValidator is a validator for the "leaseVersion" field. It is called by the builders before save.
 	LeaseVersionValidator func(int64) error
+	// DefaultRecencyAt holds the default value on creation for the "recencyAt" field.
+	DefaultRecencyAt int64
+	// RecencyAtValidator is a validator for the "recencyAt" field. It is called by the builders before save.
+	RecencyAtValidator func(int64) error
 )
 
 // OrderOption defines the ordering options for the StorageLocation queries.
@@ -164,6 +171,11 @@ func ByPartsDeletedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByLastDownloadedAt orders the results by the lastDownloadedAt field.
 func ByLastDownloadedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastDownloadedAt, opts...).ToFunc()
+}
+
+// ByRecencyAt orders the results by the recencyAt field.
+func ByRecencyAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRecencyAt, opts...).ToFunc()
 }
 
 // ByCacheEntriesCount orders the results by cacheEntries count.

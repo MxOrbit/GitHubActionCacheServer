@@ -104,12 +104,20 @@ var (
 		{Name: "materializationUnsupportedAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "partsDeletedAt", Type: field.TypeInt64, Nullable: true},
 		{Name: "lastDownloadedAt", Type: field.TypeInt64, Nullable: true},
+		{Name: "recencyAt", Type: field.TypeInt64, Default: 0},
 	}
 	// StorageLocationsTable holds the schema information for the "storage_locations" table.
 	StorageLocationsTable = &schema.Table{
 		Name:       "storage_locations",
 		Columns:    StorageLocationsColumns,
 		PrimaryKey: []*schema.Column{StorageLocationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_storage_locations_recency",
+				Unique:  false,
+				Columns: []*schema.Column{StorageLocationsColumns[13], StorageLocationsColumns[0]},
+			},
+		},
 	}
 	// StorageReaderLeasesColumns holds the columns for the "storage_reader_leases" table.
 	StorageReaderLeasesColumns = []*schema.Column{

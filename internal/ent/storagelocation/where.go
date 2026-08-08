@@ -123,6 +123,11 @@ func LastDownloadedAt(v int64) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldLastDownloadedAt, v))
 }
 
+// RecencyAt applies equality check predicate on the "recencyAt" field. It's identical to RecencyAtEQ.
+func RecencyAt(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldRecencyAt, v))
+}
+
 // FolderNameEQ applies the EQ predicate on the "folderName" field.
 func FolderNameEQ(v string) predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldEQ(FieldFolderName, v))
@@ -741,6 +746,46 @@ func LastDownloadedAtIsNil() predicate.StorageLocation {
 // LastDownloadedAtNotNil applies the NotNil predicate on the "lastDownloadedAt" field.
 func LastDownloadedAtNotNil() predicate.StorageLocation {
 	return predicate.StorageLocation(sql.FieldNotNull(FieldLastDownloadedAt))
+}
+
+// RecencyAtEQ applies the EQ predicate on the "recencyAt" field.
+func RecencyAtEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldEQ(FieldRecencyAt, v))
+}
+
+// RecencyAtNEQ applies the NEQ predicate on the "recencyAt" field.
+func RecencyAtNEQ(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNEQ(FieldRecencyAt, v))
+}
+
+// RecencyAtIn applies the In predicate on the "recencyAt" field.
+func RecencyAtIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldIn(FieldRecencyAt, vs...))
+}
+
+// RecencyAtNotIn applies the NotIn predicate on the "recencyAt" field.
+func RecencyAtNotIn(vs ...int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldNotIn(FieldRecencyAt, vs...))
+}
+
+// RecencyAtGT applies the GT predicate on the "recencyAt" field.
+func RecencyAtGT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGT(FieldRecencyAt, v))
+}
+
+// RecencyAtGTE applies the GTE predicate on the "recencyAt" field.
+func RecencyAtGTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldGTE(FieldRecencyAt, v))
+}
+
+// RecencyAtLT applies the LT predicate on the "recencyAt" field.
+func RecencyAtLT(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLT(FieldRecencyAt, v))
+}
+
+// RecencyAtLTE applies the LTE predicate on the "recencyAt" field.
+func RecencyAtLTE(v int64) predicate.StorageLocation {
+	return predicate.StorageLocation(sql.FieldLTE(FieldRecencyAt, v))
 }
 
 // HasCacheEntries applies the HasEdge predicate on the "cacheEntries" edge.

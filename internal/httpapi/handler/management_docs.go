@@ -125,12 +125,13 @@ func managementOpenAPISchemas() map[string]any {
 		},
 		"StorageLocation": map[string]any{
 			"type":     "object",
-			"required": []string{"id", "folderName", "partCount", "leaseVersion"},
+			"required": []string{"id", "folderName", "partCount", "leaseVersion", "recencyAt"},
 			"properties": map[string]any{
 				"id":                           map[string]string{"type": "string"},
 				"folderName":                   map[string]string{"type": "string"},
 				"partCount":                    map[string]string{"type": "integer"},
 				"leaseVersion":                 map[string]string{"type": "integer", "format": "int64"},
+				"recencyAt":                    map[string]string{"type": "integer", "format": "int64"},
 				"deletionRequestedAt":          nullableInt64Schema(),
 				"mergeStartedAt":               nullableInt64Schema(),
 				"mergeLeaseToken":              nullableStringSchema(),

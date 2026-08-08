@@ -511,7 +511,10 @@ func (s *Service) RequestCapacityEviction(ctx context.Context, observed Capacity
 		storagelocation.LeaseVersion(observed.LeaseVersion),
 		storagelocation.DeletionRequestedAtIsNil(),
 		storagelocation.SizeBytesNotNil(),
+		storagelocation.RecencyAt(observed.RecencyAt),
 	}
+	// Redundant while recencyAt is written alongside lastDownloadedAt; kept as a
+	// guard against a future lastDownloadedAt-only writer.
 	predicates = appendOptionalInt64Predicate(
 		predicates,
 		observed.LastDownloadedAt,
@@ -536,31 +539,6 @@ func (s *Service) RequestCapacityEviction(ctx context.Context, observed Capacity
 	location, err := tx.StorageLocation.Get(ctx, observed.LocationID)
 	if err != nil {
 		return CapacityEvictionResult{}, fmt.Errorf("query claimed capacity eviction location: %w", err)
-	}
-	newestEntry, err := tx.CacheEntry.Query().
-		Where(cacheentry.LocationId(location.ID)).
-		Order(ent.Desc(cacheentry.FieldUpdatedAt)).
-		First(ctx)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			if err := tx.Commit(); err != nil {
-				return CapacityEvictionResult{}, fmt.Errorf("commit orphan capacity candidate check: %w", err)
-			}
-			committed = true
-			return CapacityEvictionResult{}, nil
-		}
-		return CapacityEvictionResult{}, fmt.Errorf("query capacity candidate recency: %w", err)
-	}
-	currentRecency := newestEntry.UpdatedAt
-	if location.LastDownloadedAt != nil {
-		currentRecency = *location.LastDownloadedAt
-	}
-	if currentRecency != observed.RecencyAt {
-		if err := tx.Commit(); err != nil {
-			return CapacityEvictionResult{}, fmt.Errorf("commit changed capacity candidate recency: %w", err)
-		}
-		committed = true
-		return CapacityEvictionResult{}, nil
 	}
 
 	now := s.now().UnixMilli()

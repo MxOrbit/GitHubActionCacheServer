@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -65,9 +66,14 @@ func OpenAndMigrate(ctx context.Context, cfg config.DBConfig) (*ent.Client, erro
 	case DriverPostgres:
 		err = migratePostgresWithLock(ctx, opened.sqlDB)
 	case DriverMySQL:
-		err = migrateMySQLWithLock(ctx, cfg, opened.client)
-	default:
+		err = migrateMySQLWithLock(ctx, cfg, opened)
+	case DriverSQLite:
 		err = migrateSchema(ctx, opened.client)
+		if err == nil {
+			err = backfillStorageLocationRecency(ctx, opened.sqlDB, DriverSQLite)
+		}
+	default:
+		err = fmt.Errorf("unsupported DB_DRIVER %q", cfg.Driver)
 	}
 	if err != nil {
 		_ = opened.client.Close()
@@ -79,6 +85,25 @@ func OpenAndMigrate(ctx context.Context, cfg config.DBConfig) (*ent.Client, erro
 
 func migrateSchema(ctx context.Context, client *ent.Client) error {
 	return client.Schema.Create(ctx, migrate.WithForeignKeys(true))
+}
+
+type sqlExecContext interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// backfillStorageLocationRecency materializes eviction recency for rows written
+// before the recencyAt column existed, and repairs rows an older binary touched
+// without maintaining recencyAt (recencyAt < lastDownloadedAt is unreachable for
+// maintained rows). Idempotent. Must run under the same lock as the DDL.
+func backfillStorageLocationRecency(ctx context.Context, exec sqlExecContext, driver string) error {
+	query := `UPDATE storage_locations SET "recencyAt" = COALESCE("lastDownloadedAt", (SELECT MAX("updatedAt") FROM cache_entries WHERE cache_entries."locationId" = storage_locations."id"), 0) WHERE "deletionRequestedAt" IS NULL AND ("recencyAt" = 0 OR ("lastDownloadedAt" IS NOT NULL AND "recencyAt" < "lastDownloadedAt"))`
+	if driver == DriverMySQL {
+		query = strings.ReplaceAll(query, `"`, "`")
+	}
+	if _, err := exec.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("backfill storage location recency: %w", err)
+	}
+	return nil
 }
 
 func openSQLite(ctx context.Context, path string) (*openedDatabase, error) {
@@ -203,6 +228,9 @@ func migratePostgresWithLock(ctx context.Context, sqlDB *sql.DB) (retErr error) 
 	if err := migrate.NewSchema(driver).Create(ctx, migrate.WithForeignKeys(true)); err != nil {
 		return err
 	}
+	if err := backfillStorageLocationRecency(ctx, tx, DriverPostgres); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit postgres schema migration: %w", err)
 	}
@@ -216,7 +244,7 @@ type mysqlMigrationLock struct {
 	lockName string
 }
 
-func migrateMySQLWithLock(ctx context.Context, cfg config.DBConfig, client *ent.Client) (retErr error) {
+func migrateMySQLWithLock(ctx context.Context, cfg config.DBConfig, opened *openedDatabase) (retErr error) {
 	lock, err := acquireMySQLMigrationLock(ctx, cfg)
 	if err != nil {
 		return err
@@ -224,7 +252,10 @@ func migrateMySQLWithLock(ctx context.Context, cfg config.DBConfig, client *ent.
 	defer func() {
 		retErr = errors.Join(retErr, lock.release())
 	}()
-	return migrateSchema(ctx, client)
+	if err := migrateSchema(ctx, opened.client); err != nil {
+		return err
+	}
+	return backfillStorageLocationRecency(ctx, opened.sqlDB, DriverMySQL)
 }
 
 func acquireMySQLMigrationLock(ctx context.Context, cfg config.DBConfig) (*mysqlMigrationLock, error) {

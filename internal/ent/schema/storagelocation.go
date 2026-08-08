@@ -6,6 +6,7 @@ import (
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 )
 
 type StorageLocation struct {
@@ -45,6 +46,10 @@ func (StorageLocation) Fields() []ent.Field {
 		field.Int64("materializationUnsupportedAt").Optional().Nillable().StorageKey("materializationUnsupportedAt"),
 		field.Int64("partsDeletedAt").Optional().Nillable().StorageKey("partsDeletedAt"),
 		field.Int64("lastDownloadedAt").Optional().Nillable().StorageKey("lastDownloadedAt"),
+		// Materialized eviction recency; set at finalize and refreshed by download
+		// touch alongside lastDownloadedAt. Relies on one cache entry per location
+		// and entry.updatedAt being immutable after attach.
+		field.Int64("recencyAt").Default(0).NonNegative().StorageKey("recencyAt"),
 	}
 }
 
@@ -54,5 +59,11 @@ func (StorageLocation) Edges() []ent.Edge {
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("readerLeases", StorageReaderLease.Type).
 			Annotations(entsql.OnDelete(entsql.Restrict)),
+	}
+}
+
+func (StorageLocation) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("recencyAt", "id").StorageKey("idx_storage_locations_recency"),
 	}
 }

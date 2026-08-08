@@ -132,6 +132,7 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "deletionRequestedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "mergeLeaseToken"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "sizeBytes"))
+	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "storage_locations", "recencyAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "lastPartUploadedAt"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "committedPartCount"))
 	require.True(t, sqliteColumnExists(ctx, t, sqlDB, "uploads", "tupleHash"))
@@ -157,10 +158,106 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_repo_scope_version_key"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_location_updated_at"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_uploads_tuple_hash"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_storage_locations_recency"))
 }
 
 func TestUploadIDDoesNotRequireDatabaseIdentity(t *testing.T) {
 	require.False(t, migrate.UploadsColumns[0].Increment)
+}
+
+func TestOpenAndMigrateBackfillsStorageLocationRecency(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "cache-server.db")
+
+	client, err := OpenAndMigrate(ctx, config.DBConfig{
+		Driver:     DriverSQLite,
+		SQLitePath: dbPath,
+	})
+	require.NoError(t, err)
+
+	fallback := client.StorageLocation.Create().
+		SetID("fallback").
+		SetFolderName("fallback-folder").
+		SetPartCount(1).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("fallback-entry").
+		SetKey("fallback-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(100).
+		SetLocation(fallback).
+		SaveX(ctx)
+	downloaded := client.StorageLocation.Create().
+		SetID("downloaded").
+		SetFolderName("downloaded-folder").
+		SetPartCount(1).
+		SetLastDownloadedAt(200).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("downloaded-entry").
+		SetKey("downloaded-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(100).
+		SetLocation(downloaded).
+		SaveX(ctx)
+	pending := client.StorageLocation.Create().
+		SetID("pending").
+		SetFolderName("pending-folder").
+		SetPartCount(1).
+		SetDeletionRequestedAt(1).
+		SaveX(ctx)
+	stale := client.StorageLocation.Create().
+		SetID("stale").
+		SetFolderName("stale-folder").
+		SetPartCount(1).
+		SetLastDownloadedAt(200).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("stale-entry").
+		SetKey("stale-key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(100).
+		SetLocation(stale).
+		SaveX(ctx)
+	maintained := client.StorageLocation.Create().
+		SetID("maintained").
+		SetFolderName("maintained-folder").
+		SetPartCount(1).
+		SetLastDownloadedAt(100).
+		SetRecencyAt(200).
+		SaveX(ctx)
+	require.NoError(t, client.Close())
+
+	// Simulate rows written before the recencyAt column existed, plus a row an
+	// older binary touched (recencyAt < lastDownloadedAt) after a rollback.
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = sqlDB.ExecContext(ctx, `UPDATE storage_locations SET recencyAt = 0 WHERE id != 'maintained'`)
+	require.NoError(t, err)
+	_, err = sqlDB.ExecContext(ctx, `UPDATE storage_locations SET recencyAt = 5 WHERE id = 'stale'`)
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	client, err = OpenAndMigrate(ctx, config.DBConfig{
+		Driver:     DriverSQLite,
+		SQLitePath: dbPath,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, client.Close())
+	})
+
+	require.Equal(t, int64(100), client.StorageLocation.GetX(ctx, fallback.ID).RecencyAt)
+	require.Equal(t, int64(200), client.StorageLocation.GetX(ctx, downloaded.ID).RecencyAt)
+	require.Zero(t, client.StorageLocation.GetX(ctx, pending.ID).RecencyAt)
+	require.Equal(t, int64(200), client.StorageLocation.GetX(ctx, stale.ID).RecencyAt)
+	require.Equal(t, int64(200), client.StorageLocation.GetX(ctx, maintained.ID).RecencyAt)
 }
 
 func TestStorageDeletionIDUsesDatabaseIdentity(t *testing.T) {
@@ -209,7 +306,7 @@ func TestGeneratedSchemaMatchesOriginalColumns(t *testing.T) {
 		"id", "folderName", "createdAt", "attemptCount", "lastAttemptedAt", "lastError",
 	}, columnNames(migrate.StorageDeletionsColumns))
 	require.Equal(t, []string{
-		"id", "folderName", "partCount", "sizeBytes", "leaseVersion", "deletionRequestedAt", "mergeStartedAt", "mergeLeaseToken", "mergeLeaseExpiresAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt",
+		"id", "folderName", "partCount", "sizeBytes", "leaseVersion", "deletionRequestedAt", "mergeStartedAt", "mergeLeaseToken", "mergeLeaseExpiresAt", "mergedAt", "materializationUnsupportedAt", "partsDeletedAt", "lastDownloadedAt", "recencyAt",
 	}, columnNames(migrate.StorageLocationsColumns))
 	require.Equal(t, []string{
 		"id", "scope", "expiresAt", "storageLocationId",
@@ -251,6 +348,9 @@ func TestGeneratedSchemaMatchesOriginalIndexNames(t *testing.T) {
 		"idx_uploads_repoId",
 		"idx_uploads_tuple_hash",
 	}, indexNames(migrate.UploadsTable.Indexes))
+	require.Equal(t, []string{
+		"idx_storage_locations_recency",
+	}, indexNames(migrate.StorageLocationsTable.Indexes))
 }
 
 func TestMySQLUploadUniqueIndexUsesFixedLengthTupleHash(t *testing.T) {

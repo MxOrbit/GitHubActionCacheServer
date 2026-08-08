@@ -321,6 +321,27 @@ func (_u *StorageLocationUpdate) ClearLastDownloadedAt() *StorageLocationUpdate 
 	return _u
 }
 
+// SetRecencyAt sets the "recencyAt" field.
+func (_u *StorageLocationUpdate) SetRecencyAt(v int64) *StorageLocationUpdate {
+	_u.mutation.ResetRecencyAt()
+	_u.mutation.SetRecencyAt(v)
+	return _u
+}
+
+// SetNillableRecencyAt sets the "recencyAt" field if the given value is not nil.
+func (_u *StorageLocationUpdate) SetNillableRecencyAt(v *int64) *StorageLocationUpdate {
+	if v != nil {
+		_u.SetRecencyAt(*v)
+	}
+	return _u
+}
+
+// AddRecencyAt adds value to the "recencyAt" field.
+func (_u *StorageLocationUpdate) AddRecencyAt(v int64) *StorageLocationUpdate {
+	_u.mutation.AddRecencyAt(v)
+	return _u
+}
+
 // AddCacheEntryIDs adds the "cacheEntries" edge to the CacheEntry entity by IDs.
 func (_u *StorageLocationUpdate) AddCacheEntryIDs(ids ...string) *StorageLocationUpdate {
 	_u.mutation.AddCacheEntryIDs(ids...)
@@ -447,6 +468,11 @@ func (_u *StorageLocationUpdate) check() error {
 			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.RecencyAt(); ok {
+		if err := storagelocation.RecencyAtValidator(v); err != nil {
+			return &ValidationError{Name: "recencyAt", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.recencyAt": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -554,6 +580,12 @@ func (_u *StorageLocationUpdate) sqlSave(ctx context.Context) (_node int, err er
 	}
 	if _u.mutation.LastDownloadedAtCleared() {
 		_spec.ClearField(storagelocation.FieldLastDownloadedAt, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.RecencyAt(); ok {
+		_spec.SetField(storagelocation.FieldRecencyAt, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedRecencyAt(); ok {
+		_spec.AddField(storagelocation.FieldRecencyAt, field.TypeInt64, value)
 	}
 	if _u.mutation.CacheEntriesCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -957,6 +989,27 @@ func (_u *StorageLocationUpdateOne) ClearLastDownloadedAt() *StorageLocationUpda
 	return _u
 }
 
+// SetRecencyAt sets the "recencyAt" field.
+func (_u *StorageLocationUpdateOne) SetRecencyAt(v int64) *StorageLocationUpdateOne {
+	_u.mutation.ResetRecencyAt()
+	_u.mutation.SetRecencyAt(v)
+	return _u
+}
+
+// SetNillableRecencyAt sets the "recencyAt" field if the given value is not nil.
+func (_u *StorageLocationUpdateOne) SetNillableRecencyAt(v *int64) *StorageLocationUpdateOne {
+	if v != nil {
+		_u.SetRecencyAt(*v)
+	}
+	return _u
+}
+
+// AddRecencyAt adds value to the "recencyAt" field.
+func (_u *StorageLocationUpdateOne) AddRecencyAt(v int64) *StorageLocationUpdateOne {
+	_u.mutation.AddRecencyAt(v)
+	return _u
+}
+
 // AddCacheEntryIDs adds the "cacheEntries" edge to the CacheEntry entity by IDs.
 func (_u *StorageLocationUpdateOne) AddCacheEntryIDs(ids ...string) *StorageLocationUpdateOne {
 	_u.mutation.AddCacheEntryIDs(ids...)
@@ -1096,6 +1149,11 @@ func (_u *StorageLocationUpdateOne) check() error {
 			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.RecencyAt(); ok {
+		if err := storagelocation.RecencyAtValidator(v); err != nil {
+			return &ValidationError{Name: "recencyAt", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.recencyAt": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -1220,6 +1278,12 @@ func (_u *StorageLocationUpdateOne) sqlSave(ctx context.Context) (_node *Storage
 	}
 	if _u.mutation.LastDownloadedAtCleared() {
 		_spec.ClearField(storagelocation.FieldLastDownloadedAt, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.RecencyAt(); ok {
+		_spec.SetField(storagelocation.FieldRecencyAt, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedRecencyAt(); ok {
+		_spec.AddField(storagelocation.FieldRecencyAt, field.TypeInt64, value)
 	}
 	if _u.mutation.CacheEntriesCleared() {
 		edge := &sqlgraph.EdgeSpec{

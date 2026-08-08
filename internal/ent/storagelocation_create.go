@@ -173,6 +173,20 @@ func (_c *StorageLocationCreate) SetNillableLastDownloadedAt(v *int64) *StorageL
 	return _c
 }
 
+// SetRecencyAt sets the "recencyAt" field.
+func (_c *StorageLocationCreate) SetRecencyAt(v int64) *StorageLocationCreate {
+	_c.mutation.SetRecencyAt(v)
+	return _c
+}
+
+// SetNillableRecencyAt sets the "recencyAt" field if the given value is not nil.
+func (_c *StorageLocationCreate) SetNillableRecencyAt(v *int64) *StorageLocationCreate {
+	if v != nil {
+		_c.SetRecencyAt(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *StorageLocationCreate) SetID(v string) *StorageLocationCreate {
 	_c.mutation.SetID(v)
@@ -248,6 +262,10 @@ func (_c *StorageLocationCreate) defaults() {
 		v := storagelocation.DefaultLeaseVersion
 		_c.mutation.SetLeaseVersion(v)
 	}
+	if _, ok := _c.mutation.RecencyAt(); !ok {
+		v := storagelocation.DefaultRecencyAt
+		_c.mutation.SetRecencyAt(v)
+	}
 }
 
 // check runs all checks and user-defined validators on the builder.
@@ -279,6 +297,14 @@ func (_c *StorageLocationCreate) check() error {
 	if v, ok := _c.mutation.LeaseVersion(); ok {
 		if err := storagelocation.LeaseVersionValidator(v); err != nil {
 			return &ValidationError{Name: "leaseVersion", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.leaseVersion": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.RecencyAt(); !ok {
+		return &ValidationError{Name: "recencyAt", err: errors.New(`ent: missing required field "StorageLocation.recencyAt"`)}
+	}
+	if v, ok := _c.mutation.RecencyAt(); ok {
+		if err := storagelocation.RecencyAtValidator(v); err != nil {
+			return &ValidationError{Name: "recencyAt", err: fmt.Errorf(`ent: validator failed for field "StorageLocation.recencyAt": %w`, err)}
 		}
 	}
 	return nil
@@ -363,6 +389,10 @@ func (_c *StorageLocationCreate) createSpec() (*StorageLocation, *sqlgraph.Creat
 	if value, ok := _c.mutation.LastDownloadedAt(); ok {
 		_spec.SetField(storagelocation.FieldLastDownloadedAt, field.TypeInt64, value)
 		_node.LastDownloadedAt = &value
+	}
+	if value, ok := _c.mutation.RecencyAt(); ok {
+		_spec.SetField(storagelocation.FieldRecencyAt, field.TypeInt64, value)
+		_node.RecencyAt = value
 	}
 	if nodes := _c.mutation.CacheEntriesIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
