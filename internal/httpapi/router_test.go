@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,21 +50,19 @@ func TestHealthRoutes(t *testing.T) {
 	}
 }
 
-func TestUploadRouteIsRegistered(t *testing.T) {
-	router := newTestRouter(t)
-	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
-	rec := httptest.NewRecorder()
-
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusNotFound, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, rec.Body.String())
-}
-
 func TestBlockListRejectsMissingUploadBeforeReadingBody(t *testing.T) {
-	router := newTestRouter(t)
+	_, client, storageAdapter := testutil.NewSQLiteFilesystem(t)
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
+		DB:       client,
+		Storage:  storageAdapter,
+		Verifier: newSkipVerifier(t),
+	})
 	body := &readCountingBody{}
-	req := httptest.NewRequest(http.MethodPut, "/upload/123?comp=blocklist", body)
+	// The 404 below only proves the path once the signature is accepted;
+	// that acceptance is pinned by TestBlockListRejectsOversizedBody (413).
+	req := httptest.NewRequest(http.MethodPut, signedBlockListRequestURI(t, "test-secret", 123), body)
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -80,14 +79,16 @@ func TestBlockListRejectsOversizedBody(t *testing.T) {
 		Scopes: []auth.Scope{{Scope: "refs/heads/main", Permission: 3}},
 	})
 	require.NoError(t, err)
-	router := NewRouter(zerolog.Nop(), newTestConfig(t), Dependencies{
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{
 		DB:       client,
 		Storage:  storageAdapter,
 		Cache:    cacheService,
 		Verifier: newSkipVerifier(t),
 	})
 	body := "<BlockList>" + strings.Repeat(" ", (8<<20)+1) + "</BlockList>"
-	req := httptest.NewRequest(http.MethodPut, "/upload/"+strconv.FormatInt(upload.UploadID, 10)+"?comp=blocklist", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, signedBlockListRequestURI(t, "test-secret", upload.UploadID), strings.NewReader(body))
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
 
@@ -464,6 +465,18 @@ func newTestRouter(t *testing.T) http.Handler {
 		Storage:  storageAdapter,
 		Verifier: newSkipVerifier(t),
 	})
+}
+
+func signedBlockListRequestURI(t *testing.T, secret string, uploadID int64) string {
+	t.Helper()
+	signedURL, err := downloadurl.New(secret, time.Hour).SignUpload("/upload/"+strconv.FormatInt(uploadID, 10), uploadID)
+	require.NoError(t, err)
+	parsedURL, err := url.Parse(signedURL)
+	require.NoError(t, err)
+	query := parsedURL.Query()
+	query.Set("comp", "blocklist")
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.RequestURI()
 }
 
 func newSkipVerifier(t *testing.T) *auth.Verifier {

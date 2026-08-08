@@ -17,7 +17,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const fallbackDownloadURLTTL = 10 * time.Minute
+const (
+	fallbackDownloadURLTTL = 10 * time.Minute
+	uploadURLTTL           = 24 * time.Hour
+)
 
 type Handler struct {
 	cfg            config.Config
@@ -26,6 +29,7 @@ type Handler struct {
 	storage        storage.Adapter
 	lifecycle      *storagelifecycle.Service
 	downloadSigner *downloadurl.Signer
+	uploadSigner   *downloadurl.Signer
 	metrics        metrics.Recorder
 	logger         zerolog.Logger
 }
@@ -60,6 +64,7 @@ func New(options Options) *Handler {
 		storage:        options.Storage,
 		lifecycle:      lifecycle,
 		downloadSigner: downloadurl.New(options.Config.Cache.DownloadURLSigningSecret, fallbackDownloadURLTTL),
+		uploadSigner:   downloadurl.New(options.Config.Cache.DownloadURLSigningSecret, uploadURLTTL),
 		metrics:        metricsRecorder,
 		logger:         logger,
 	}

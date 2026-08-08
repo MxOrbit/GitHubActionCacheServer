@@ -83,6 +83,7 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 	cacheService.POST("/FinalizeCacheEntryUpload", handlers.FinalizeCacheEntryUpload)
 
 	router.PUT("/devstoreaccount1/upload/:uploadId", handlers.UploadPart)
+	// legacy alias kept for URL-shape compatibility; issued URLs always use the devstore path
 	router.PUT("/upload/:uploadId", handlers.UploadPart)
 	router.GET("/download/:cacheEntryId", handlers.DownloadCacheEntry)
 

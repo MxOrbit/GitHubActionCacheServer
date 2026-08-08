@@ -1,9 +1,11 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,7 +94,7 @@ func TestCacheServiceAcceptsDecodedActionsTokenWhenValidationIsSkipped(t *testin
 	require.JSONEq(t, `{"ok":false,"error":"invalid body"}`, rec.Body.String())
 }
 
-func TestUploadRouteDoesNotUseJWTAuth(t *testing.T) {
+func TestUnsignedUploadURLIsRejected(t *testing.T) {
 	router := newTestRouter(t)
 	req := httptest.NewRequest(http.MethodPut, "/upload/123", nil)
 	rec := httptest.NewRecorder()
@@ -101,6 +103,50 @@ func TestUploadRouteDoesNotUseJWTAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, rec.Body.String())
+}
+
+func TestSignedUploadURLWorksWithoutJWTAuth(t *testing.T) {
+	router := newTestRouter(t)
+	uploadURL := createCacheEntry(t, router, actionsToken(t), cacheBody("signed-upload-no-jwt"))
+
+	req := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI(), bytes.NewBufferString("payload"))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestSignedUploadURLWorksOnAliasRoute(t *testing.T) {
+	router := newTestRouter(t)
+	uploadURL := createCacheEntry(t, router, actionsToken(t), cacheBody("signed-upload-alias"))
+	uploadURL.Path = strings.Replace(uploadURL.Path, "/devstoreaccount1/upload/", "/upload/", 1)
+
+	req := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI(), bytes.NewBufferString("payload"))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestUploadRouteRejectsBadSignature(t *testing.T) {
+	router := newTestRouter(t)
+	uploadURL := createCacheEntry(t, router, actionsToken(t), cacheBody("signed-upload-bad-sig"))
+
+	unsignedReq := httptest.NewRequest(http.MethodPut, uploadURL.Path, bytes.NewBufferString("payload"))
+	unsignedRec := httptest.NewRecorder()
+	router.ServeHTTP(unsignedRec, unsignedReq)
+	require.Equal(t, http.StatusNotFound, unsignedRec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, unsignedRec.Body.String())
+
+	tampered := *uploadURL
+	tamperedQuery := tampered.Query()
+	tamperedQuery.Set("sig", "deadbeef")
+	tampered.RawQuery = tamperedQuery.Encode()
+	tamperedReq := httptest.NewRequest(http.MethodPut, tampered.RequestURI(), bytes.NewBufferString("payload"))
+	tamperedRec := httptest.NewRecorder()
+	router.ServeHTTP(tamperedRec, tamperedReq)
+	require.Equal(t, http.StatusNotFound, tamperedRec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"upload not found"}`, tamperedRec.Body.String())
 }
 
 func actionsToken(t *testing.T) string {

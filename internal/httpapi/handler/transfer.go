@@ -22,12 +22,17 @@ import (
 const maxBlockListRequestBodyBytes = 8 << 20
 
 func (h *Handler) UploadPart(c *gin.Context) {
+	uploadID, err := strconv.ParseInt(c.Param("uploadId"), 10, 64)
+	if err != nil {
+		response.JSON(c, response.Error(http.StatusBadRequest, "invalid upload id"))
+		return
+	}
+	if !h.uploadSigner.VerifyUpload(uploadID, c.Query("expires"), c.Query("sig")) {
+		response.JSON(c, response.Error(http.StatusNotFound, "upload not found"))
+		return
+	}
+
 	if c.Query("comp") == "blocklist" {
-		uploadID, err := strconv.ParseInt(c.Param("uploadId"), 10, 64)
-		if err != nil {
-			response.JSON(c, response.Error(http.StatusBadRequest, "invalid upload id"))
-			return
-		}
 		commit, err := h.cache.PrepareBlockListCommit(c.Request.Context(), uploadID)
 		if err != nil {
 			h.writeCacheError(c, err)
@@ -58,12 +63,6 @@ func (h *Handler) UploadPart(c *gin.Context) {
 			return
 		}
 		response.Empty(c, response.AzureCreated(uuid.NewString()))
-		return
-	}
-
-	uploadID, err := strconv.ParseInt(c.Param("uploadId"), 10, 64)
-	if err != nil {
-		response.JSON(c, response.Error(http.StatusBadRequest, "invalid upload id"))
 		return
 	}
 
@@ -98,7 +97,12 @@ func (h *Handler) UploadPart(c *gin.Context) {
 
 func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 	cacheEntryID := c.Param("cacheEntryId")
-	if !h.downloadSigner.Verify(cacheEntryID, c.Query("expires"), c.Query("signature")) {
+	sig := c.Query("sig")
+	if sig == "" {
+		// legacy parameter name, kept for the rolling-upgrade window
+		sig = c.Query("signature")
+	}
+	if !h.downloadSigner.Verify(cacheEntryID, c.Query("expires"), sig) {
 		response.JSON(c, response.Error(http.StatusUnauthorized, "invalid or expired download signature"))
 		return
 	}

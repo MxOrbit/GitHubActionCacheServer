@@ -43,7 +43,7 @@ func main() {
 	if cfg.Cache.DownloadURLSigningSecret == "" {
 		logger.Warn().
 			Str("environment_variable", "DOWNLOAD_URL_SIGNING_SECRET").
-			Msg("download URL signing secret is unset; using a random per-process key, so issued URLs will fail after restart or on another replica")
+			Msg("URL signing secret is unset; using a random per-process key, so issued upload/download URLs will fail after restart or on another replica")
 	}
 	if cfg.Server.APIBaseURL == "" {
 		logger.Warn().

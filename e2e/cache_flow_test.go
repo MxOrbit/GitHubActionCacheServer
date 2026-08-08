@@ -60,7 +60,7 @@ func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
 
 	downloadURL := parseSignedURL(t, matchResponse.SignedDownloadURL)
 	require.NotEmpty(t, downloadURL.Query().Get("expires"))
-	require.NotEmpty(t, downloadURL.Query().Get("signature"))
+	require.NotEmpty(t, downloadURL.Query().Get("sig"))
 
 	unsignedDownloadReq := httptest.NewRequest(http.MethodGet, downloadURL.Path, nil)
 	unsignedDownloadRec := httptest.NewRecorder()
@@ -68,6 +68,30 @@ func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, unsignedDownloadRec.Code)
 
 	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
+
+	legacyURL := *downloadURL
+	legacyQuery := legacyURL.Query()
+	legacyQuery.Set("signature", legacyQuery.Get("sig"))
+	legacyQuery.Del("sig")
+	legacyURL.RawQuery = legacyQuery.Encode()
+	require.Equal(t, "cache-content", downloadCache(t, router, &legacyURL))
+
+	garbageSigURL := *downloadURL
+	garbageSigQuery := garbageSigURL.Query()
+	garbageSigQuery.Set("signature", garbageSigQuery.Get("sig"))
+	garbageSigQuery.Set("sig", "deadbeef")
+	garbageSigURL.RawQuery = garbageSigQuery.Encode()
+	garbageSigReq := httptest.NewRequest(http.MethodGet, garbageSigURL.RequestURI(), nil)
+	garbageSigRec := httptest.NewRecorder()
+	router.ServeHTTP(garbageSigRec, garbageSigReq)
+	require.Equal(t, http.StatusUnauthorized, garbageSigRec.Code)
+
+	emptySigURL := *downloadURL
+	emptySigQuery := emptySigURL.Query()
+	emptySigQuery.Set("signature", emptySigQuery.Get("sig"))
+	emptySigQuery.Set("sig", "")
+	emptySigURL.RawQuery = emptySigQuery.Encode()
+	require.Equal(t, "cache-content", downloadCache(t, router, &emptySigURL))
 }
 
 func TestFinalizeAcceptsOfficialToolkitJSONSizeBytes(t *testing.T) {
@@ -211,9 +235,14 @@ func TestOpaqueAzureBlockIDsUseBlockListOrder(t *testing.T) {
 		{id: secondBlockID, body: "world"},
 		{id: firstBlockID, body: "hello "},
 	} {
+		blockURL := *uploadURL
+		blockQuery := blockURL.Query()
+		blockQuery.Set("comp", "block")
+		blockQuery.Set("blockid", block.id)
+		blockURL.RawQuery = blockQuery.Encode()
 		uploadReq := httptest.NewRequest(
 			http.MethodPut,
-			uploadURL.RequestURI()+"?comp=block&blockid="+url.QueryEscape(block.id),
+			blockURL.RequestURI(),
 			bytes.NewBufferString(block.body),
 		)
 		uploadRec := httptest.NewRecorder()
@@ -222,12 +251,16 @@ func TestOpaqueAzureBlockIDsUseBlockListOrder(t *testing.T) {
 	}
 
 	blockList := `<BlockList><Latest>` + firstBlockID + `</Latest><Latest>` + secondBlockID + `</Latest></BlockList>`
-	commitReq := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI()+"?comp=blocklist", bytes.NewBufferString(blockList))
+	blockListURL := *uploadURL
+	blockListQuery := blockListURL.Query()
+	blockListQuery.Set("comp", "blocklist")
+	blockListURL.RawQuery = blockListQuery.Encode()
+	commitReq := httptest.NewRequest(http.MethodPut, blockListURL.RequestURI(), bytes.NewBufferString(blockList))
 	commitRec := httptest.NewRecorder()
 	router.ServeHTTP(commitRec, commitReq)
 	require.Equal(t, http.StatusCreated, commitRec.Code)
 
-	commitRetryReq := httptest.NewRequest(http.MethodPut, uploadURL.RequestURI()+"?comp=blocklist", bytes.NewBufferString(blockList))
+	commitRetryReq := httptest.NewRequest(http.MethodPut, blockListURL.RequestURI(), bytes.NewBufferString(blockList))
 	commitRetryRec := httptest.NewRecorder()
 	router.ServeHTTP(commitRetryRec, commitRetryReq)
 	require.Equal(t, http.StatusCreated, commitRetryRec.Code)

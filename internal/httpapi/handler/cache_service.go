@@ -92,7 +92,11 @@ func (h *Handler) CreateCacheEntry(c *gin.Context) {
 	}
 
 	base := baseurl.FromRequest(c.Request, h.cfg.Server.APIBaseURL)
-	uploadURL := base + "/devstoreaccount1/upload/" + formatInt64(upload.UploadID)
+	uploadURL, err := h.uploadSigner.SignUpload(base+"/devstoreaccount1/upload/"+formatInt64(upload.UploadID), upload.UploadID)
+	if err != nil {
+		response.InternalError(c, err)
+		return
+	}
 	writeCacheResponse(
 		c,
 		wireFormat,

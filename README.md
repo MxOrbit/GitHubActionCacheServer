@@ -152,15 +152,16 @@ composition; verify lifecycle support when using an S3-compatible endpoint.
 
 ### Cache Behavior
 
-| Variable                             | Default              | Description                                                                                                    |
-|--------------------------------------|----------------------|----------------------------------------------------------------------------------------------------------------|
-| `ENABLE_DIRECT_DOWNLOADS`            | `false`              | When using S3, presigns eligible cache objects instead of proxying their downloads through the server.         |
-| `DOWNLOAD_URL_SIGNING_SECRET`        | generated at startup | HMAC secret for local signed download URLs. Set a stable value for multi-instance or restart-safe deployments. |
-| `CACHE_MERGE_CONCURRENCY`            | CPU count            | Maximum number of concurrent S3 materializations. Values below `1` fall back to CPU count.                     |
-| `CACHE_MAX_SIZE_BYTES`               | unset                | Maximum logical cache payload bytes for any backend. Must be a positive integer when set.                      |
-| `CACHE_FILESYSTEM_MAX_USAGE_PERCENT` | `90`                 | Filesystem volume usage that triggers eviction when no explicit byte budget is set. Range `(0, 100]`.          |
+| Variable                             | Default              | Description                                                                                                               |
+|--------------------------------------|----------------------|---------------------------------------------------------------------------------------------------------------------------|
+| `ENABLE_DIRECT_DOWNLOADS`            | `false`              | When using S3, presigns eligible cache objects instead of proxying their downloads through the server.                    |
+| `DOWNLOAD_URL_SIGNING_SECRET`        | generated at startup | HMAC secret for local signed upload and download URLs. Set a stable value for multi-instance or restart-safe deployments. |
+| `CACHE_MERGE_CONCURRENCY`            | CPU count            | Maximum number of concurrent S3 materializations. Values below `1` fall back to CPU count.                                |
+| `CACHE_MAX_SIZE_BYTES`               | unset                | Maximum logical cache payload bytes for any backend. Must be a positive integer when set.                                 |
+| `CACHE_FILESYSTEM_MAX_USAGE_PERCENT` | `90`                 | Filesystem volume usage that triggers eviction when no explicit byte budget is set. Range `(0, 100]`.                     |
 
-Local signed download URLs and S3 direct download URLs expire after 10 minutes.
+Local signed upload URLs expire after 24 hours; signed download URLs and S3 direct download URLs expire after 10 minutes.
+
 Eligible caches are presigned directly; layouts that do not satisfy the
 backend's multipart constraints transparently fall back to server-proxied
 downloads.
@@ -175,10 +176,6 @@ cache entry first and physically removes storage only after readers drain and a
 10-minute grace period ends. Before returning a download URL, the server stats
 the anchor object; a confirmed-missing object detaches the entry and retries
 matching.
-
-Upgrades from versions without reader leases must be coordinated: drain the old
-server instances before enabling the new ones. Old binaries do not honor part
-reader leases, so running old and new cleanup workers concurrently is unsafe.
 
 ### Cleanup
 
