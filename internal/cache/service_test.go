@@ -508,9 +508,13 @@ func TestReplacementFencesOldLocationUntilLazyReaderCloses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hello ", string(firstPart))
 
-	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	// The replace path stays reachable only via races now that CreateUpload
+	// refuses live entries, so build the session directly.
+	writeScope, ok := WriteScope(scope)
+	require.True(t, ok)
+	uploadID, err := service.createUploadRecord(ctx, "key", "version", writeScope, scope.RepoID)
 	require.NoError(t, err)
-	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("replacement")))
+	require.NoError(t, service.UploadPart(ctx, uploadID, bytes.NewBufferString("replacement")))
 	_, err = service.CompleteUpload(ctx, "key", "version", scope)
 	require.NoError(t, err)
 
@@ -530,6 +534,128 @@ func TestReplacementFencesOldLocationUntilLazyReaderCloses(t *testing.T) {
 	require.Equal(t, "replacement", string(newBody))
 	require.NoError(t, service.ShutdownReaderLeaseReleaser(ctx))
 	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func createLiveCacheEntry(t *testing.T, ctx context.Context, client *ent.Client, adapter storage.Adapter, id, key string) *ent.CacheEntry {
+	t.Helper()
+	entry := createMatchedCacheEntry(ctx, client, id, key)
+	require.NoError(t, adapter.UploadStream(ctx, partObjectName(id+"-folder", 0), bytes.NewBufferString("data")))
+	return entry
+}
+
+func TestCreateUploadRejectsExistingLiveEntry(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	createLiveCacheEntry(t, ctx, client, filesystem, "live-entry", "key")
+
+	_, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.ErrorIs(t, err, ErrUploadAlreadyExists)
+	require.Zero(t, client.Upload.Query().CountX(ctx))
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+}
+
+func TestCreateUploadAllowsNonExactTuples(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	createLiveCacheEntry(t, ctx, client, filesystem, "live-entry", "key")
+
+	tests := []struct {
+		name    string
+		key     string
+		version string
+		scope   auth.CacheScope
+	}{
+		{"different key", "key2", "version", writableScope()},
+		{"key extending existing key", "key-v2", "version", writableScope()},
+		{"case-differing key", "Key", "version", writableScope()},
+		{"different version", "key", "version2", writableScope()},
+		{
+			"different repo",
+			"key",
+			"version",
+			auth.CacheScope{RepoID: "456", Scopes: []auth.Scope{{Scope: "refs/heads/main", Permission: 3}}},
+		},
+		{
+			"different scope",
+			"key",
+			"version",
+			auth.CacheScope{RepoID: "123", Scopes: []auth.Scope{{Scope: "refs/heads/other", Permission: 3}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := service.CreateUpload(ctx, tt.key, tt.version, tt.scope)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestCreateUploadAllowsReserveWhenLocationFenced(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	entry := createLiveCacheEntry(t, ctx, client, filesystem, "fenced-entry", "key")
+	_, err := client.StorageLocation.UpdateOneID(entry.LocationId).
+		SetDeletionRequestedAt(time.Now().UnixMilli()).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.Equal(t, 1, client.Upload.Query().CountX(ctx))
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+}
+
+func TestCreateUploadAllowsReserveWhenStorageObjectMissing(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	createMatchedCacheEntry(ctx, client, "missing-object-entry", "key")
+
+	_, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+	require.Equal(t, 1, client.Upload.Query().CountX(ctx))
+}
+
+func TestCreateUploadFailsOpenWhenLivenessStatErrors(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &objectExistsErrorStorage{Adapter: filesystem, err: errInjectedStorageFailure}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+	createMatchedCacheEntry(ctx, client, "stat-error-entry", "key")
+
+	_, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.Equal(t, 1, client.CacheEntry.Query().CountX(ctx))
+	require.Equal(t, 1, client.Upload.Query().CountX(ctx))
+}
+
+func TestCreateUploadConcurrentReserveOnExistingEntry(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	createLiveCacheEntry(t, ctx, client, filesystem, "contended-entry", "key")
+
+	const attempts = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, attempts)
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := service.CreateUpload(ctx, "key", "version", scope)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.ErrorIs(t, err, ErrUploadAlreadyExists)
+	}
+	require.Zero(t, client.Upload.Query().CountX(ctx))
 }
 
 func TestDownloadThrottlesLastDownloadedAtUpdates(t *testing.T) {

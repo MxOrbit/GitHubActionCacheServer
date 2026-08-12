@@ -101,6 +101,47 @@ func TestSccacheCompatibleProtobufCacheMiss(t *testing.T) {
 	require.False(t, ok, "proto3 false is encoded as the absent default value")
 }
 
+func TestProtobufRerunSkipsUploadForExistingCacheEntry(t *testing.T) {
+	app := newTestApp(t)
+	token := actionsToken(t)
+	key := "protobuf-rerun-key"
+	createRequest := protobufCreateCacheEntryRequest(
+		protobufCacheMetadata(999, "untrusted-create-scope"),
+		key,
+		defaultCacheEntryVersion,
+	)
+
+	createRec := postProtobuf(t, app.router, createCacheEntryPath, token, createRequest)
+	require.Equal(t, http.StatusOK, createRec.Code)
+	createFields := decodeProtobufFields(t, createRec.Body.Bytes())
+	require.Equal(t, uint64(1), requireProtobufVarintField(t, createFields, 1))
+	uploadURL := requireProtobufStringField(t, createFields, 2)
+	uploadWholeCache(t, app.router, parseSignedURL(t, uploadURL), "protobuf rerun archive")
+
+	finalizeRec := postProtobuf(
+		t,
+		app.router,
+		finalizeCacheEntryPath,
+		token,
+		protobufFinalizeCacheEntryUploadRequest(
+			protobufCacheMetadata(888, "untrusted-finalize-scope"),
+			key,
+			int64(len("protobuf rerun archive")),
+			defaultCacheEntryVersion,
+		),
+	)
+	require.Equal(t, http.StatusOK, finalizeRec.Code)
+	require.Equal(t, uint64(1), requireProtobufVarintField(t, decodeProtobufFields(t, finalizeRec.Body.Bytes()), 1))
+
+	rerunRec := postProtobuf(t, app.router, createCacheEntryPath, token, createRequest)
+
+	require.Equal(t, http.StatusOK, rerunRec.Code)
+	require.Equal(t, protobufMediaType, rerunRec.Header().Get("Content-Type"))
+	_, ok := protobufVarintField(decodeProtobufFields(t, rerunRec.Body.Bytes()), 1)
+	require.False(t, ok, "proto3 false is encoded as the absent default value")
+	require.Zero(t, app.db.Upload.Query().CountX(context.Background()))
+}
+
 func TestProtobufLookupSelfHealsDanglingCacheEntryAsCleanMiss(t *testing.T) {
 	app := newTestApp(t)
 	token := actionsToken(t)

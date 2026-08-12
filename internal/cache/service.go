@@ -236,6 +236,14 @@ func (s *Service) CreateUpload(ctx context.Context, key, version string, scope a
 		return nil, ErrNoWriteScope
 	}
 
+	live, err := s.liveEntryExists(ctx, key, version, writeScope, scope.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	if live {
+		return nil, ErrUploadAlreadyExists
+	}
+
 	// Removing an inactive legacy row is progress, not contention. Only races
 	// that leave this request without a row or reservation consume the budget.
 	contentionAttempts := 0
@@ -275,6 +283,70 @@ func (s *Service) CreateUpload(ctx context.Context, key, version string, scope a
 		contentionAttempts++
 	}
 	return nil, ErrUploadAlreadyExists
+}
+
+// liveEntryExists reports whether an exact (key, version, scope, repoID) entry
+// exists and would survive a restore's liveness validation; dangling entries
+// are purged or left for finalize's replace and reported absent. The check is
+// advisory: stat and purge failures fail open so the upload proceeds as before
+// this check existed.
+func (s *Service) liveEntryExists(ctx context.Context, key, version, scope, repoID string) (bool, error) {
+	// First mirrors the restore path and tolerates duplicate tuples in
+	// out-of-band-restored databases.
+	entry, err := s.db.CacheEntry.Query().
+		Where(
+			cachekey.Exact(key),
+			cacheentry.Version(version),
+			cacheentry.Scope(scope),
+			cacheentry.RepoId(repoID),
+		).
+		First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query existing cache entry: %w", err)
+	}
+
+	location, err := s.db.StorageLocation.Query().
+		Where(storagelocation.ID(entry.LocationId)).
+		Only(ctx)
+	if err != nil {
+		if !ent.IsNotFound(err) {
+			return false, fmt.Errorf("query existing entry storage location: %w", err)
+		}
+		if _, purgeErr := s.lifecycle.PurgeDanglingCacheEntry(ctx, entry.ID, entry.LocationId); purgeErr != nil {
+			s.warnUnlessCanceled(ctx).Err(purgeErr).Str("cache_entry", entry.ID).Msg("purge of dangling cache entry failed; allowing upload")
+		}
+		return false, nil
+	}
+	if location.DeletionRequestedAt != nil {
+		return false, nil
+	}
+
+	objectName, representationAvailable := representationObjectName(location)
+	if representationAvailable {
+		representationAvailable, err = s.storage.ObjectExists(ctx, objectName)
+		if err != nil {
+			s.warnUnlessCanceled(ctx).Err(err).Str("object", objectName).Msg("cache entry liveness check failed; allowing upload")
+			return false, nil
+		}
+	}
+	if !representationAvailable {
+		if _, err := s.lifecycle.PurgeDanglingCacheEntryIfUnchanged(ctx, entry.ID, location); err != nil {
+			s.warnUnlessCanceled(ctx).Err(err).Str("cache_entry", entry.ID).Msg("purge of dangling cache entry failed; allowing upload")
+		}
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (s *Service) warnUnlessCanceled(ctx context.Context) *zerolog.Event {
+	if ctx.Err() != nil {
+		return s.logger.Debug()
+	}
+	return s.logger.Warn()
 }
 
 func (s *Service) UploadPart(ctx context.Context, uploadID int64, stream io.Reader) error {

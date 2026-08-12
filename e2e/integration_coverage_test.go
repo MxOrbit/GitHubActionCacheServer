@@ -21,6 +21,7 @@ import (
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/db"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/upload"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/httpapi"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagecapacity"
@@ -302,13 +303,19 @@ func runCacheKeyMatching(t *testing.T, client *ent.Client, router http.Handler) 
 	uploadWholeCache(t, router, uploadURL, "upper-v1")
 	finalizeCacheEntry(t, router, token, upperBody)
 
-	// A newer case-only variant must not make finalize's .Only query singular
-	// or replace the wrong cache entry on a case-insensitive collation.
+	// A case-only variant must not confuse the exact-match predicates on a
+	// case-insensitive collation: reserve refuses the exact live key without
+	// false-hitting the variant in either direction.
 	newer := time.Now().Add(time.Hour).UnixMilli()
 	createCacheKeyMatchEntry(ctx, client, "lower-variant", "case-key", newer)
-	uploadURL = createCacheEntry(t, router, token, upperBody)
-	uploadWholeCache(t, router, uploadURL, "upper-v2")
-	finalizeCacheEntry(t, router, token, upperBody)
+
+	rerun := createCacheEntryResponse(t, router, token, upperBody)
+	require.False(t, rerun.OK)
+
+	caseVariant := createCacheEntryResponse(t, router, token, cacheBody("CASE-KEY"))
+	require.True(t, caseVariant.OK)
+	_, err := client.Upload.Delete().Where(upload.Key("CASE-KEY")).Exec(ctx)
+	require.NoError(t, err)
 	require.Equal(t, 2, client.CacheEntry.Query().CountX(ctx))
 
 	service := cache.NewService(cache.Options{DB: client})

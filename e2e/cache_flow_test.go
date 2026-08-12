@@ -333,6 +333,50 @@ func TestAbandonedUploadDoesNotBlockNewSave(t *testing.T) {
 	require.NotEmpty(t, createResponse.SignedUploadURL)
 }
 
+func TestRerunSkipsUploadForExistingCacheEntry(t *testing.T) {
+	app := newTestApp(t)
+	token := actionsToken(t)
+	createBody := cacheBody("rerun-cache")
+	uploadURL := createCacheEntry(t, app.router, token, createBody)
+	uploadWholeCache(t, app.router, uploadURL, "original")
+	finalizeCacheEntry(t, app.router, token, createBody)
+	locationID := app.db.CacheEntry.Query().OnlyX(context.Background()).LocationId
+
+	rec := postJSON(t, app.router, createCacheEntryPath, token, createBody)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"ok":false}`, rec.Body.String())
+	require.Zero(t, app.db.Upload.Query().CountX(context.Background()))
+	entry := app.db.CacheEntry.Query().OnlyX(context.Background())
+	require.Equal(t, locationID, entry.LocationId)
+	match := matchCacheEntry(t, app.router, token, map[string]any{
+		"key":     "rerun-cache",
+		"version": defaultCacheEntryVersion,
+	})
+	require.Equal(t, "original", downloadCache(t, app.router, parseSignedURL(t, match.SignedDownloadURL)))
+}
+
+func TestRerunAfterStorageLossReReservesCleanly(t *testing.T) {
+	app := newTestApp(t)
+	token := actionsToken(t)
+	createBody := cacheBody("lost-cache")
+	uploadURL := createCacheEntry(t, app.router, token, createBody)
+	uploadWholeCache(t, app.router, uploadURL, "lost")
+	finalizeCacheEntry(t, app.router, token, createBody)
+	require.NoError(t, app.storage.Clear(context.Background()))
+
+	createResponse := createCacheEntryResponse(t, app.router, token, createBody)
+	require.True(t, createResponse.OK)
+	uploadWholeCache(t, app.router, parseSignedURL(t, createResponse.SignedUploadURL), "recreated")
+	finalizeCacheEntry(t, app.router, token, createBody)
+
+	match := matchCacheEntry(t, app.router, token, map[string]any{
+		"key":     "lost-cache",
+		"version": defaultCacheEntryVersion,
+	})
+	require.Equal(t, "recreated", downloadCache(t, app.router, parseSignedURL(t, match.SignedDownloadURL)))
+}
+
 func cacheBody(key string) map[string]string {
 	return map[string]string{
 		"key":     key,
