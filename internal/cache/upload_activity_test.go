@@ -331,10 +331,10 @@ type afterInspectStorage struct {
 	once  sync.Once
 }
 
-func (s *afterInspectStorage) InspectFolder(ctx context.Context, folderName string) (storage.FolderContents, error) {
-	contents, err := s.Adapter.InspectFolder(ctx, folderName)
+func (s *afterInspectStorage) InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error) {
+	sizeBytes, err := s.Adapter.InspectIndexedFolder(ctx, folderName, expectedObjects)
 	if err == nil {
 		s.once.Do(s.after)
 	}
-	return contents, err
+	return sizeBytes, err
 }

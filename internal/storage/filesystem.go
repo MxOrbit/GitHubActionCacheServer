@@ -7,14 +7,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/bufferpool"
 )
 
-const filesystemUploadTempPrefix = ".upload-"
+const (
+	filesystemUploadTempPrefix = ".upload-"
+	filesystemReadBatchSize    = 256
+)
 
 type FilesystemAdapter struct {
 	root                  string
@@ -213,117 +215,169 @@ func (a *FilesystemAdapter) InspectObject(ctx context.Context, objectName string
 	return ObjectMetadata{Name: objectName, SizeBytes: info.Size(), ModifiedAt: info.ModTime()}, nil
 }
 
-func (a *FilesystemAdapter) InspectFolder(ctx context.Context, folderName string) (FolderContents, error) {
+func (a *FilesystemAdapter) InspectFolderSummary(ctx context.Context, folderName string) (FolderSummary, error) {
 	path, err := a.safePath(folderName)
 	if err != nil {
-		return FolderContents{}, err
+		return FolderSummary{}, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return FolderContents{FolderName: folderName}, nil
+			return FolderSummary{FolderName: folderName}, nil
 		}
-		return FolderContents{}, fmt.Errorf("stat folder: %w", err)
+		return FolderSummary{}, fmt.Errorf("stat folder: %w", err)
 	}
 	if !info.IsDir() {
-		return FolderContents{}, fmt.Errorf("inspect folder %q: path is not a directory", folderName)
+		return FolderSummary{}, fmt.Errorf("inspect folder %q: path is not a directory", folderName)
 	}
 
-	objects := make([]ObjectMetadata, 0)
-	newestModifiedAt := info.ModTime()
-	err = filepath.WalkDir(path, func(currentPath string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if currentPath == path {
+	summary := FolderSummary{
+		FolderName:       folderName,
+		Exists:           true,
+		NewestModifiedAt: info.ModTime(),
+	}
+	err = walkFilesystemDirectory(ctx, path, "", func(relativeName string, info os.FileInfo) error {
+		if info.IsDir() {
+			summary.NewestModifiedAt = newestTime(summary.NewestModifiedAt, info.ModTime())
 			return nil
 		}
-		entryInfo, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			newestModifiedAt = newestTime(newestModifiedAt, entryInfo.ModTime())
-			return nil
-		}
-		relativeName, err := filepath.Rel(path, currentPath)
-		if err != nil {
-			return err
-		}
-		objects = append(objects, ObjectMetadata{
+		return addFolderSummaryObject(&summary, ObjectMetadata{
 			Name:       filepath.ToSlash(relativeName),
-			SizeBytes:  entryInfo.Size(),
-			ModifiedAt: entryInfo.ModTime(),
+			SizeBytes:  info.Size(),
+			ModifiedAt: info.ModTime(),
 		})
-		return nil
 	})
 	if err != nil {
-		return FolderContents{}, fmt.Errorf("inspect folder %q: %w", folderName, err)
+		return FolderSummary{}, fmt.Errorf("inspect folder summary %q: %w", folderName, err)
 	}
-	contents, err := newFolderContents(folderName, objects)
-	if err != nil {
-		return FolderContents{}, err
-	}
-	contents.Exists = true
-	contents.NewestModifiedAt = newestTime(contents.NewestModifiedAt, newestModifiedAt)
-	return contents, nil
+	return summary, nil
 }
 
-func (a *FilesystemAdapter) Inventory(ctx context.Context) (Inventory, error) {
-	entries, err := os.ReadDir(a.root)
+func (a *FilesystemAdapter) InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error) {
+	accumulator, err := newIndexedFolderAccumulator(expectedObjects)
 	if err != nil {
-		return Inventory{}, fmt.Errorf("read storage root: %w", err)
+		return 0, err
+	}
+	path, err := a.safePath(folderName)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return accumulator.result()
+		}
+		return 0, fmt.Errorf("stat indexed folder: %w", err)
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("inspect indexed folder %q: path is not a directory", folderName)
 	}
 
-	builder := newInventoryBuilder()
-	temporaryUploads := make([]ObjectMetadata, 0)
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return Inventory{}, err
-		}
-		if entry.IsDir() {
-			contents, err := a.InspectFolder(ctx, entry.Name())
-			if err != nil {
-				return Inventory{}, err
-			}
-			builder.ensureFolder(entry.Name(), contents.NewestModifiedAt)
-			for _, object := range contents.Objects {
-				object.Name = entry.Name() + "/" + object.Name
-				if isFilesystemTemporaryUpload(object.Name) {
-					temporaryUploads = append(temporaryUploads, object)
-				}
-				if err := builder.addObject(object); err != nil {
-					return Inventory{}, err
-				}
-			}
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			return Inventory{}, fmt.Errorf("inspect storage root object %q: %w", entry.Name(), err)
+	err = walkFilesystemDirectory(ctx, path, "", func(relativeName string, info os.FileInfo) error {
+		if info.IsDir() {
+			return nil
 		}
 		object := ObjectMetadata{
-			Name:       entry.Name(),
+			Name:       filepath.ToSlash(relativeName),
 			SizeBytes:  info.Size(),
 			ModifiedAt: info.ModTime(),
 		}
-		if isFilesystemTemporaryUpload(object.Name) {
-			temporaryUploads = append(temporaryUploads, object)
+		if err := validateObjectMetadata(object); err != nil {
+			return err
 		}
-		if err := builder.addObject(object); err != nil {
-			return Inventory{}, err
+		return accumulator.add(object.Name, object.SizeBytes)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("inspect indexed folder %q: %w", folderName, err)
+	}
+	return accumulator.result()
+}
+
+func (a *FilesystemAdapter) WalkTopLevelFolders(ctx context.Context, visit func(folderName string) error) error {
+	directory, err := os.Open(a.root)
+	if err != nil {
+		return fmt.Errorf("open storage root: %w", err)
+	}
+	defer directory.Close()
+
+	for {
+		entries, readErr := directory.ReadDir(filesystemReadBatchSize)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if err := visit(entry.Name()); err != nil {
+					return err
+				}
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read storage root: %w", readErr)
 		}
 	}
-	inventory := builder.build()
-	sort.Slice(temporaryUploads, func(i, j int) bool {
-		return temporaryUploads[i].Name < temporaryUploads[j].Name
+}
+
+func (a *FilesystemAdapter) WalkTemporaryUploads(ctx context.Context, visit func(ObjectMetadata) error) error {
+	return walkFilesystemDirectory(ctx, a.root, "", func(relativeName string, info os.FileInfo) error {
+		objectName := filepath.ToSlash(relativeName)
+		if info.IsDir() || !isFilesystemTemporaryUpload(objectName) {
+			return nil
+		}
+		object := ObjectMetadata{
+			Name:       objectName,
+			SizeBytes:  info.Size(),
+			ModifiedAt: info.ModTime(),
+		}
+		if err := validateObjectMetadata(object); err != nil {
+			return err
+		}
+		return visit(object)
 	})
-	inventory.TemporaryUploads = temporaryUploads
-	return inventory, nil
+}
+
+func walkFilesystemDirectory(
+	ctx context.Context,
+	directoryPath string,
+	relativePath string,
+	visit func(relativeName string, info os.FileInfo) error,
+) error {
+	directory, err := os.Open(directoryPath)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+
+	for {
+		entries, readErr := directory.ReadDir(filesystemReadBatchSize)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			entryRelativePath := filepath.Join(relativePath, entry.Name())
+			if err := visit(entryRelativePath, info); err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if err := walkFilesystemDirectory(ctx, filepath.Join(directoryPath, entry.Name()), entryRelativePath, visit); err != nil {
+					return err
+				}
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 func (a *FilesystemAdapter) CleanupTemporaryUploads(ctx context.Context, candidates []ObjectMetadata, cutoff time.Time) (int, error) {
@@ -408,30 +462,42 @@ func (a *FilesystemAdapter) DeleteFolder(_ context.Context, folderName string) e
 	return nil
 }
 
-func (a *FilesystemAdapter) CountFilesInFolder(_ context.Context, folderName string) (int, error) {
+func (a *FilesystemAdapter) CountFilesInFolder(ctx context.Context, folderName string) (int, error) {
 	path, err := a.safePath(folderName)
 	if err != nil {
 		return 0, err
 	}
 
-	entries, err := os.ReadDir(path)
+	directory, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("read folder: %w", err)
+		return 0, fmt.Errorf("open folder: %w", err)
 	}
+	defer directory.Close()
 
 	count := 0
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), filesystemUploadTempPrefix) {
-			continue
+	for {
+		entries, readErr := directory.ReadDir(filesystemReadBatchSize)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			if strings.HasPrefix(entry.Name(), filesystemUploadTempPrefix) {
+				continue
+			}
+			if !entry.IsDir() {
+				count++
+			}
 		}
-		if !entry.IsDir() {
-			count++
+		if errors.Is(readErr, io.EOF) {
+			return count, nil
+		}
+		if readErr != nil {
+			return 0, fmt.Errorf("read folder: %w", readErr)
 		}
 	}
-	return count, nil
 }
 
 func (a *FilesystemAdapter) Clear(_ context.Context) error {

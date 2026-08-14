@@ -88,6 +88,21 @@ var (
 		Name:       "storage_deletions",
 		Columns:    StorageDeletionsColumns,
 		PrimaryKey: []*schema.Column{StorageDeletionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_storage_deletions_folder_name",
+				Unique:  false,
+				Columns: []*schema.Column{StorageDeletionsColumns[1]},
+				Annotation: &entsql.IndexAnnotation{
+					PrefixColumns: map[string]uint{
+						StorageDeletionsColumns[1].Name: 191,
+					},
+					OpClassColumns: map[string]string{
+						StorageDeletionsColumns[1].Name: "text_pattern_ops",
+					},
+				},
+			},
+		},
 	}
 	// StorageLocationsColumns holds the columns for the "storage_locations" table.
 	StorageLocationsColumns = []*schema.Column{
@@ -112,6 +127,19 @@ var (
 		Columns:    StorageLocationsColumns,
 		PrimaryKey: []*schema.Column{StorageLocationsColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "idx_storage_locations_folder_name",
+				Unique:  false,
+				Columns: []*schema.Column{StorageLocationsColumns[1]},
+				Annotation: &entsql.IndexAnnotation{
+					PrefixColumns: map[string]uint{
+						StorageLocationsColumns[1].Name: 191,
+					},
+					OpClassColumns: map[string]string{
+						StorageLocationsColumns[1].Name: "text_pattern_ops",
+					},
+				},
+			},
 			{
 				Name:    "idx_storage_locations_recency",
 				Unique:  false,
@@ -182,6 +210,19 @@ var (
 				Name:    "idx_uploads_repoId",
 				Unique:  false,
 				Columns: []*schema.Column{UploadsColumns[4]},
+			},
+			{
+				Name:    "idx_uploads_folder_name",
+				Unique:  false,
+				Columns: []*schema.Column{UploadsColumns[9]},
+				Annotation: &entsql.IndexAnnotation{
+					PrefixColumns: map[string]uint{
+						UploadsColumns[9].Name: 191,
+					},
+					OpClassColumns: map[string]string{
+						UploadsColumns[9].Name: "text_pattern_ops",
+					},
+				},
 			},
 			{
 				Name:    "idx_uploads_tuple_hash",

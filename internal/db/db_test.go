@@ -158,6 +158,9 @@ func TestOpenAndMigrateSQLiteFromOriginalSchema(t *testing.T) {
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_repo_scope_version_key"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_cache_entries_location_updated_at"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_uploads_tuple_hash"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_uploads_folder_name"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_storage_locations_folder_name"))
+	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_storage_deletions_folder_name"))
 	require.True(t, sqliteIndexExists(ctx, t, sqlDB, "idx_storage_locations_recency"))
 }
 
@@ -346,15 +349,20 @@ func TestGeneratedSchemaMatchesOriginalIndexNames(t *testing.T) {
 		"idx_uploads_key_version",
 		"idx_uploads_scope",
 		"idx_uploads_repoId",
+		"idx_uploads_folder_name",
 		"idx_uploads_tuple_hash",
 	}, indexNames(migrate.UploadsTable.Indexes))
 	require.Equal(t, []string{
+		"idx_storage_locations_folder_name",
 		"idx_storage_locations_recency",
 	}, indexNames(migrate.StorageLocationsTable.Indexes))
+	require.Equal(t, []string{
+		"idx_storage_deletions_folder_name",
+	}, indexNames(migrate.StorageDeletionsTable.Indexes))
 }
 
 func TestMySQLUploadUniqueIndexUsesFixedLengthTupleHash(t *testing.T) {
-	uniqueIndex := migrate.UploadsTable.Indexes[3]
+	uniqueIndex := migrate.UploadsTable.Indexes[4]
 	require.True(t, uniqueIndex.Unique)
 	require.Equal(t, []string{"tupleHash"}, columnNames(uniqueIndex.Columns))
 	require.Equal(t, "varchar(64)", migrate.UploadsColumns[11].SchemaType[dialect.MySQL])
@@ -372,6 +380,25 @@ func TestCacheMatchIndexAnnotations(t *testing.T) {
 	require.Equal(t, map[string]string{
 		"key": "text_pattern_ops",
 	}, matchIndex.Annotation.OpClassColumns)
+}
+
+func TestFolderNameIndexAnnotations(t *testing.T) {
+	for _, tableIndex := range []struct {
+		name  string
+		index int
+		all   []*entschema.Index
+	}{
+		{name: "uploads", index: 3, all: migrate.UploadsTable.Indexes},
+		{name: "storage_locations", index: 0, all: migrate.StorageLocationsTable.Indexes},
+		{name: "storage_deletions", index: 0, all: migrate.StorageDeletionsTable.Indexes},
+	} {
+		t.Run(tableIndex.name, func(t *testing.T) {
+			folderIndex := tableIndex.all[tableIndex.index]
+			require.Equal(t, []string{"folderName"}, columnNames(folderIndex.Columns))
+			require.Equal(t, map[string]uint{"folderName": 191}, folderIndex.Annotation.PrefixColumns)
+			require.Equal(t, map[string]string{"folderName": "text_pattern_ops"}, folderIndex.Annotation.OpClassColumns)
+		})
+	}
 }
 
 func TestSQLiteCacheMatchQueryPlans(t *testing.T) {

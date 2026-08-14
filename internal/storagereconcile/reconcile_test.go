@@ -3,6 +3,7 @@ package storagereconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -130,20 +131,69 @@ func TestReconcileResumesOnlyRowsStillMissingSizes(t *testing.T) {
 	require.Equal(t, 2, client.StorageLocation.Query().Where(storagelocation.SizeBytesNotNil()).CountX(context.Background()))
 }
 
-func TestReconcileDoesNotApplyPartialInventory(t *testing.T) {
+func TestReconcileKeepsCompletedRowsWhenLaterInspectionFails(t *testing.T) {
 	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
 	lifecycle := storagelifecycle.New(client)
-	location := createLegacyLocation(t, ctx, client, "entry", "folder", 1, false, false)
-	require.NoError(t, filesystem.UploadStream(ctx, storage.PartsFolder(location.FolderName)+"/0", strings.NewReader("payload")))
-	adapter := failingInventoryAdapter{Adapter: filesystem}
+	completed := createLegacyLocation(t, ctx, client, "entry-a", "folder-a", 1, false, false)
+	failing := createLegacyLocation(t, ctx, client, "entry-b", "folder-b", 1, false, false)
+	require.NoError(t, filesystem.UploadStream(ctx, storage.PartsFolder(completed.FolderName)+"/0", strings.NewReader("payload-a")))
+	require.NoError(t, filesystem.UploadStream(ctx, storage.PartsFolder(failing.FolderName)+"/0", strings.NewReader("payload-b")))
+	adapter := failingIndexedFolderAdapter{Adapter: filesystem, folderName: storage.PartsFolder(failing.FolderName)}
 
-	_, err := Reconcile(ctx, Options{DB: client, Storage: adapter, Lifecycle: lifecycle})
+	result, err := Reconcile(ctx, Options{DB: client, Storage: adapter, Lifecycle: lifecycle})
 	require.ErrorContains(t, err, "page failed")
-	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).SizeBytes)
+	require.Equal(t, 1, result.Updated)
+	require.NotNil(t, client.StorageLocation.GetX(ctx, completed.ID).SizeBytes)
+	require.Nil(t, client.StorageLocation.GetX(ctx, failing.ID).SizeBytes)
 
-	result, err := Reconcile(ctx, Options{DB: client, Storage: filesystem, Lifecycle: lifecycle})
+	result, err = Reconcile(ctx, Options{DB: client, Storage: filesystem, Lifecycle: lifecycle})
 	require.NoError(t, err)
 	require.Equal(t, 1, result.Updated)
+}
+
+func TestReconcileProcessesCandidatesAcrossKeysetPages(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	lifecycle := storagelifecycle.New(client)
+	const candidateCount = reconciliationPageSize + 25
+	for index := 0; index < candidateCount; index++ {
+		id := fmt.Sprintf("entry-%03d", index)
+		createLegacyLocation(t, ctx, client, id, "folder-"+id, 1, false, false)
+	}
+	adapter := &countingIndexedFolderAdapter{Adapter: filesystem, size: 7}
+
+	result, err := Reconcile(ctx, Options{DB: client, Storage: adapter, Lifecycle: lifecycle})
+	require.NoError(t, err)
+	require.Equal(t, candidateCount, result.Candidates)
+	require.Equal(t, candidateCount, result.Updated)
+	require.Equal(t, candidateCount, adapter.calls)
+	require.Equal(t, candidateCount, client.StorageLocation.Query().Where(storagelocation.SizeBytesNotNil()).CountX(ctx))
+}
+
+func TestRunReconcilePurgesOverLimitLegacyPartsAndClosesReadiness(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	lifecycle := storagelifecycle.New(client)
+	location := createLegacyLocation(
+		t,
+		ctx,
+		client,
+		"over-limit-entry",
+		"over-limit-folder",
+		storage.MaxIndexedObjects+1,
+		false,
+		false,
+	)
+	ready := make(chan struct{})
+
+	Run(ctx, Options{DB: client, Storage: filesystem, Lifecycle: lifecycle}, ready)
+
+	select {
+	case <-ready:
+	default:
+		t.Fatal("reconciliation readiness was not closed")
+	}
+	require.Zero(t, client.CacheEntry.Query().CountX(ctx))
+	current := client.StorageLocation.GetX(ctx, location.ID)
+	require.NotNil(t, current.DeletionRequestedAt)
 }
 
 func createLegacyLocation(t *testing.T, ctx context.Context, client *ent.Client, entryID, folderName string, partCount int, merged, partsDeleted bool) *ent.StorageLocation {
@@ -193,10 +243,25 @@ func (a *materializeOnInspectAdapter) InspectObject(ctx context.Context, objectN
 	return a.Adapter.InspectObject(ctx, objectName)
 }
 
-type failingInventoryAdapter struct {
+type failingIndexedFolderAdapter struct {
 	storage.Adapter
+	folderName string
 }
 
-func (f failingInventoryAdapter) Inventory(context.Context) (storage.Inventory, error) {
-	return storage.Inventory{}, errors.New("page failed")
+type countingIndexedFolderAdapter struct {
+	storage.Adapter
+	size  int64
+	calls int
+}
+
+func (a *countingIndexedFolderAdapter) InspectIndexedFolder(context.Context, string, int) (int64, error) {
+	a.calls++
+	return a.size, nil
+}
+
+func (f failingIndexedFolderAdapter) InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error) {
+	if folderName == f.folderName {
+		return 0, errors.New("page failed")
+	}
+	return f.Adapter.InspectIndexedFolder(ctx, folderName, expectedObjects)
 }

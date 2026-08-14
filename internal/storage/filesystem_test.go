@@ -40,7 +40,7 @@ func TestFilesystemAdapterUploadDownloadCountAndDelete(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestFilesystemInventorySeparatesLogicalRepresentationsFromPhysicalBytes(t *testing.T) {
+func TestFilesystemBoundedFolderInspectionSeparatesLogicalRepresentations(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())
 	require.NoError(t, err)
@@ -53,41 +53,32 @@ func TestFilesystemInventorySeparatesLogicalRepresentationsFromPhysicalBytes(t *
 	require.NoError(t, adapter.UploadStream(ctx, "folder/unknown/object", strings.NewReader("unknown")))
 	require.NoError(t, adapter.UploadStream(ctx, "loose", strings.NewReader("root")))
 
-	inventory, err := adapter.Inventory(ctx)
+	folder, err := adapter.InspectFolderSummary(ctx, "folder")
 	require.NoError(t, err)
-	require.Equal(t, int64(7), inventory.ObjectCount)
-	require.Equal(t, int64(47), inventory.PhysicalBytes)
-	require.Len(t, inventory.LooseObjects, 1)
-
-	folder, ok := inventory.Folder("folder")
-	require.True(t, ok)
+	require.True(t, folder.Exists)
 	require.Equal(t, int64(6), folder.ObjectCount)
 	require.Equal(t, int64(43), folder.PhysicalBytes)
-	require.Len(t, folder.Parts, 3)
-	require.Equal(t, int64(9), folder.Blocks.PhysicalBytes)
-	require.Equal(t, int64(7), folder.Unknown.PhysicalBytes)
-	require.NotNil(t, folder.Merged)
-	require.Equal(t, int64(11), folder.Merged.SizeBytes)
 
-	logicalSize, err := folder.LogicalPartsSize(2)
+	logicalSize, err := adapter.InspectIndexedFolder(ctx, "folder/parts", 2)
 	require.NoError(t, err)
 	require.Equal(t, int64(11), logicalSize)
-	_, err = folder.LogicalPartsSize(3)
+	_, err = adapter.InspectIndexedFolder(ctx, "folder/parts", 3)
 	require.ErrorIs(t, err, ErrIndexedObjectMissing)
-
-	parts, err := adapter.InspectFolder(ctx, "folder/parts")
-	require.NoError(t, err)
-	logicalSize, err = parts.LogicalIndexedSize(2)
-	require.NoError(t, err)
-	require.Equal(t, int64(11), logicalSize)
 
 	metadata, err := adapter.InspectObject(ctx, "folder/merged")
 	require.NoError(t, err)
 	require.Equal(t, int64(11), metadata.SizeBytes)
 	require.False(t, metadata.ModifiedAt.IsZero())
+
+	var folders []string
+	require.NoError(t, adapter.WalkTopLevelFolders(ctx, func(folderName string) error {
+		folders = append(folders, folderName)
+		return nil
+	}))
+	require.Equal(t, []string{"folder"}, folders)
 }
 
-func TestFilesystemInventoryCollectsCompleteTemporaryUploadNames(t *testing.T) {
+func TestFilesystemWalkTemporaryUploadsCollectsCompleteNames(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())
 	require.NoError(t, err)
@@ -97,14 +88,46 @@ func TestFilesystemInventoryCollectsCompleteTemporaryUploadNames(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(partsPath, filesystemUploadTempPrefix+"stale"), []byte("temporary"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(partsPath, "0"), []byte("committed"), 0o644))
 
-	inventory, err := adapter.Inventory(ctx)
+	temporaryUploads := collectFilesystemTemporaryUploads(t, ctx, adapter)
+	require.Len(t, temporaryUploads, 1)
+	require.Equal(t, "location/parts/"+filesystemUploadTempPrefix+"stale", temporaryUploads[0].Name)
+	require.Equal(t, int64(len("temporary")), temporaryUploads[0].SizeBytes)
+	require.False(t, temporaryUploads[0].ModifiedAt.IsZero())
+}
+
+func TestFilesystemWalkTopLevelFoldersReadsMultipleBoundedBatchesAndStopsSynchronously(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
 	require.NoError(t, err)
-	require.Len(t, inventory.TemporaryUploads, 1)
-	require.Equal(t, "location/parts/"+filesystemUploadTempPrefix+"stale", inventory.TemporaryUploads[0].Name)
-	require.Equal(t, int64(len("temporary")), inventory.TemporaryUploads[0].SizeBytes)
-	require.False(t, inventory.TemporaryUploads[0].ModifiedAt.IsZero())
-	require.Equal(t, int64(2), inventory.ObjectCount)
-	require.Equal(t, int64(len("temporary")+len("committed")), inventory.PhysicalBytes)
+	const folderCount = filesystemReadBatchSize + 25
+	for index := 0; index < folderCount; index++ {
+		require.NoError(t, os.Mkdir(filepath.Join(adapter.root, fmt.Sprintf("folder-%03d", index)), 0o755))
+	}
+
+	seen := make(map[string]struct{}, folderCount)
+	require.NoError(t, adapter.WalkTopLevelFolders(ctx, func(folderName string) error {
+		seen[folderName] = struct{}{}
+		return nil
+	}))
+	require.Len(t, seen, folderCount)
+
+	stop := errors.New("stop walk")
+	calls := 0
+	err = adapter.WalkTopLevelFolders(ctx, func(string) error {
+		calls++
+		return stop
+	})
+	require.ErrorIs(t, err, stop)
+	require.Equal(t, 1, calls)
+}
+
+func TestFilesystemInspectIndexedFolderRejectsUnboundedExpectedCount(t *testing.T) {
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+
+	_, err = adapter.InspectIndexedFolder(context.Background(), "folder/parts", MaxIndexedObjects+1)
+	require.ErrorContains(t, err, "exceeds supported limit")
+	require.ErrorIs(t, err, ErrIndexedObjectLimitExceeded)
 }
 
 func TestFilesystemCleanupTemporaryUploadsRechecksCandidatesAndContinuesAfterFailure(t *testing.T) {
@@ -127,15 +150,14 @@ func TestFilesystemCleanupTemporaryUploadsRechecksCandidatesAndContinuesAfterFai
 	require.NoError(t, os.Chtimes(oldPath, old, old))
 	require.NoError(t, os.Chtimes(vanishedPath, old, old))
 
-	inventory, err := adapter.Inventory(ctx)
-	require.NoError(t, err)
-	require.Len(t, inventory.TemporaryUploads, 3)
+	temporaryUploads := collectFilesystemTemporaryUploads(t, ctx, adapter)
+	require.Len(t, temporaryUploads, 3)
 	require.NoError(t, os.Remove(vanishedPath))
 
 	candidates := append([]ObjectMetadata{{
 		Name:       "../" + filesystemUploadTempPrefix + "invalid",
 		ModifiedAt: old,
-	}}, inventory.TemporaryUploads...)
+	}}, temporaryUploads...)
 	deleted, err := adapter.CleanupTemporaryUploads(ctx, candidates, now.Add(-24*time.Hour))
 	require.ErrorContains(t, err, "resolve temporary upload")
 	require.Equal(t, 1, deleted)
@@ -158,12 +180,11 @@ func TestFilesystemCleanupTemporaryUploadsToleratesConcurrentRename(t *testing.T
 	old := time.Now().Add(-25 * time.Hour)
 	require.NoError(t, os.Chtimes(temporaryPath, old, old))
 
-	inventory, err := adapter.Inventory(ctx)
-	require.NoError(t, err)
-	require.Len(t, inventory.TemporaryUploads, 1)
+	temporaryUploads := collectFilesystemTemporaryUploads(t, ctx, adapter)
+	require.Len(t, temporaryUploads, 1)
 	require.NoError(t, os.Rename(temporaryPath, committedPath))
 
-	deleted, err := adapter.CleanupTemporaryUploads(ctx, inventory.TemporaryUploads, time.Now().Add(-24*time.Hour))
+	deleted, err := adapter.CleanupTemporaryUploads(ctx, temporaryUploads, time.Now().Add(-24*time.Hour))
 	require.NoError(t, err)
 	require.Zero(t, deleted)
 	require.FileExists(t, committedPath)
@@ -181,15 +202,14 @@ func TestFilesystemCleanupTemporaryUploadsToleratesConcurrentRemoval(t *testing.
 	old := time.Now().Add(-25 * time.Hour)
 	require.NoError(t, os.Chtimes(temporaryPath, old, old))
 
-	inventory, err := adapter.Inventory(ctx)
-	require.NoError(t, err)
-	require.Len(t, inventory.TemporaryUploads, 1)
+	temporaryUploads := collectFilesystemTemporaryUploads(t, ctx, adapter)
+	require.Len(t, temporaryUploads, 1)
 	adapter.removeTemporaryUpload = func(objectPath string) error {
 		require.NoError(t, os.Remove(objectPath))
 		return os.ErrNotExist
 	}
 
-	deleted, err := adapter.CleanupTemporaryUploads(ctx, inventory.TemporaryUploads, time.Now().Add(-24*time.Hour))
+	deleted, err := adapter.CleanupTemporaryUploads(ctx, temporaryUploads, time.Now().Add(-24*time.Hour))
 	require.NoError(t, err)
 	require.Zero(t, deleted)
 	require.NoFileExists(t, temporaryPath)
@@ -212,16 +232,9 @@ func TestFilesystemFolderMetadataIncludesNestedDirectoryActivity(t *testing.T) {
 	require.NoError(t, os.Chtimes(folderPath, old, old))
 	require.NoError(t, os.Chtimes(blocksPath, recent, recent))
 
-	contents, err := adapter.InspectFolder(ctx, "folder")
+	summary, err := adapter.InspectFolderSummary(ctx, "folder")
 	require.NoError(t, err)
-	require.True(t, contents.Exists)
-	require.WithinDuration(t, recent, contents.NewestModifiedAt, time.Second)
-
-	inventory, err := adapter.Inventory(ctx)
-	require.NoError(t, err)
-	folder, ok := inventory.Folder("folder")
-	require.True(t, ok)
-	require.WithinDuration(t, recent, folder.NewestModifiedAt, time.Second)
+	require.WithinDuration(t, recent, summary.NewestModifiedAt, time.Second)
 }
 
 func TestFilesystemFolderMetadataDistinguishesEmptyAndMissingFolders(t *testing.T) {
@@ -234,28 +247,33 @@ func TestFilesystemFolderMetadataDistinguishesEmptyAndMissingFolders(t *testing.
 	modifiedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
 	require.NoError(t, os.Chtimes(emptyPath, modifiedAt, modifiedAt))
 
-	empty, err := adapter.InspectFolder(ctx, "empty")
+	empty, err := adapter.InspectFolderSummary(ctx, "empty")
 	require.NoError(t, err)
 	require.True(t, empty.Exists)
 	require.Zero(t, empty.ObjectCount)
 	require.WithinDuration(t, modifiedAt, empty.NewestModifiedAt, time.Second)
 
-	missing, err := adapter.InspectFolder(ctx, "missing")
+	missing, err := adapter.InspectFolderSummary(ctx, "missing")
 	require.NoError(t, err)
 	require.False(t, missing.Exists)
 	require.True(t, missing.NewestModifiedAt.IsZero())
 
-	inventory, err := adapter.Inventory(ctx)
-	require.NoError(t, err)
-	emptyFolder, ok := inventory.Folder("empty")
-	require.True(t, ok)
-	require.WithinDuration(t, modifiedAt, emptyFolder.NewestModifiedAt, time.Second)
+	var folders []string
+	require.NoError(t, adapter.WalkTopLevelFolders(ctx, func(folderName string) error {
+		folders = append(folders, folderName)
+		return nil
+	}))
+	require.Equal(t, []string{"empty"}, folders)
 }
 
-func TestLogicalIndexedSizeRejectsZeroPartLegacyLocation(t *testing.T) {
-	_, err := (FolderContents{}).LogicalIndexedSize(0)
-	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrIndexedObjectMissing)
+func collectFilesystemTemporaryUploads(t *testing.T, ctx context.Context, adapter *FilesystemAdapter) []ObjectMetadata {
+	t.Helper()
+	var objects []ObjectMetadata
+	require.NoError(t, adapter.WalkTemporaryUploads(ctx, func(object ObjectMetadata) error {
+		objects = append(objects, object)
+		return nil
+	}))
+	return objects
 }
 
 func TestFilesystemAdapterRejectsPathTraversal(t *testing.T) {

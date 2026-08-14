@@ -37,8 +37,9 @@ type Adapter interface {
 	CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error
 	CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error)
 	InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error)
-	InspectFolder(ctx context.Context, folderName string) (FolderContents, error)
-	Inventory(ctx context.Context) (Inventory, error)
+	InspectFolderSummary(ctx context.Context, folderName string) (FolderSummary, error)
+	InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error)
+	WalkTopLevelFolders(ctx context.Context, visit func(folderName string) error) error
 	ObjectExists(ctx context.Context, objectName string) (bool, error)
 	DeleteFolder(ctx context.Context, folderName string) error
 	CountFilesInFolder(ctx context.Context, folderName string) (int, error)
@@ -63,6 +64,7 @@ type FilesystemUsageAdapter interface {
 }
 
 type TemporaryUploadCleaner interface {
+	WalkTemporaryUploads(ctx context.Context, visit func(ObjectMetadata) error) error
 	CleanupTemporaryUploads(ctx context.Context, candidates []ObjectMetadata, cutoff time.Time) (int, error)
 }
 

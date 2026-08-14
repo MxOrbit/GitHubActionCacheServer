@@ -5,6 +5,7 @@ import (
 	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 )
 
 type StorageDeletion struct {
@@ -28,5 +29,16 @@ func (StorageDeletion) Fields() []ent.Field {
 		field.Int("attemptCount").Default(0).NonNegative().StorageKey("attemptCount"),
 		field.Int64("lastAttemptedAt").Optional().Nillable().StorageKey("lastAttemptedAt"),
 		field.String("lastError").Optional().Nillable().StorageKey("lastError").SchemaType(originalTextColumnType),
+	}
+}
+
+func (StorageDeletion) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("folderName").
+			StorageKey("idx_storage_deletions_folder_name").
+			Annotations(
+				entsql.PrefixColumn("folderName", 191),
+				entsql.OpClassColumn("folderName", "text_pattern_ops"),
+			),
 	}
 }

@@ -64,6 +64,12 @@ func (StorageLocation) Edges() []ent.Edge {
 
 func (StorageLocation) Indexes() []ent.Index {
 	return []ent.Index{
+		index.Fields("folderName").
+			StorageKey("idx_storage_locations_folder_name").
+			Annotations(
+				entsql.PrefixColumn("folderName", 191),
+				entsql.OpClassColumn("folderName", "text_pattern_ops"),
+			),
 		index.Fields("recencyAt", "id").StorageKey("idx_storage_locations_recency"),
 	}
 }

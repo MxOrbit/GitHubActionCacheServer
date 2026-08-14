@@ -61,6 +61,12 @@ func (Upload) Indexes() []ent.Index {
 		index.Fields("key", "version").StorageKey("idx_uploads_key_version"),
 		index.Fields("scope").StorageKey("idx_uploads_scope"),
 		index.Fields("repoId").StorageKey("idx_uploads_repoId"),
+		index.Fields("folderName").
+			StorageKey("idx_uploads_folder_name").
+			Annotations(
+				entsql.PrefixColumn("folderName", 191),
+				entsql.OpClassColumn("folderName", "text_pattern_ops"),
+			),
 		index.Fields("tupleHash").Unique().StorageKey("idx_uploads_tuple_hash"),
 	}
 }

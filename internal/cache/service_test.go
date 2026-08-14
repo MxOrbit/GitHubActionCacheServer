@@ -222,6 +222,45 @@ func TestCompleteUploadKeepsLegacyUploadAfterTransientStorageError(t *testing.T)
 	require.NoError(t, err)
 }
 
+func TestCompleteUploadKeepsUploadAfterTransientIndexedInspectionError(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem, inspectIndexedErr: errInjectedStorageFailure}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadPart(ctx, upload.UploadID, bytes.NewBufferString("data")))
+
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.ErrorIs(t, err, errInjectedStorageFailure)
+	_, err = client.Upload.Get(ctx, upload.UploadID)
+	require.NoError(t, err)
+}
+
+func TestCompleteUploadRejectsAndDeletesOverLimitRestoredSession(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	scope := writableScope()
+	const uploadID = int64(42)
+	client.Upload.Create().
+		SetID(uploadID).
+		SetKey("restored-key").
+		SetVersion("version").
+		SetScope(scope.Scopes[0].Scope).
+		SetRepoId(scope.RepoID).
+		SetCreatedAt(time.Now().UnixMilli()).
+		SetFinishedPartUploadCount(storage.MaxIndexedObjects + 1).
+		SetCommittedPartCount(storage.MaxIndexedObjects + 1).
+		SetFolderName("restored-upload").
+		SaveX(ctx)
+
+	_, err := service.CompleteUpload(ctx, "restored-key", "version", scope)
+	require.ErrorIs(t, err, ErrPartCountMismatch)
+	_, err = client.Upload.Get(ctx, uploadID)
+	require.True(t, ent.IsNotFound(err))
+}
+
 func TestCompleteUploadRejectsBlocksWithoutCommittedBlockList(t *testing.T) {
 	ctx, client, filesystem := newTestServiceDeps(t)
 	service := NewService(Options{DB: client, Storage: filesystem})
@@ -1287,6 +1326,7 @@ type storageCallTrackingAdapter struct {
 	downloadCalls     int
 	objectExistsCalls []string
 	countErr          error
+	inspectIndexedErr error
 }
 
 func (s *storageCallTrackingAdapter) CountFilesInFolder(ctx context.Context, folderName string) (int, error) {
@@ -1300,6 +1340,13 @@ func (s *storageCallTrackingAdapter) CountFilesInFolder(ctx context.Context, fol
 func (s *storageCallTrackingAdapter) CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error) {
 	s.downloadCalls++
 	return s.Adapter.CreateDownloadStream(ctx, objectName)
+}
+
+func (s *storageCallTrackingAdapter) InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error) {
+	if s.inspectIndexedErr != nil {
+		return 0, s.inspectIndexedErr
+	}
+	return s.Adapter.InspectIndexedFolder(ctx, folderName, expectedObjects)
 }
 
 func (s *storageCallTrackingAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {

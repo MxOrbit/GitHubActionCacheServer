@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -299,7 +300,7 @@ func TestS3AdapterObjectExistsUsesHeadAndClassifiesErrors(t *testing.T) {
 	}
 }
 
-func TestS3SharedListingRejectsTruncatedPageWithoutTokenBeforeConsumersAct(t *testing.T) {
+func TestS3SharedListingRejectsTruncatedPageWithoutToken(t *testing.T) {
 	consumerListCalls := 0
 	deleteCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -323,20 +324,16 @@ func TestS3SharedListingRejectsTruncatedPageWithoutTokenBeforeConsumersAct(t *te
 	adapter, err := newTestS3Adapter(t, server.URL)
 	require.NoError(t, err)
 
-	_, err = adapter.Inventory(context.Background())
+	_, err = adapter.InspectFolderSummary(context.Background(), "folder")
 	require.ErrorContains(t, err, "truncated response has no continuation token")
 	_, err = adapter.CountFilesInFolder(context.Background(), "folder/parts")
 	require.ErrorContains(t, err, "truncated response has no continuation token")
-	err = adapter.DeleteFolder(context.Background(), "folder")
-	require.ErrorContains(t, err, "truncated response has no continuation token")
-	require.Equal(t, 3, consumerListCalls)
+	require.Equal(t, 2, consumerListCalls)
 	require.Zero(t, deleteCalls)
 }
 
-func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
+func TestS3SharedListingPaginatesInspectionAndCounting(t *testing.T) {
 	continuationRequests := 0
-	deleteCalls := 0
-	var deleteBody string
 	const basePrefix = "gh-actions-cache/"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
@@ -347,6 +344,10 @@ func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 			}
 			prefix := r.URL.Query().Get("prefix")
 			delimiter := r.URL.Query().Get("delimiter")
+			if prefix == basePrefix && delimiter == "/" {
+				_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>%sfolder/</Prefix></CommonPrefixes></ListBucketResult>`, basePrefix)
+				return
+			}
 			if !validPaginationTestPrefix(prefix, delimiter, basePrefix) {
 				http.Error(w, "unexpected listing scope", http.StatusBadRequest)
 				return
@@ -360,18 +361,6 @@ func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>%s</Key><LastModified>2026-07-29T00:00:00Z</LastModified><Size>3</Size></Contents></ListBucketResult>`, key)
 			return
 		}
-		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
-			deleteCalls++
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			deleteBody = string(body)
-			w.Header().Set("Content-Type", "application/xml")
-			_, _ = fmt.Fprint(w, `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`)
-			return
-		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
@@ -379,26 +368,316 @@ func TestS3SharedListingPaginatesInventoryCountingAndDeletion(t *testing.T) {
 	require.NoError(t, err)
 	ctx := context.Background()
 
-	inventory, err := adapter.Inventory(ctx)
-	require.NoError(t, err)
-	folder, ok := inventory.Folder("folder")
-	require.True(t, ok)
-	size, err := folder.LogicalPartsSize(2)
+	size, err := adapter.InspectIndexedFolder(ctx, "folder/parts", 2)
 	require.NoError(t, err)
 	require.Equal(t, int64(7), size)
+	var folders []string
+	require.NoError(t, adapter.WalkTopLevelFolders(ctx, func(folderName string) error {
+		folders = append(folders, folderName)
+		return nil
+	}))
+	require.Equal(t, []string{"folder"}, folders)
 
 	count, err := adapter.CountFilesInFolder(ctx, "folder/parts")
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
-	require.NoError(t, adapter.DeleteFolder(ctx, "folder"))
-	require.Equal(t, 3, continuationRequests)
-	require.Equal(t, 1, deleteCalls)
-	require.Contains(t, deleteBody, `<Key>gh-actions-cache/folder/parts/0</Key>`)
-	require.Contains(t, deleteBody, `<Key>gh-actions-cache/folder/parts/1</Key>`)
+	require.Equal(t, 2, continuationRequests)
+}
+
+func TestS3WalkTopLevelFoldersStreamsUnorderedPrefixesAcrossPages(t *testing.T) {
+	const basePrefix = "gh-actions-cache/"
+	continuationRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("list-type") != "2" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("max-keys") == "1" {
+			_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+			return
+		}
+		if r.URL.Query().Get("prefix") != basePrefix || r.URL.Query().Get("delimiter") != "/" {
+			http.Error(w, "unexpected listing scope", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("continuation-token") == "next" {
+			continuationRequests++
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>%sb/</Prefix></CommonPrefixes></ListBucketResult>`, basePrefix)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><CommonPrefixes><Prefix>%sz/</Prefix></CommonPrefixes><CommonPrefixes><Prefix>%sa/</Prefix></CommonPrefixes></ListBucketResult>`, basePrefix, basePrefix)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	var folders []string
+	require.NoError(t, adapter.WalkTopLevelFolders(context.Background(), func(folderName string) error {
+		folders = append(folders, folderName)
+		return nil
+	}))
+	require.Equal(t, []string{"z", "a", "b"}, folders)
+	require.Equal(t, 1, continuationRequests)
+}
+
+func TestS3DeleteFolderDeletesBoundedFirstPagesUntilEmpty(t *testing.T) {
+	const objectCount = s3DeleteBatchSize + 1
+	remaining := make([]string, 0, objectCount)
+	for index := 0; index < objectCount; index++ {
+		remaining = append(remaining, fmt.Sprintf("gh-actions-cache/folder/object-%04d", index))
+	}
+	listCalls := 0
+	deleteCalls := 0
+	maxDeleteBatch := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			listCalls++
+			pageSize := min(len(remaining), s3DeleteBatchSize)
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>%t</IsTruncated>`, len(remaining) > pageSize)
+			for _, key := range remaining[:pageSize] {
+				_, _ = fmt.Fprintf(w, `<Contents><Key>%s</Key></Contents>`, key)
+			}
+			_, _ = fmt.Fprint(w, `</ListBucketResult>`)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+			var request struct {
+				Objects []struct {
+					Key string `xml:"Key"`
+				} `xml:"Object"`
+			}
+			if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			maxDeleteBatch = max(maxDeleteBatch, len(request.Objects))
+			deleted := make(map[string]struct{}, len(request.Objects))
+			for _, object := range request.Objects {
+				deleted[object.Key] = struct{}{}
+			}
+			kept := remaining[:0]
+			for _, key := range remaining {
+				if _, ok := deleted[key]; !ok {
+					kept = append(kept, key)
+				}
+			}
+			remaining = kept
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<DeleteResult/>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	require.NoError(t, adapter.DeleteFolder(context.Background(), "folder"))
+	require.Empty(t, remaining)
+	require.Equal(t, 3, listCalls)
+	require.Equal(t, 2, deleteCalls)
+	require.Equal(t, s3DeleteBatchSize, maxDeleteBatch)
+}
+
+func TestS3DeleteFolderStopsWhenSuccessfulDeletesMakeNoProgress(t *testing.T) {
+	const key = "gh-actions-cache/folder/object"
+	listCalls := 0
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			listCalls++
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>%s</Key></Contents></ListBucketResult>`, key)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<DeleteResult/>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	err = adapter.DeleteFolder(context.Background(), "folder")
+	require.ErrorContains(t, err, "listing made no progress")
+	require.Equal(t, 4, listCalls)
+	require.Equal(t, 3, deleteCalls)
+}
+
+func TestS3WalkTopLevelFoldersRejectsMultiTokenCycle(t *testing.T) {
+	consumerListCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("list-type") != "2" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("max-keys") == "1" {
+			_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+			return
+		}
+		consumerListCalls++
+		nextToken := cyclicTestToken(r.URL.Query().Get("continuation-token"))
+		_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>%s</NextContinuationToken><CommonPrefixes><Prefix>gh-actions-cache/folder/</Prefix></CommonPrefixes></ListBucketResult>`, nextToken)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	err = adapter.WalkTopLevelFolders(context.Background(), func(string) error { return nil })
+	require.ErrorContains(t, err, "cyclic continuation token")
+	require.Equal(t, 4, consumerListCalls)
+}
+
+func TestS3SharedListingRejectsMultiTokenCycle(t *testing.T) {
+	consumerListCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("list-type") != "2" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("max-keys") == "1" {
+			_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+			return
+		}
+		consumerListCalls++
+		nextToken := cyclicTestToken(r.URL.Query().Get("continuation-token"))
+		key := r.URL.Query().Get("prefix") + strconv.Itoa(consumerListCalls)
+		_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>%s</NextContinuationToken><Contents><Key>%s</Key><LastModified>2026-07-29T00:00:00Z</LastModified><Size>1</Size></Contents></ListBucketResult>`, nextToken, key)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	_, err = adapter.InspectFolderSummary(context.Background(), "folder")
+	require.ErrorContains(t, err, "cyclic continuation token")
+	require.Equal(t, 4, consumerListCalls)
+}
+
+func TestS3DeleteFolderRejectsEmptyTruncatedPage(t *testing.T) {
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>opaque</NextContinuationToken></ListBucketResult>`)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	err = adapter.DeleteFolder(context.Background(), "folder")
+	require.ErrorContains(t, err, "truncated response contains no objects")
+	require.Zero(t, deleteCalls)
+}
+
+func TestS3DeleteFolderRejectsAlternatingPageCycle(t *testing.T) {
+	listCalls := 0
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			listCalls++
+			key := "gh-actions-cache/folder/a"
+			if listCalls%2 == 0 {
+				key = "gh-actions-cache/folder/b"
+			}
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>%s</Key></Contents></ListBucketResult>`, key)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<DeleteResult/>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	err = adapter.DeleteFolder(context.Background(), "folder")
+	require.ErrorContains(t, err, "listing entered a page cycle")
+	require.Equal(t, 4, listCalls)
+	require.Equal(t, 3, deleteCalls)
+}
+
+func TestS3DeleteByPrefixStopsAtHardPageLimit(t *testing.T) {
+	listCalls := 0
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if r.URL.Query().Get("max-keys") == "1" {
+				_, _ = fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`)
+				return
+			}
+			listCalls++
+			_, _ = fmt.Fprintf(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>gh-actions-cache/folder/object-%d</Key></Contents></ListBucketResult>`, listCalls)
+			return
+		}
+		if r.Method == http.MethodPost && hasQueryKey(r, "delete") {
+			deleteCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<DeleteResult/>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	err = adapter.deleteByPrefixWithPageLimit(context.Background(), "gh-actions-cache/folder/", 2)
+	require.ErrorContains(t, err, "reached work limit after 2 pages")
+	require.Equal(t, 2, listCalls)
+	require.Equal(t, 2, deleteCalls)
+}
+
+func cyclicTestToken(current string) string {
+	switch current {
+	case "A":
+		return "B"
+	case "B":
+		return "A"
+	default:
+		return "A"
+	}
 }
 
 func validPaginationTestPrefix(prefix, delimiter, basePrefix string) bool {
 	return prefix == basePrefix && delimiter == "" ||
+		prefix == basePrefix+"folder/parts/" && delimiter == "" ||
 		prefix == basePrefix+"folder/parts/" && delimiter == "/" ||
 		prefix == basePrefix+"folder/" && delimiter == ""
 }

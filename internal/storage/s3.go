@@ -2,10 +2,13 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,7 +25,43 @@ const (
 	s3MinimumComposePartSize int64 = 5 * 1024 * 1024
 	s3MaximumComposePartSize int64 = 5 * 1024 * 1024 * 1024
 	s3MaximumComposeParts          = 10_000
+	s3DeleteBatchSize              = 1000
+	s3DeleteNoProgressLimit        = 3
+	// At most one million objects per outbox attempt. Deletion progress is
+	// durable, so an over-budget task safely resumes on its next retry.
+	s3DeleteMaxPagesPerCall = 1000
 )
+
+type cycleDetector[T comparable] struct {
+	checkpoint  T
+	power       uint64
+	distance    uint64
+	initialized bool
+}
+
+// Observe implements Brent's cycle detection with constant memory. It reports
+// true once the observed deterministic sequence enters a cycle of any length.
+func (d *cycleDetector[T]) Observe(value T) bool {
+	if !d.initialized {
+		d.checkpoint = value
+		d.power = 1
+		d.initialized = true
+		return false
+	}
+
+	d.distance++
+	if value == d.checkpoint {
+		return true
+	}
+	if d.distance == d.power {
+		d.checkpoint = value
+		if d.power <= ^uint64(0)/2 {
+			d.power *= 2
+		}
+		d.distance = 0
+	}
+	return false
+}
 
 type s3ComposePart struct {
 	sourceObjectName string
@@ -333,42 +372,86 @@ func (a *S3Adapter) InspectObject(ctx context.Context, objectName string) (Objec
 	}, nil
 }
 
-func (a *S3Adapter) InspectFolder(ctx context.Context, folderName string) (FolderContents, error) {
+func (a *S3Adapter) InspectFolderSummary(ctx context.Context, folderName string) (FolderSummary, error) {
 	prefix := a.key(folderName) + "/"
-	objects := make([]ObjectMetadata, 0)
+	summary := FolderSummary{FolderName: folderName}
 	err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
 		object.Name = strings.TrimPrefix(object.Name, prefix)
 		if object.Name == "" {
 			object.Name = "."
 		}
-		objects = append(objects, object)
-		return nil
+		return addFolderSummaryObject(&summary, object)
 	})
 	if err != nil {
-		return FolderContents{}, err
+		return FolderSummary{}, err
 	}
-	contents, err := newFolderContents(folderName, objects)
-	if err != nil {
-		return FolderContents{}, err
-	}
-	contents.Exists = len(objects) > 0
-	return contents, nil
+	summary.Exists = summary.ObjectCount > 0
+	return summary, nil
 }
 
-func (a *S3Adapter) Inventory(ctx context.Context) (Inventory, error) {
-	prefix := a.clearPrefix()
-	builder := newInventoryBuilder()
-	err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
-		object.Name = strings.TrimPrefix(object.Name, prefix)
-		if object.Name == "" {
-			object.Name = "."
-		}
-		return builder.addObject(object)
+func (a *S3Adapter) InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error) {
+	accumulator, err := newIndexedFolderAccumulator(expectedObjects)
+	if err != nil {
+		return 0, err
+	}
+	prefix := a.key(folderName) + "/"
+	err = a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
+		relativeName := strings.TrimPrefix(object.Name, prefix)
+		return accumulator.add(relativeName, object.SizeBytes)
 	})
 	if err != nil {
-		return Inventory{}, err
+		return 0, err
 	}
-	return builder.build(), nil
+	return accumulator.result()
+}
+
+func (a *S3Adapter) WalkTopLevelFolders(ctx context.Context, visit func(folderName string) error) error {
+	prefix := a.clearPrefix()
+	var continuationToken *string
+	tokenCycles := cycleDetector[string]{}
+	for {
+		page, err := a.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(a.bucket),
+			Prefix:            aws.String(prefix),
+			Delimiter:         aws.String("/"),
+			ContinuationToken: continuationToken,
+			MaxKeys:           aws.Int32(s3DeleteBatchSize),
+		})
+		if err != nil {
+			return fmt.Errorf("list top-level s3 folders: %w", err)
+		}
+		if page == nil {
+			return fmt.Errorf("list top-level s3 folders: empty response")
+		}
+		for _, commonPrefix := range page.CommonPrefixes {
+			if commonPrefix.Prefix == nil {
+				return fmt.Errorf("list top-level s3 folders: empty common prefix")
+			}
+			folderPrefix := aws.ToString(commonPrefix.Prefix)
+			if !strings.HasPrefix(folderPrefix, prefix) || !strings.HasSuffix(folderPrefix, "/") {
+				return fmt.Errorf("list top-level s3 folders: prefix %q is outside storage prefix %q", folderPrefix, prefix)
+			}
+			folderName := strings.TrimSuffix(strings.TrimPrefix(folderPrefix, prefix), "/")
+			if folderName == "" || strings.Contains(folderName, "/") {
+				return fmt.Errorf("list top-level s3 folders: invalid folder prefix %q", folderPrefix)
+			}
+			if err := visit(folderName); err != nil {
+				return err
+			}
+		}
+
+		if !aws.ToBool(page.IsTruncated) {
+			return nil
+		}
+		nextToken := aws.ToString(page.NextContinuationToken)
+		if nextToken == "" {
+			return fmt.Errorf("list top-level s3 folders: truncated response has no continuation token")
+		}
+		if tokenCycles.Observe(nextToken) {
+			return fmt.Errorf("list top-level s3 folders: cyclic continuation token %q", nextToken)
+		}
+		continuationToken = aws.String(nextToken)
+	}
 }
 
 func (a *S3Adapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
@@ -420,18 +503,61 @@ func (a *S3Adapter) CreateDownloadURL(ctx context.Context, objectName string, tt
 }
 
 func (a *S3Adapter) deleteByPrefix(ctx context.Context, prefix string) error {
-	objectKeys := make([]string, 0)
-	if err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
-		objectKeys = append(objectKeys, object.Name)
-		return nil
-	}); err != nil {
-		return err
-	}
+	return a.deleteByPrefixWithPageLimit(ctx, prefix, s3DeleteMaxPagesPerCall)
+}
 
-	for start := 0; start < len(objectKeys); start += 1000 {
-		end := min(start+1000, len(objectKeys))
-		objects := make([]types.ObjectIdentifier, 0, end-start)
-		for _, key := range objectKeys[start:end] {
+func (a *S3Adapter) deleteByPrefixWithPageLimit(ctx context.Context, prefix string, maxPages int) error {
+	if maxPages < 1 {
+		return fmt.Errorf("delete s3 objects: page limit must be positive")
+	}
+	var previousFingerprint [sha256.Size]byte
+	hasPreviousFingerprint := false
+	pageCycles := cycleDetector[[sha256.Size]byte]{}
+	noProgressCount := 0
+	for pageNumber := 1; pageNumber <= maxPages; pageNumber++ {
+		page, err := a.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:  aws.String(a.bucket),
+			Prefix:  aws.String(prefix),
+			MaxKeys: aws.Int32(s3DeleteBatchSize),
+		})
+		if err != nil {
+			return fmt.Errorf("list s3 objects for deletion: %w", err)
+		}
+		if page == nil {
+			return fmt.Errorf("list s3 objects for deletion: empty response")
+		}
+		objectKeys := make([]string, 0, len(page.Contents))
+		for _, object := range page.Contents {
+			key := aws.ToString(object.Key)
+			if key == "" || !strings.HasPrefix(key, prefix) {
+				return fmt.Errorf("list s3 objects for deletion: invalid key %q outside prefix %q", key, prefix)
+			}
+			objectKeys = append(objectKeys, key)
+		}
+		if len(objectKeys) == 0 {
+			if aws.ToBool(page.IsTruncated) {
+				return fmt.Errorf("list s3 objects for deletion: truncated response contains no objects")
+			}
+			return nil
+		}
+
+		fingerprint := s3KeyPageFingerprint(objectKeys)
+		if hasPreviousFingerprint && fingerprint == previousFingerprint {
+			noProgressCount++
+			if noProgressCount == s3DeleteNoProgressLimit {
+				return fmt.Errorf("delete s3 objects: listing made no progress after %d attempts", noProgressCount)
+			}
+		} else {
+			if pageCycles.Observe(fingerprint) {
+				return fmt.Errorf("delete s3 objects: listing entered a page cycle")
+			}
+			previousFingerprint = fingerprint
+			hasPreviousFingerprint = true
+			noProgressCount = 0
+		}
+
+		objects := make([]types.ObjectIdentifier, 0, len(objectKeys))
+		for _, key := range objectKeys {
 			objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
 		}
 		output, err := a.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
@@ -444,17 +570,34 @@ func (a *S3Adapter) deleteByPrefix(ctx context.Context, prefix string) error {
 		if err != nil {
 			return fmt.Errorf("delete s3 objects: %w", err)
 		}
+		if output == nil {
+			return fmt.Errorf("delete s3 objects: empty response")
+		}
 		if err := s3DeleteErrorsError(output.Errors); err != nil {
 			return err
 		}
 	}
+	return fmt.Errorf("delete s3 objects: reached work limit after %d pages; retry required", maxPages)
+}
 
-	return nil
+func s3KeyPageFingerprint(objectKeys []string) [sha256.Size]byte {
+	sortedKeys := append([]string(nil), objectKeys...)
+	sort.Strings(sortedKeys)
+	hash := sha256.New()
+	var length [8]byte
+	for _, key := range sortedKeys {
+		binary.BigEndian.PutUint64(length[:], uint64(len(key)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(key))
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], hash.Sum(nil))
+	return fingerprint
 }
 
 func (a *S3Adapter) walkObjects(ctx context.Context, prefix, delimiter string, visit func(ObjectMetadata) error) error {
 	var continuationToken *string
-	seenTokens := make(map[string]struct{})
+	tokenCycles := cycleDetector[string]{}
 	for {
 		input := &s3.ListObjectsV2Input{
 			Bucket:            aws.String(a.bucket),
@@ -501,10 +644,9 @@ func (a *S3Adapter) walkObjects(ctx context.Context, prefix, delimiter string, v
 		if nextToken == "" {
 			return fmt.Errorf("list s3 objects: truncated response has no continuation token")
 		}
-		if _, duplicate := seenTokens[nextToken]; duplicate {
-			return fmt.Errorf("list s3 objects: repeated continuation token %q", nextToken)
+		if tokenCycles.Observe(nextToken) {
+			return fmt.Errorf("list s3 objects: cyclic continuation token %q", nextToken)
 		}
-		seenTokens[nextToken] = struct{}{}
 		continuationToken = aws.String(nextToken)
 	}
 }

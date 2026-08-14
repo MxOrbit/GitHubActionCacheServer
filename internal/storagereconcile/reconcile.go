@@ -9,6 +9,7 @@ import (
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/cacheentry"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/predicate"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagelocation"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
@@ -16,9 +17,11 @@ import (
 )
 
 const (
-	maxLocationRechecks = 10
-	initialRetryDelay   = time.Minute
-	maximumRetryDelay   = time.Hour
+	maxLocationRechecks     = 10
+	reconciliationPageSize  = 100
+	maxReconciliationErrors = 10
+	initialRetryDelay       = time.Minute
+	maximumRetryDelay       = time.Hour
 )
 
 var ErrPending = errors.New("storage size reconciliation is waiting for concurrent lifecycle work")
@@ -31,12 +34,10 @@ type Options struct {
 }
 
 type Result struct {
-	InventoryObjects int64
-	InventoryFolders int
-	Candidates       int
-	Updated          int
-	Purged           int
-	Deferred         int
+	Candidates int
+	Updated    int
+	Purged     int
+	Deferred   int
 }
 
 type locationOutcome string
@@ -54,6 +55,37 @@ type sizeResolution struct {
 	deferred  bool
 }
 
+type boundedErrorCollector struct {
+	limit  int
+	count  int
+	errors []error
+}
+
+func newBoundedErrorCollector(limit int) *boundedErrorCollector {
+	return &boundedErrorCollector{limit: limit, errors: make([]error, 0, limit)}
+}
+
+func (c *boundedErrorCollector) Add(err error) {
+	if err == nil {
+		return
+	}
+	c.count++
+	if len(c.errors) < c.limit {
+		c.errors = append(c.errors, err)
+	}
+}
+
+func (c *boundedErrorCollector) Err() error {
+	if c.count == 0 {
+		return nil
+	}
+	errorsToJoin := append([]error(nil), c.errors...)
+	if omitted := c.count - len(c.errors); omitted > 0 {
+		errorsToJoin = append(errorsToJoin, fmt.Errorf("%d additional reconciliation errors omitted", omitted))
+	}
+	return errors.Join(errorsToJoin...)
+}
+
 func Run(ctx context.Context, options Options, ready chan<- struct{}) {
 	logger := reconciliationLogger(options.Logger)
 	for attempt := 1; ; attempt++ {
@@ -65,8 +97,6 @@ func Run(ctx context.Context, options Options, ready chan<- struct{}) {
 			}
 			logger.Info().
 				Int("attempt", attempt).
-				Int64("inventory_objects", result.InventoryObjects).
-				Int("inventory_folders", result.InventoryFolders).
 				Int("candidates", result.Candidates).
 				Int("updated", result.Updated).
 				Int("purged", result.Purged).
@@ -110,49 +140,53 @@ func Reconcile(ctx context.Context, options Options) (Result, error) {
 		return Result{}, fmt.Errorf("storage size reconciliation dependencies are required")
 	}
 
-	locations, err := options.DB.StorageLocation.Query().
-		Where(
+	result := Result{}
+	cursor := ""
+	reconcileErrors := newBoundedErrorCollector(maxReconciliationErrors)
+	for {
+		predicates := []predicate.StorageLocation{
 			storagelocation.SizeBytesIsNil(),
 			storagelocation.DeletionRequestedAtIsNil(),
-		).
-		All(ctx)
-	if err != nil {
-		return Result{}, fmt.Errorf("query storage locations missing sizes: %w", err)
-	}
-	result := Result{Candidates: len(locations)}
-	if len(locations) == 0 {
-		return result, nil
-	}
-
-	inventory, err := options.Storage.Inventory(ctx)
-	if err != nil {
-		return result, fmt.Errorf("inventory storage for size reconciliation: %w", err)
-	}
-	result.InventoryObjects = inventory.ObjectCount
-	result.InventoryFolders = len(inventory.Folders)
-
-	var reconcileErrors []error
-	for _, candidate := range locations {
-		outcome, err := reconcileLocation(ctx, options, inventory, candidate.ID)
+		}
+		if cursor != "" {
+			predicates = append(predicates, storagelocation.IDGT(cursor))
+		}
+		locations, err := options.DB.StorageLocation.Query().
+			Where(predicates...).
+			Order(storagelocation.ByID()).
+			Limit(reconciliationPageSize).
+			All(ctx)
 		if err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile storage location %s: %w", candidate.ID, err))
-			continue
+			return result, fmt.Errorf("query storage locations missing sizes: %w", err)
 		}
-		switch outcome {
-		case locationResolved:
-			continue
-		case locationUpdated:
-			result.Updated++
-		case locationPurged:
-			result.Purged++
-		case locationDeferred:
-			result.Deferred++
-		default:
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile storage location %s: unknown outcome %q", candidate.ID, outcome))
+		if len(locations) == 0 {
+			break
+		}
+
+		for _, candidate := range locations {
+			cursor = candidate.ID
+			result.Candidates++
+			outcome, err := reconcileLocation(ctx, options, candidate.ID)
+			if err != nil {
+				reconcileErrors.Add(fmt.Errorf("reconcile storage location %s: %w", candidate.ID, err))
+				continue
+			}
+			switch outcome {
+			case locationResolved:
+				continue
+			case locationUpdated:
+				result.Updated++
+			case locationPurged:
+				result.Purged++
+			case locationDeferred:
+				result.Deferred++
+			default:
+				reconcileErrors.Add(fmt.Errorf("reconcile storage location %s: unknown outcome %q", candidate.ID, outcome))
+			}
 		}
 	}
-	if len(reconcileErrors) > 0 {
-		return result, errors.Join(reconcileErrors...)
+	if err := reconcileErrors.Err(); err != nil {
+		return result, err
 	}
 	if result.Deferred > 0 {
 		return result, fmt.Errorf("%w: %d locations", ErrPending, result.Deferred)
@@ -173,7 +207,7 @@ func Reconcile(ctx context.Context, options Options) (Result, error) {
 	return result, nil
 }
 
-func reconcileLocation(ctx context.Context, options Options, inventory storage.Inventory, locationID string) (locationOutcome, error) {
+func reconcileLocation(ctx context.Context, options Options, locationID string) (locationOutcome, error) {
 	purged := false
 	for range maxLocationRechecks {
 		location, err := options.DB.StorageLocation.Get(ctx, locationID)
@@ -196,7 +230,7 @@ func reconcileLocation(ctx context.Context, options Options, inventory storage.I
 			return locationPurged, nil
 		}
 
-		resolution, err := resolveLocationSize(ctx, options, inventory, location)
+		resolution, err := resolveLocationSize(ctx, options, location)
 		if err != nil {
 			return locationDeferred, err
 		}
@@ -236,17 +270,12 @@ func reconcileLocation(ctx context.Context, options Options, inventory storage.I
 	return locationDeferred, nil
 }
 
-func resolveLocationSize(ctx context.Context, options Options, inventory storage.Inventory, location *ent.StorageLocation) (sizeResolution, error) {
+func resolveLocationSize(ctx context.Context, options Options, location *ent.StorageLocation) (sizeResolution, error) {
 	if location.PartCount < 1 {
 		return sizeResolution{dangling: true}, nil
 	}
-	folder, folderFound := inventory.Folder(location.FolderName)
 
 	if location.MergedAt != nil {
-		if folderFound && folder.Merged != nil {
-			size := folder.Merged.SizeBytes
-			return sizeResolution{sizeBytes: &size}, nil
-		}
 		metadata, err := options.Storage.InspectObject(ctx, storage.MergedObject(location.FolderName))
 		if err == nil {
 			size := metadata.SizeBytes
@@ -263,20 +292,18 @@ func resolveLocationSize(ctx context.Context, options Options, inventory storage
 	if location.PartsDeletedAt != nil {
 		return sizeResolution{dangling: true}, nil
 	}
-	if folderFound {
-		if size, err := folder.LogicalPartsSize(location.PartCount); err == nil {
-			return sizeResolution{sizeBytes: &size}, nil
-		}
-	}
 
-	contents, err := options.Storage.InspectFolder(ctx, storage.PartsFolder(location.FolderName))
-	if err != nil {
-		return sizeResolution{}, fmt.Errorf("reinspect active parts: %w", err)
-	}
-	for range location.PartCount + 1 {
-		size, sizeErr := contents.LogicalIndexedSize(location.PartCount)
+	for range maxLocationRechecks {
+		size, sizeErr := options.Storage.InspectIndexedFolder(ctx, storage.PartsFolder(location.FolderName), location.PartCount)
 		if sizeErr == nil {
 			return sizeResolution{sizeBytes: &size}, nil
+		}
+		if errors.Is(sizeErr, storage.ErrIndexedObjectLimitExceeded) {
+			// Current uploads cannot create this representation, and measuring it
+			// exactly would violate the bounded-memory contract. Treat restored or
+			// legacy over-limit rows as terminally corrupt so one row cannot block
+			// global reconciliation readiness forever.
+			return sizeResolution{dangling: true}, nil
 		}
 		var missing storage.IndexedObjectMissingError
 		if !errors.As(sizeErr, &missing) {
@@ -284,7 +311,7 @@ func resolveLocationSize(ctx context.Context, options Options, inventory storage
 		}
 
 		objectName := storage.PartsFolder(location.FolderName) + "/" + strconv.Itoa(missing.Index)
-		metadata, inspectErr := options.Storage.InspectObject(ctx, objectName)
+		_, inspectErr := options.Storage.InspectObject(ctx, objectName)
 		if inspectErr != nil {
 			if errors.Is(inspectErr, storage.ErrObjectNotFound) {
 				if options.Lifecycle.MaterializationActive(location) {
@@ -294,10 +321,10 @@ func resolveLocationSize(ctx context.Context, options Options, inventory storage
 			}
 			return sizeResolution{}, fmt.Errorf("confirm missing active part %d: %w", missing.Index, inspectErr)
 		}
-		metadata.Name = strconv.Itoa(missing.Index)
-		contents.Objects = append(contents.Objects, metadata)
+		// The listing was incomplete while a point lookup found the object.
+		// Retry a fresh bounded listing; persistent disagreement fails closed.
 	}
-	return sizeResolution{}, fmt.Errorf("measure active parts: exceeded targeted reinspection bound")
+	return sizeResolution{}, fmt.Errorf("measure active parts: listing disagreed with point inspection after %d attempts", maxLocationRechecks)
 }
 
 func purgeDanglingLocation(ctx context.Context, options Options, location *ent.StorageLocation) (bool, error) {

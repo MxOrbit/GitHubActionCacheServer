@@ -43,7 +43,7 @@ const (
 )
 
 // MaxBlockListEntries is the Azure block blob protocol limit.
-const MaxBlockListEntries = 50_000
+const MaxBlockListEntries = storage.MaxIndexedObjects
 
 var (
 	ErrNoWriteScope        = errors.New("no scope with write permission found")
@@ -452,13 +452,17 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 				currentUpload.FinishedPartUploadCount,
 			)
 		}
-		parts, inspectErr := s.storage.InspectFolder(activityCtx, partsFolderName(currentUpload.FolderName))
-		if inspectErr != nil {
-			return fmt.Errorf("inspect finalized cache parts: %w", inspectErr)
-		}
-		sizeBytes, validationErr = parts.LogicalIndexedSize(partCount)
+		sizeBytes, validationErr = s.storage.InspectIndexedFolder(
+			activityCtx,
+			partsFolderName(currentUpload.FolderName),
+			partCount,
+		)
 		if validationErr != nil {
-			return fmt.Errorf("%w: %v", ErrPartCountMismatch, validationErr)
+			if errors.Is(validationErr, storage.ErrIndexedObjectMissing) ||
+				errors.Is(validationErr, storage.ErrIndexedObjectLimitExceeded) {
+				return fmt.Errorf("%w: %v", ErrPartCountMismatch, validationErr)
+			}
+			return fmt.Errorf("inspect finalized cache parts: %w", validationErr)
 		}
 		return nil
 	})
