@@ -249,6 +249,82 @@ func TestS3AdapterCreateDownloadStreamDoesNotTreatMissingBucketAsObjectNotFound(
 	require.Contains(t, err.Error(), "get s3 object")
 }
 
+func TestS3AdapterCreatesAndValidatesExactRangedStream(t *testing.T) {
+	var receivedRange string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/cache-bucket" && r.URL.Query().Get("list-type") == "2":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<ListBucketResult><Name>cache-bucket</Name><KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`)
+		case r.Method == http.MethodGet && r.URL.Path == "/cache-bucket/gh-actions-cache/folder/object":
+			receivedRange = r.Header.Get("Range")
+			w.Header().Set("Content-Length", "3")
+			w.Header().Set("Content-Range", "bytes 2-4/6")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = fmt.Fprint(w, "jec")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	stream, err := adapter.CreateRangedDownloadStream(context.Background(), "folder/object", 2, 3)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.Equal(t, "jec", string(body))
+	require.Equal(t, "bytes=2-4", receivedRange)
+	require.NoError(t, stream.Close())
+}
+
+func TestS3AdapterRejectsBackendThatIgnoresRange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/cache-bucket" && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<ListBucketResult><Name>cache-bucket</Name><KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`)
+			return
+		}
+		w.Header().Set("Content-Length", "6")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "object")
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	stream, err := adapter.CreateRangedDownloadStream(context.Background(), "folder/object", 2, 3)
+	require.Nil(t, stream)
+	require.ErrorContains(t, err, "does not match requested count")
+}
+
+func TestS3AdapterRejectsNonzeroRangeWithoutContentRange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/cache-bucket" && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<ListBucketResult><Name>cache-bucket</Name><KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`)
+			return
+		}
+		w.Header().Set("Content-Length", "3")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "obj")
+	}))
+	defer server.Close()
+	adapter, err := newTestS3Adapter(t, server.URL)
+	require.NoError(t, err)
+
+	stream, err := adapter.CreateRangedDownloadStream(context.Background(), "folder/object", 2, 3)
+	require.Nil(t, stream)
+	require.ErrorContains(t, err, "invalid content range")
+}
+
 func TestS3AdapterObjectExistsUsesHeadAndClassifiesErrors(t *testing.T) {
 	ctx := context.Background()
 	t.Run("exists", func(t *testing.T) {
@@ -371,6 +447,9 @@ func TestS3SharedListingPaginatesInspectionAndCounting(t *testing.T) {
 	size, err := adapter.InspectIndexedFolder(ctx, "folder/parts", 2)
 	require.NoError(t, err)
 	require.Equal(t, int64(7), size)
+	sizes, err := adapter.InspectIndexedFolderSizes(ctx, "folder/parts", 2)
+	require.NoError(t, err)
+	require.Equal(t, []int64{3, 4}, sizes)
 	var folders []string
 	require.NoError(t, adapter.WalkTopLevelFolders(ctx, func(folderName string) error {
 		folders = append(folders, folderName)
@@ -381,7 +460,7 @@ func TestS3SharedListingPaginatesInspectionAndCounting(t *testing.T) {
 	count, err := adapter.CountFilesInFolder(ctx, "folder/parts")
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
-	require.Equal(t, 2, continuationRequests)
+	require.Equal(t, 3, continuationRequests)
 }
 
 func TestS3WalkTopLevelFoldersStreamsUnorderedPrefixesAcrossPages(t *testing.T) {

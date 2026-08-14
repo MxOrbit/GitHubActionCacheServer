@@ -162,6 +162,17 @@ composition; verify lifecycle support when using an S3-compatible endpoint.
 
 Local signed upload URLs expire after 24 hours; signed download URLs and S3 direct download URLs expire after 10 minutes.
 
+Keep `ENABLE_DIRECT_DOWNLOADS=false` for Azure v2-compatible clients that may
+resume at a nonzero offset. Those clients send `x-ms-range`, which S3 does not
+translate to its standard `Range` header; proxied downloads perform the required
+translation and validation.
+
+Proxied download URLs support `HEAD`, standard `Range`, and Azure's
+`x-ms-range` (which takes precedence when both range fields are present).
+Successful byte ranges return a single `206` response with exact
+`Content-Range`; unsatisfiable ranges return `416`. Malformed ranges, including
+the unsafe `x-ms-range` plus `If-Range` combination, fail closed with `400`.
+
 Eligible caches are presigned directly; layouts that do not satisfy the
 backend's multipart constraints transparently fall back to server-proxied
 downloads.

@@ -37,6 +37,8 @@ const (
 	directDownloadTTL              = storagelifecycle.DirectDownloadLeaseDuration
 	lastDownloadedAtUpdateInterval = 10 * time.Minute
 	uploadHeartbeatInterval        = 30 * time.Second
+	partIndexDiscoveryTimeout      = 15 * time.Second
+	partIndexCacheCapacity         = 64 << 20
 	mergeCleanupTimeout            = 10 * time.Second
 	maxDanglingPurgeAttempts       = 10
 	maxUploadContentionAttempts    = 5
@@ -80,6 +82,8 @@ type Service struct {
 	readerLeaseReleaser   *readerLeaseReleaser
 	now                   func() time.Time
 	uploadHeartbeat       time.Duration
+	partIndexTimeout      time.Duration
+	partIndexes           *partIndexCache
 }
 
 type CapacityTrigger interface {
@@ -87,15 +91,19 @@ type CapacityTrigger interface {
 }
 
 type Options struct {
-	DB                      *ent.Client
-	Storage                 storage.Adapter
-	EnableDirectDownloads   bool
-	MergeConcurrency        int
-	Lifecycle               *storagelifecycle.Service
-	Logger                  *zerolog.Logger
-	Capacity                CapacityTrigger
-	Now                     func() time.Time
-	UploadHeartbeatInterval time.Duration
+	DB                        *ent.Client
+	Storage                   storage.Adapter
+	EnableDirectDownloads     bool
+	MergeConcurrency          int
+	Lifecycle                 *storagelifecycle.Service
+	Logger                    *zerolog.Logger
+	Capacity                  CapacityTrigger
+	Now                       func() time.Time
+	UploadHeartbeatInterval   time.Duration
+	PartIndexDiscoveryTimeout time.Duration
+	// PartIndexCacheBytes bounds immutable multipart boundary indexes by
+	// charged bytes. Non-positive values use the 64 MiB default.
+	PartIndexCacheBytes int64
 }
 
 type CreateUploadResult struct {
@@ -109,6 +117,15 @@ type MatchResult struct {
 
 type DownloadStream struct {
 	io.ReadCloser
+	CacheEntryID      string
+	StorageLocationID string
+	Representation    string
+	ContentLength     int64
+	TotalLength       int64
+	Range             *DownloadRange
+}
+
+type DownloadMetadata struct {
 	CacheEntryID      string
 	StorageLocationID string
 	Representation    string
@@ -163,6 +180,14 @@ func NewService(options Options) *Service {
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = uploadHeartbeatInterval
 	}
+	indexTimeout := options.PartIndexDiscoveryTimeout
+	if indexTimeout <= 0 {
+		indexTimeout = partIndexDiscoveryTimeout
+	}
+	indexCacheBytes := options.PartIndexCacheBytes
+	if indexCacheBytes <= 0 {
+		indexCacheBytes = partIndexCacheCapacity
+	}
 
 	service := &Service{
 		db:                    options.DB,
@@ -178,6 +203,13 @@ func NewService(options Options) *Service {
 		capacity:              options.Capacity,
 		now:                   now,
 		uploadHeartbeat:       heartbeatInterval,
+		partIndexTimeout:      indexTimeout,
+		partIndexes:           newPartIndexCache(indexCacheBytes),
+	}
+	if options.EnableDirectDownloads {
+		if _, ok := options.Storage.(storage.DirectDownloadAdapter); ok {
+			logger.Warn().Msg("direct S3 downloads bypass x-ms-range translation; nonzero-offset Azure v2 reads require proxy downloads")
+		}
 	}
 	service.readerLeaseReleaser = newReaderLeaseReleaser(lifecycle, logger)
 	return service
@@ -435,6 +467,7 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 
 	var partCount int
 	var sizeBytes int64
+	var finalizedPartIndex *partIndex
 	err = s.withUploadActivity(ctx, currentUpload.ID, func(activityCtx context.Context) error {
 		var validationErr error
 		partCount, validationErr = s.committedPartCount(activityCtx, currentUpload)
@@ -452,7 +485,8 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 				currentUpload.FinishedPartUploadCount,
 			)
 		}
-		sizeBytes, validationErr = s.storage.InspectIndexedFolder(
+		var sizes []int64
+		sizes, validationErr = s.storage.InspectIndexedFolderSizes(
 			activityCtx,
 			partsFolderName(currentUpload.FolderName),
 			partCount,
@@ -464,6 +498,11 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 			}
 			return fmt.Errorf("inspect finalized cache parts: %w", validationErr)
 		}
+		finalizedPartIndex, validationErr = newPartIndex(sizes)
+		if validationErr != nil {
+			return fmt.Errorf("inspect finalized cache parts: %w", validationErr)
+		}
+		sizeBytes = finalizedPartIndex.total
 		return nil
 	})
 	if err != nil {
@@ -476,6 +515,13 @@ func (s *Service) CompleteUpload(ctx context.Context, key, version string, scope
 	location, cacheEntryID, err := s.completeUploadRecord(ctx, currentUpload, writeScope, scope.RepoID, partCount, sizeBytes)
 	if err != nil {
 		return 0, err
+	}
+	if partCount >= 2 {
+		s.partIndexes.add(partIndexKey{
+			locationID: location.ID,
+			folderName: location.FolderName,
+			partCount:  location.PartCount,
+		}, finalizedPartIndex)
 	}
 	if s.enableDirectDownloads {
 		s.tryStartMaterialization(location, cacheEntryID)
@@ -630,41 +676,7 @@ func (s *Service) MatchCacheEntry(ctx context.Context, keys []string, version st
 }
 
 func (s *Service) Download(ctx context.Context, cacheEntryID string) (*DownloadStream, error) {
-	lease, err := s.lifecycle.AcquireReader(ctx, cacheEntryID, storagelifecycle.AcquireReaderOptions{})
-	if err != nil {
-		if errors.Is(err, storagelifecycle.ErrLocationUnavailable) {
-			return nil, ErrCacheNotFound
-		}
-		return nil, &DownloadError{Err: err, CacheEntryID: cacheEntryID}
-	}
-	location := lease.Location
-	representation := string(storagereaderlease.ScopeParts)
-
-	var stream io.ReadCloser
-	if lease.Scope == storagereaderlease.ScopeStorage {
-		representation = string(storagereaderlease.ScopeStorage)
-		stream, err = s.openMerged(ctx, location)
-	} else {
-		s.tryStartMaterialization(location, cacheEntryID)
-		stream, err = s.openParts(ctx, location)
-	}
-	if err != nil {
-		s.releaseReaderLease(lease.ID)
-		return nil, &DownloadError{
-			Err:               err,
-			CacheEntryID:      cacheEntryID,
-			StorageLocationID: location.ID,
-			Representation:    representation,
-		}
-	}
-	s.touchStorageLocationIfStale(ctx, location)
-	return &DownloadStream{
-		ReadCloser:        newLeasedReadCloser(stream, s.lifecycle, lease, s.enqueueReaderLeaseRelease),
-		CacheEntryID:      cacheEntryID,
-		StorageLocationID: location.ID,
-		Representation:    representation,
-		ContentLength:     contentLength(location.SizeBytes),
-	}, nil
+	return s.download(ctx, cacheEntryID, nil)
 }
 
 func WriteScope(scope auth.CacheScope) (string, bool) {
@@ -694,7 +706,7 @@ func ReadScopesByPermission(scope auth.CacheScope) []string {
 
 func (s *Service) createUploadRecord(ctx context.Context, key, version, scope, repoID string) (int64, error) {
 	tupleHash := uploadTupleHash(key, version, scope, repoID)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		id, err := randomPositiveInt64()
 		if err != nil {
 			return 0, err

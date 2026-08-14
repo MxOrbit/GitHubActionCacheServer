@@ -97,18 +97,30 @@ func (h *Handler) UploadPart(c *gin.Context) {
 
 func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 	cacheEntryID := c.Param("cacheEntryId")
-	sig := c.Query("sig")
-	if sig == "" {
-		// legacy parameter name, kept for the rolling-upgrade window
-		sig = c.Query("signature")
-	}
-	if !h.downloadSigner.Verify(cacheEntryID, c.Query("expires"), sig) {
+	if !h.verifyDownloadSignature(c, cacheEntryID) {
 		response.JSON(c, response.Error(http.StatusUnauthorized, "invalid or expired download signature"))
 		return
 	}
 
-	stream, err := h.cache.Download(c.Request.Context(), cacheEntryID)
+	ranges, ranged, err := parseDownloadRanges(c.Request.Header)
 	if err != nil {
+		response.JSON(c, response.Error(http.StatusBadRequest, "invalid byte range"))
+		return
+	}
+	var stream *cache.DownloadStream
+	if ranged {
+		stream, err = h.cache.DownloadRanged(c.Request.Context(), cacheEntryID, ranges)
+	} else {
+		stream, err = h.cache.Download(c.Request.Context(), cacheEntryID)
+	}
+	if err != nil {
+		var rangeErr *cache.RangeNotSatisfiableError
+		if errors.As(err, &rangeErr) {
+			c.Header("Accept-Ranges", "bytes")
+			c.Header("Content-Range", fmt.Sprintf("bytes */%d", rangeErr.SizeBytes))
+			response.JSON(c, response.Error(http.StatusRequestedRangeNotSatisfiable, "requested byte range is not satisfiable"))
+			return
+		}
 		if errors.Is(err, cache.ErrCacheNotFound) {
 			var downloadErr *cache.DownloadError
 			if errors.As(err, &downloadErr) {
@@ -133,12 +145,13 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 		}
 	}()
 
-	// Opaque cache payloads: pin Content-Type so net/http never sniffs them;
-	// the rest is browser-side hardening.
-	c.Header("Content-Type", "application/octet-stream")
-	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Content-Disposition", "attachment")
-	c.Header("Cache-Control", "no-store")
+	setOpaqueDownloadHeaders(c)
+	c.Header("Accept-Ranges", "bytes")
+	if stream.Range != nil {
+		last := stream.Range.Offset + stream.Range.Count - 1
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", stream.Range.Offset, last, stream.TotalLength))
+		c.Status(http.StatusPartialContent)
+	}
 	if stream.ContentLength >= 0 {
 		c.Header("Content-Length", strconv.FormatInt(stream.ContentLength, 10))
 	}
@@ -156,6 +169,7 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 		c.Writer.Header().Del("Content-Length")
 		c.Writer.Header().Del("Content-Type")
 		c.Writer.Header().Del("Content-Disposition")
+		c.Writer.Header().Del("Content-Range")
 		if errors.Is(copyErr, cache.ErrCacheNotFound) {
 			response.JSON(c, response.Error(http.StatusNotFound, "cache file not found"))
 			return
@@ -163,6 +177,46 @@ func (h *Handler) DownloadCacheEntry(c *gin.Context) {
 		response.JSON(c, response.Error(http.StatusInternalServerError, response.InternalServerErrorMessage))
 		return
 	}
+}
+
+func (h *Handler) HeadCacheEntry(c *gin.Context) {
+	cacheEntryID := c.Param("cacheEntryId")
+	if !h.verifyDownloadSignature(c, cacheEntryID) {
+		c.Status(http.StatusUnauthorized)
+		return
+	}
+	metadata, err := h.cache.DownloadMetadata(c.Request.Context(), cacheEntryID)
+	if err != nil {
+		if errors.Is(err, cache.ErrCacheNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		h.logDownloadFailure(c.Request.Context(), err, downloadFailureMetadata(err, cacheEntryID), "metadata")
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	setOpaqueDownloadHeaders(c)
+	c.Header("Accept-Ranges", "bytes")
+	c.Header("Content-Length", strconv.FormatInt(metadata.ContentLength, 10))
+	c.Status(http.StatusOK)
+}
+
+func (h *Handler) verifyDownloadSignature(c *gin.Context, cacheEntryID string) bool {
+	sig := c.Query("sig")
+	if sig == "" {
+		// legacy parameter name, kept for the rolling-upgrade window
+		sig = c.Query("signature")
+	}
+	return h.downloadSigner.Verify(cacheEntryID, c.Query("expires"), sig)
+}
+
+func setOpaqueDownloadHeaders(c *gin.Context) {
+	// Opaque cache payloads: pin Content-Type so net/http never sniffs them;
+	// the rest is browser-side hardening.
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Disposition", "attachment")
+	c.Header("Cache-Control", "no-store")
 }
 
 type downloadMetadata struct {

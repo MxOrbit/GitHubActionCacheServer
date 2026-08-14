@@ -101,6 +101,40 @@ func TestAcquireReaderBackoffHonorsContextCancellation(t *testing.T) {
 	require.Less(t, time.Since(startedAt), 500*time.Millisecond)
 }
 
+func TestInspectReaderUsesSharedRepresentationAvailabilityRulesWithoutLease(t *testing.T) {
+	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
+	service := New(client)
+
+	parts := createLifecycleEntry(ctx, client, "parts-entry", "parts-location", 2)
+	snapshot, err := service.InspectReader(ctx, "parts-entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, parts.ID, snapshot.Location.ID)
+	require.Equal(t, storagereaderlease.ScopeParts, snapshot.Scope)
+
+	merged := createLifecycleEntry(ctx, client, "merged-entry", "merged-location", 2)
+	now := time.Now().UnixMilli()
+	client.StorageLocation.UpdateOneID(merged.ID).SetMergedAt(now).SetPartsDeletedAt(now).ExecX(ctx)
+	snapshot, err = service.InspectReader(ctx, "merged-entry", AcquireReaderOptions{})
+	require.NoError(t, err)
+	require.Equal(t, storagereaderlease.ScopeStorage, snapshot.Scope)
+
+	missingParts := createLifecycleEntry(ctx, client, "missing-parts-entry", "missing-parts-location", 2)
+	client.StorageLocation.UpdateOneID(missingParts.ID).SetPartsDeletedAt(now).ExecX(ctx)
+	_, err = service.InspectReader(ctx, "missing-parts-entry", AcquireReaderOptions{})
+	require.ErrorIs(t, err, ErrLocationUnavailable)
+
+	fenced := createLifecycleEntry(ctx, client, "fenced-entry", "fenced-location", 1)
+	client.StorageLocation.UpdateOneID(fenced.ID).SetDeletionRequestedAt(now).ExecX(ctx)
+	_, err = service.InspectReader(ctx, "fenced-entry", AcquireReaderOptions{})
+	require.ErrorIs(t, err, ErrLocationUnavailable)
+
+	_, err = service.InspectReader(ctx, "parts-entry", AcquireReaderOptions{Direct: true})
+	require.ErrorIs(t, err, ErrDirectRepresentation)
+	_, err = service.InspectReader(ctx, "missing-entry", AcquireReaderOptions{})
+	require.ErrorIs(t, err, ErrLocationUnavailable)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
 func TestDirectReaderLeaseProtectsFullSignedURLTTL(t *testing.T) {
 	ctx, client, _ := testutil.NewSQLiteFilesystem(t)
 	now := time.Now().Truncate(time.Millisecond)

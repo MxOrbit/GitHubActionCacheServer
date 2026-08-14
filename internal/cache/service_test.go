@@ -14,6 +14,7 @@ import (
 
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/auth"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent"
+	"github.com/MxOrbit/GitHubActionCacheServer/internal/ent/storagereaderlease"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storage"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/storagelifecycle"
 	"github.com/MxOrbit/GitHubActionCacheServer/internal/testutil"
@@ -325,6 +326,180 @@ func TestDownloadTrustsPartCountAndOpensEachPartOnlyWhenRead(t *testing.T) {
 	require.Equal(t, "hello world", string(body))
 	require.Zero(t, adapter.countCalls)
 	require.Equal(t, 2, adapter.downloadCalls)
+	require.Zero(t, adapter.inspectSizeCalls)
+}
+
+func TestDownloadRangedCrossesPartBoundary(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("-tail")))
+	createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+
+	stream, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{ClosedByteRange(2, 6)})
+	require.NoError(t, err)
+	require.Equal(t, int64(5), stream.ContentLength)
+	require.Equal(t, int64(9), stream.TotalLength)
+	require.Equal(t, &DownloadRange{Offset: 2, Count: 5}, stream.Range)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "dy-ta", string(body))
+}
+
+func TestDownloadRangedCachesPartIndexAcrossRequests(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("tail")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(8).ExecX(ctx)
+
+	for range 2 {
+		stream, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{OpenEndedByteRange(1)})
+		require.NoError(t, err)
+		require.NoError(t, stream.Close())
+	}
+	require.Equal(t, 1, adapter.inspectSizeCalls)
+}
+
+func TestCompleteUploadSeedsPartIndexCache(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	scope := writableScope()
+	upload, err := service.CreateUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "first", bytes.NewBufferString("body")))
+	require.NoError(t, service.UploadBlock(ctx, upload.UploadID, "second", bytes.NewBufferString("tail")))
+	require.NoError(t, service.CommitBlockList(ctx, upload.UploadID, []string{"first", "second"}))
+	adapter.reset()
+
+	_, err = service.CompleteUpload(ctx, "key", "version", scope)
+	require.NoError(t, err)
+	require.Equal(t, 1, adapter.inspectSizeCalls)
+	adapter.reset()
+	entry := client.CacheEntry.Query().OnlyX(ctx)
+	stream, err := service.DownloadRanged(ctx, entry.ID, []ByteRange{ClosedByteRange(2, 5)})
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "dyta", string(body))
+	require.Zero(t, adapter.inspectSizeCalls)
+}
+
+func TestDownloadRangedUsesMergedRepresentation(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/merged", bytes.NewBufferString("abcdef")))
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(6).SetMergedAt(time.Now().UnixMilli()).ExecX(ctx)
+
+	stream, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{SuffixByteRange(2)})
+	require.NoError(t, err)
+	require.Equal(t, string(storagereaderlease.ScopeStorage), stream.Representation)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "ef", string(body))
+}
+
+func TestDownloadMetadataUsesMergedRepresentationAfterPartsDeletion(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/merged", bytes.NewBufferString("data")))
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	now := time.Now().UnixMilli()
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(4).SetMergedAt(now).SetPartsDeletedAt(now).ExecX(ctx)
+
+	metadata, err := service.DownloadMetadata(ctx, "entry-id")
+	require.NoError(t, err)
+	require.Equal(t, string(storagereaderlease.ScopeStorage), metadata.Representation)
+	require.Equal(t, int64(4), metadata.ContentLength)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func TestDownloadRangedSinglePartSkipsIndexDiscovery(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	location := createCacheEntryForDownload(ctx, client, "entry-id", "folder")
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(4).ExecX(ctx)
+
+	stream, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{OpenEndedByteRange(1)})
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+	require.Equal(t, "ody", string(body))
+	require.Zero(t, adapter.inspectSizeCalls)
+	require.Equal(t, 1, adapter.rangedDownloadCalls)
+}
+
+func TestDownloadRangedZeroPartIsUnsatisfiableWithoutIndexDiscovery(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	adapter := &storageCallTrackingAdapter{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter})
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 0)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(99).ExecX(ctx)
+
+	_, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{OpenEndedByteRange(0)})
+	var rangeErr *RangeNotSatisfiableError
+	require.ErrorAs(t, err, &rangeErr)
+	require.Zero(t, rangeErr.SizeBytes)
+	require.Zero(t, adapter.inspectSizeCalls)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+	metadata, err := service.DownloadMetadata(ctx, "entry-id")
+	require.NoError(t, err)
+	require.Zero(t, metadata.ContentLength)
+}
+
+func TestDownloadRangedFailsClosedWhenRecordedSizeDisagrees(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	service := NewService(Options{DB: client, Storage: filesystem})
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("tail")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(99).ExecX(ctx)
+
+	_, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{ClosedByteRange(0, 1)})
+	require.ErrorContains(t, err, "does not match recorded size")
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func TestDownloadRangedRevalidatesLeaseAfterIndexDiscovery(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("tail")))
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(8).ExecX(ctx)
+	adapter := &afterInspectIndexedSizesStorage{
+		Adapter: filesystem,
+		after: func() {
+			client.StorageReaderLease.Delete().ExecX(ctx)
+		},
+	}
+	service := NewService(Options{DB: client, Storage: adapter})
+
+	_, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{OpenEndedByteRange(1)})
+	require.ErrorIs(t, err, ErrCacheNotFound)
+	require.Zero(t, adapter.rangedDownloads)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+}
+
+func TestDownloadRangedBoundsIndexDiscoveryTime(t *testing.T) {
+	ctx, client, filesystem := newTestServiceDeps(t)
+	location := createCacheEntryForDownloadWithPartCount(ctx, client, "entry-id", "folder", 2)
+	client.StorageLocation.UpdateOneID(location.ID).SetSizeBytes(8).ExecX(ctx)
+	adapter := &blockingInspectIndexedSizesStorage{Adapter: filesystem}
+	service := NewService(Options{DB: client, Storage: adapter, PartIndexDiscoveryTimeout: 20 * time.Millisecond})
+
+	_, err := service.DownloadRanged(ctx, "entry-id", []ByteRange{OpenEndedByteRange(1)})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
 }
 
 func TestMatchCacheEntryUsesOriginalOrder(t *testing.T) {
@@ -1322,11 +1497,13 @@ type copyTrackingStorage struct {
 
 type storageCallTrackingAdapter struct {
 	storage.Adapter
-	countCalls        int
-	downloadCalls     int
-	objectExistsCalls []string
-	countErr          error
-	inspectIndexedErr error
+	countCalls          int
+	downloadCalls       int
+	rangedDownloadCalls int
+	inspectSizeCalls    int
+	objectExistsCalls   []string
+	countErr            error
+	inspectIndexedErr   error
 }
 
 func (s *storageCallTrackingAdapter) CountFilesInFolder(ctx context.Context, folderName string) (int, error) {
@@ -1342,11 +1519,24 @@ func (s *storageCallTrackingAdapter) CreateDownloadStream(ctx context.Context, o
 	return s.Adapter.CreateDownloadStream(ctx, objectName)
 }
 
+func (s *storageCallTrackingAdapter) CreateRangedDownloadStream(ctx context.Context, objectName string, offset, count int64) (io.ReadCloser, error) {
+	s.rangedDownloadCalls++
+	return s.Adapter.CreateRangedDownloadStream(ctx, objectName, offset, count)
+}
+
 func (s *storageCallTrackingAdapter) InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error) {
 	if s.inspectIndexedErr != nil {
 		return 0, s.inspectIndexedErr
 	}
 	return s.Adapter.InspectIndexedFolder(ctx, folderName, expectedObjects)
+}
+
+func (s *storageCallTrackingAdapter) InspectIndexedFolderSizes(ctx context.Context, folderName string, expectedObjects int) ([]int64, error) {
+	s.inspectSizeCalls++
+	if s.inspectIndexedErr != nil {
+		return nil, s.inspectIndexedErr
+	}
+	return s.Adapter.InspectIndexedFolderSizes(ctx, folderName, expectedObjects)
 }
 
 func (s *storageCallTrackingAdapter) ObjectExists(ctx context.Context, objectName string) (bool, error) {
@@ -1357,7 +1547,37 @@ func (s *storageCallTrackingAdapter) ObjectExists(ctx context.Context, objectNam
 func (s *storageCallTrackingAdapter) reset() {
 	s.countCalls = 0
 	s.downloadCalls = 0
+	s.rangedDownloadCalls = 0
+	s.inspectSizeCalls = 0
 	s.objectExistsCalls = nil
+}
+
+type afterInspectIndexedSizesStorage struct {
+	storage.Adapter
+	after           func()
+	rangedDownloads int
+}
+
+func (s *afterInspectIndexedSizesStorage) InspectIndexedFolderSizes(ctx context.Context, folderName string, expectedObjects int) ([]int64, error) {
+	sizes, err := s.Adapter.InspectIndexedFolderSizes(ctx, folderName, expectedObjects)
+	if err == nil {
+		s.after()
+	}
+	return sizes, err
+}
+
+func (s *afterInspectIndexedSizesStorage) CreateRangedDownloadStream(ctx context.Context, objectName string, offset, count int64) (io.ReadCloser, error) {
+	s.rangedDownloads++
+	return s.Adapter.CreateRangedDownloadStream(ctx, objectName, offset, count)
+}
+
+type blockingInspectIndexedSizesStorage struct {
+	storage.Adapter
+}
+
+func (s *blockingInspectIndexedSizesStorage) InspectIndexedFolderSizes(ctx context.Context, _ string, _ int) ([]int64, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 func (s *copyTrackingStorage) CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error {

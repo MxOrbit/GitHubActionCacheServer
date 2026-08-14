@@ -86,6 +86,7 @@ func NewRouter(logger zerolog.Logger, cfg config.Config, deps Dependencies) http
 	// legacy alias kept for URL-shape compatibility; issued URLs always use the devstore path
 	router.PUT("/upload/:uploadId", handlers.UploadPart)
 	router.GET("/download/:cacheEntryId", handlers.DownloadCacheEntry)
+	router.HEAD("/download/:cacheEntryId", handlers.HeadCacheEntry)
 
 	managementPublic := router.Group("/management-api", middleware.ManagementCORS())
 	{

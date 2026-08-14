@@ -194,6 +194,28 @@ func (a *FilesystemAdapter) CreateDownloadStream(_ context.Context, objectName s
 	return file, nil
 }
 
+func (a *FilesystemAdapter) CreateRangedDownloadStream(ctx context.Context, objectName string, offset, count int64) (io.ReadCloser, error) {
+	if offset < 0 || count <= 0 {
+		return nil, fmt.Errorf("invalid object range offset=%d count=%d", offset, count)
+	}
+	path, err := a.safePath(objectName)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ObjectNotFoundError{ObjectName: objectName}
+		}
+		return nil, fmt.Errorf("open ranged object: %w", err)
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, errors.Join(fmt.Errorf("seek ranged object: %w", err), file.Close())
+	}
+	reader := contextReader{ctx: ctx, reader: io.LimitReader(file, count)}
+	return newExactLengthReadCloser(reader, file, count), nil
+}
+
 func (a *FilesystemAdapter) InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectMetadata{}, err
@@ -258,19 +280,26 @@ func (a *FilesystemAdapter) InspectIndexedFolder(ctx context.Context, folderName
 	if err != nil {
 		return 0, err
 	}
+	if err := a.walkIndexedFolder(ctx, folderName, accumulator); err != nil {
+		return 0, err
+	}
+	return accumulator.result()
+}
+
+func (a *FilesystemAdapter) walkIndexedFolder(ctx context.Context, folderName string, accumulator *indexedFolderAccumulator) error {
 	path, err := a.safePath(folderName)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return accumulator.result()
+			return nil
 		}
-		return 0, fmt.Errorf("stat indexed folder: %w", err)
+		return fmt.Errorf("stat indexed folder: %w", err)
 	}
 	if !info.IsDir() {
-		return 0, fmt.Errorf("inspect indexed folder %q: path is not a directory", folderName)
+		return fmt.Errorf("inspect indexed folder %q: path is not a directory", folderName)
 	}
 
 	err = walkFilesystemDirectory(ctx, path, "", func(relativeName string, info os.FileInfo) error {
@@ -288,9 +317,20 @@ func (a *FilesystemAdapter) InspectIndexedFolder(ctx context.Context, folderName
 		return accumulator.add(object.Name, object.SizeBytes)
 	})
 	if err != nil {
-		return 0, fmt.Errorf("inspect indexed folder %q: %w", folderName, err)
+		return fmt.Errorf("inspect indexed folder %q: %w", folderName, err)
 	}
-	return accumulator.result()
+	return nil
+}
+
+func (a *FilesystemAdapter) InspectIndexedFolderSizes(ctx context.Context, folderName string, expectedObjects int) ([]int64, error) {
+	accumulator, err := newIndexedFolderSizeAccumulator(expectedObjects)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.walkIndexedFolder(ctx, folderName, accumulator); err != nil {
+		return nil, err
+	}
+	return accumulator.resultSizes()
 }
 
 func (a *FilesystemAdapter) WalkTopLevelFolders(ctx context.Context, visit func(folderName string) error) error {

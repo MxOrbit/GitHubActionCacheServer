@@ -40,6 +40,26 @@ func TestFilesystemAdapterUploadDownloadCountAndDelete(t *testing.T) {
 	require.Zero(t, count)
 }
 
+func TestFilesystemAdapterCreatesExactRangedStream(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := NewFilesystemAdapter(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, adapter.UploadStream(ctx, "folder/object", strings.NewReader("0123456789")))
+
+	stream, err := adapter.CreateRangedDownloadStream(ctx, "folder/object", 3, 4)
+	require.NoError(t, err)
+	body, err := io.ReadAll(stream)
+	require.NoError(t, err)
+	require.Equal(t, "3456", string(body))
+	require.NoError(t, stream.Close())
+
+	short, err := adapter.CreateRangedDownloadStream(ctx, "folder/object", 8, 4)
+	require.NoError(t, err)
+	_, err = io.ReadAll(short)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.NoError(t, short.Close())
+}
+
 func TestFilesystemBoundedFolderInspectionSeparatesLogicalRepresentations(t *testing.T) {
 	ctx := context.Background()
 	adapter, err := NewFilesystemAdapter(t.TempDir())
@@ -62,6 +82,9 @@ func TestFilesystemBoundedFolderInspectionSeparatesLogicalRepresentations(t *tes
 	logicalSize, err := adapter.InspectIndexedFolder(ctx, "folder/parts", 2)
 	require.NoError(t, err)
 	require.Equal(t, int64(11), logicalSize)
+	sizes, err := adapter.InspectIndexedFolderSizes(ctx, "folder/parts", 2)
+	require.NoError(t, err)
+	require.Equal(t, []int64{6, 5}, sizes)
 	_, err = adapter.InspectIndexedFolder(ctx, "folder/parts", 3)
 	require.ErrorIs(t, err, ErrIndexedObjectMissing)
 

@@ -456,6 +456,171 @@ func TestDownloadLengthMismatchDoesNotReusePayloadContentLengthForError(t *testi
 	require.JSONEq(t, `{"ok":false,"error":"internal server error"}`, rec.Body.String())
 }
 
+func TestDownloadSupportsXMRangeAcrossParts(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/1", bytes.NewBufferString("-tail")))
+	location := client.StorageLocation.Create().
+		SetID("location-id").
+		SetFolderName("folder").
+		SetPartCount(2).
+		SetSizeBytes(9).
+		SaveX(ctx)
+	client.CacheEntry.Create().
+		SetID("entry-id").
+		SetKey("key").
+		SetVersion("version").
+		SetScope("scope").
+		SetRepoId("repo").
+		SetUpdatedAt(time.Now().UnixMilli()).
+		SetLocation(location).
+		SaveX(ctx)
+
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{DB: client, Storage: filesystem, Verifier: newSkipVerifier(t)})
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("X-Ms-Range", "bytes=2-6")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusPartialContent, rec.Code)
+	require.Equal(t, "bytes", rec.Header().Get("Accept-Ranges"))
+	require.Equal(t, "bytes 2-6/9", rec.Header().Get("Content-Range"))
+	require.Equal(t, "5", rec.Header().Get("Content-Length"))
+	require.Equal(t, "dy-ta", rec.Body.String())
+}
+
+func TestDownloadRangeSelectsFirstSatisfiableAndRejectsInvalid(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	location := client.StorageLocation.Create().SetID("location-id").SetFolderName("folder").SetPartCount(1).SetSizeBytes(4).SaveX(ctx)
+	client.CacheEntry.Create().SetID("entry-id").SetKey("key").SetVersion("version").SetScope("scope").SetRepoId("repo").SetUpdatedAt(time.Now().UnixMilli()).SetLocation(location).SaveX(ctx)
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{DB: client, Storage: filesystem, Verifier: newSkipVerifier(t)})
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
+
+	t.Run("first satisfiable", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+		req.Header.Set("Range", "bytes=99-100,1-2")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusPartialContent, rec.Code)
+		require.Equal(t, "bytes 1-2/4", rec.Header().Get("Content-Range"))
+		require.Equal(t, "od", rec.Body.String())
+	})
+
+	t.Run("unsatisfiable", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+		req.Header.Set("Range", "bytes=9-")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+		require.Equal(t, "bytes */4", rec.Header().Get("Content-Range"))
+		require.Equal(t, "bytes", rec.Header().Get("Accept-Ranges"))
+	})
+
+	t.Run("signature before malformed range", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/download/entry-id?expires=0&sig=bad", nil)
+		req.Header.Set("Range", "bytes=bad")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("valid signature rejects malformed range", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+		req.Header.Set("Range", "bytes=bad")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("x ms range with if range fails closed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+		req.Header.Set("X-Ms-Range", "bytes=1-")
+		req.Header.Set("If-Range", "etag")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.NotEqual(t, "body", rec.Body.String())
+	})
+}
+
+func TestHeadDownloadReturnsMetadataWithoutOpeningStreamOrLease(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	require.NoError(t, filesystem.UploadStream(ctx, "folder/parts/0", bytes.NewBufferString("body")))
+	location := client.StorageLocation.Create().SetID("location-id").SetFolderName("folder").SetPartCount(1).SetSizeBytes(4).SaveX(ctx)
+	client.CacheEntry.Create().SetID("entry-id").SetKey("key").SetVersion("version").SetScope("scope").SetRepoId("repo").SetUpdatedAt(time.Now().UnixMilli()).SetLocation(location).SaveX(ctx)
+	adapter := &downloadOpenTrackingStorage{Adapter: filesystem}
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{DB: client, Storage: adapter, Verifier: newSkipVerifier(t)})
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodHead, signedURL, nil)
+	req.Header.Set("Range", "bytes=1-")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "4", rec.Header().Get("Content-Length"))
+	require.Equal(t, "bytes", rec.Header().Get("Accept-Ranges"))
+	require.Empty(t, rec.Header().Get("Content-Range"))
+	require.Empty(t, rec.Body.String())
+	require.Zero(t, adapter.openCalls)
+	require.Zero(t, client.StorageReaderLease.Query().CountX(ctx))
+	require.Nil(t, client.StorageLocation.GetX(ctx, location.ID).LastDownloadedAt)
+}
+
+func TestRangedDownloadFailureAfterWriteDoesNotAppendJSON(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	mergedAt := time.Now().UnixMilli()
+	location := client.StorageLocation.Create().SetID("location-id").SetFolderName("folder").SetPartCount(1).SetSizeBytes(4).SetMergedAt(mergedAt).SaveX(ctx)
+	client.CacheEntry.Create().SetID("entry-id").SetKey("key").SetVersion("version").SetScope("scope").SetRepoId("repo").SetUpdatedAt(time.Now().UnixMilli()).SetLocation(location).SaveX(ctx)
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{DB: client, Storage: shortRangedDownloadStorage{Adapter: filesystem}, Verifier: newSkipVerifier(t)})
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+	req.Header.Set("Range", "bytes=0-1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusPartialContent, rec.Code)
+	require.Equal(t, "2", rec.Header().Get("Content-Length"))
+	require.Equal(t, "x", rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "internal server error")
+}
+
+func TestRangedDownloadFailureBeforeWriteReturnsCleanJSON(t *testing.T) {
+	ctx, client, filesystem := testutil.NewSQLiteFilesystem(t)
+	mergedAt := time.Now().UnixMilli()
+	location := client.StorageLocation.Create().SetID("location-id").SetFolderName("folder").SetPartCount(1).SetSizeBytes(4).SetMergedAt(mergedAt).SaveX(ctx)
+	client.CacheEntry.Create().SetID("entry-id").SetKey("key").SetVersion("version").SetScope("scope").SetRepoId("repo").SetUpdatedAt(time.Now().UnixMilli()).SetLocation(location).SaveX(ctx)
+	cfg := newTestConfig(t)
+	cfg.Cache.DownloadURLSigningSecret = "test-secret"
+	router := NewRouter(zerolog.Nop(), cfg, Dependencies{DB: client, Storage: failedRangedDownloadStorage{Adapter: filesystem}, Verifier: newSkipVerifier(t)})
+	signedURL, err := downloadurl.New("test-secret", time.Minute).Sign("http://cache.test/download/entry-id", "entry-id")
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, signedURL, nil)
+	req.Header.Set("Range", "bytes=0-1")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Empty(t, rec.Header().Get("Content-Range"))
+	require.NotEqual(t, "2", rec.Header().Get("Content-Length"))
+	require.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"ok":false,"error":"internal server error"}`, rec.Body.String())
+}
+
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 
@@ -517,6 +682,45 @@ func (s failComposeStorage) ComposeObjects(context.Context, string, []string) er
 
 type shortDownloadStorage struct {
 	storage.Adapter
+}
+
+type shortRangedDownloadStorage struct {
+	storage.Adapter
+}
+
+func (s shortRangedDownloadStorage) CreateRangedDownloadStream(context.Context, string, int64, int64) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("x")), nil
+}
+
+type failedRangedDownloadStorage struct {
+	storage.Adapter
+}
+
+func (s failedRangedDownloadStorage) CreateRangedDownloadStream(context.Context, string, int64, int64) (io.ReadCloser, error) {
+	return io.NopCloser(errorReader{err: errors.New("injected ranged download failure")}), nil
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+type downloadOpenTrackingStorage struct {
+	storage.Adapter
+	openCalls int
+}
+
+func (s *downloadOpenTrackingStorage) CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error) {
+	s.openCalls++
+	return s.Adapter.CreateDownloadStream(ctx, objectName)
+}
+
+func (s *downloadOpenTrackingStorage) CreateRangedDownloadStream(ctx context.Context, objectName string, offset, count int64) (io.ReadCloser, error) {
+	s.openCalls++
+	return s.Adapter.CreateRangedDownloadStream(ctx, objectName, offset, count)
 }
 
 func (s shortDownloadStorage) CreateDownloadStream(context.Context, string) (io.ReadCloser, error) {

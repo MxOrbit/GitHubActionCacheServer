@@ -69,6 +69,22 @@ func TestSQLiteFilesystemSaveAndRestore(t *testing.T) {
 
 	require.Equal(t, "cache-content", downloadCache(t, router, downloadURL))
 
+	rangeReq := httptest.NewRequest(http.MethodGet, downloadURL.RequestURI(), nil)
+	rangeReq.Header.Set("X-Ms-Range", "bytes=2-")
+	rangeRec := httptest.NewRecorder()
+	router.ServeHTTP(rangeRec, rangeReq)
+	require.Equal(t, http.StatusPartialContent, rangeRec.Code)
+	require.Equal(t, "bytes 2-12/13", rangeRec.Header().Get("Content-Range"))
+	require.Equal(t, "che-content", rangeRec.Body.String())
+
+	headReq := httptest.NewRequest(http.MethodHead, downloadURL.RequestURI(), nil)
+	headRec := httptest.NewRecorder()
+	router.ServeHTTP(headRec, headReq)
+	require.Equal(t, http.StatusOK, headRec.Code)
+	require.Equal(t, "13", headRec.Header().Get("Content-Length"))
+	require.Equal(t, "bytes", headRec.Header().Get("Accept-Ranges"))
+	require.Empty(t, headRec.Body.String())
+
 	legacyURL := *downloadURL
 	legacyQuery := legacyURL.Query()
 	legacyQuery.Set("signature", legacyQuery.Get("sig"))

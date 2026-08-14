@@ -36,14 +36,55 @@ type Adapter interface {
 	UploadStream(ctx context.Context, objectName string, stream io.Reader) error
 	CopyObject(ctx context.Context, sourceObjectName, destinationObjectName string) error
 	CreateDownloadStream(ctx context.Context, objectName string) (io.ReadCloser, error)
+	// CreateRangedDownloadStream returns exactly count bytes beginning at offset.
+	// A short underlying object must surface as io.ErrUnexpectedEOF rather than
+	// a successful EOF so callers never serve a silently truncated range.
+	CreateRangedDownloadStream(ctx context.Context, objectName string, offset, count int64) (io.ReadCloser, error)
 	InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error)
 	InspectFolderSummary(ctx context.Context, folderName string) (FolderSummary, error)
 	InspectIndexedFolder(ctx context.Context, folderName string, expectedObjects int) (int64, error)
+	// InspectIndexedFolderSizes validates the same contiguous numeric object set
+	// as InspectIndexedFolder and returns sizes ordered by object index.
+	InspectIndexedFolderSizes(ctx context.Context, folderName string, expectedObjects int) ([]int64, error)
 	WalkTopLevelFolders(ctx context.Context, visit func(folderName string) error) error
 	ObjectExists(ctx context.Context, objectName string) (bool, error)
 	DeleteFolder(ctx context.Context, folderName string) error
 	CountFilesInFolder(ctx context.Context, folderName string) (int, error)
 	Clear(ctx context.Context) error
+}
+
+type exactLengthReadCloser struct {
+	reader    io.Reader
+	closer    io.Closer
+	remaining int64
+}
+
+func newExactLengthReadCloser(reader io.Reader, closer io.Closer, count int64) io.ReadCloser {
+	return &exactLengthReadCloser{reader: reader, closer: closer, remaining: count}
+}
+
+func (r *exactLengthReadCloser) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	if errors.Is(err, io.EOF) {
+		if r.remaining != 0 {
+			return n, io.ErrUnexpectedEOF
+		}
+		if n != 0 {
+			return n, nil
+		}
+	}
+	return n, err
+}
+
+func (r *exactLengthReadCloser) Close() error {
+	return r.closer.Close()
 }
 
 type DirectDownloadAdapter interface {

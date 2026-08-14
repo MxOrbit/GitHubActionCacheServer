@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -348,6 +350,46 @@ func (a *S3Adapter) CreateDownloadStream(ctx context.Context, objectName string)
 	return output.Body, nil
 }
 
+func (a *S3Adapter) CreateRangedDownloadStream(ctx context.Context, objectName string, offset, count int64) (io.ReadCloser, error) {
+	if offset < 0 || count <= 0 || offset > math.MaxInt64-count+1 {
+		return nil, fmt.Errorf("invalid object range offset=%d count=%d", offset, count)
+	}
+	last := offset + count - 1
+	output, err := a.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(a.key(objectName)),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, last)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, ObjectNotFoundError{ObjectName: objectName}
+		}
+		return nil, fmt.Errorf("get ranged s3 object: %w", err)
+	}
+	if output.ContentLength == nil || aws.ToInt64(output.ContentLength) != count {
+		return nil, errors.Join(
+			fmt.Errorf("get ranged s3 object %q: content length %d does not match requested count %d", objectName, aws.ToInt64(output.ContentLength), count),
+			output.Body.Close(),
+		)
+	}
+	if offset > 0 && !matchesS3ContentRange(aws.ToString(output.ContentRange), offset, last) {
+		return nil, errors.Join(
+			fmt.Errorf("get ranged s3 object %q: invalid content range %q", objectName, aws.ToString(output.ContentRange)),
+			output.Body.Close(),
+		)
+	}
+	return newExactLengthReadCloser(output.Body, output.Body, count), nil
+}
+
+func matchesS3ContentRange(value string, first, last int64) bool {
+	prefix := fmt.Sprintf("bytes %d-%d/", first, last)
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	total, err := strconv.ParseInt(strings.TrimPrefix(value, prefix), 10, 64)
+	return err == nil && total > last
+}
+
 func (a *S3Adapter) InspectObject(ctx context.Context, objectName string) (ObjectMetadata, error) {
 	output, err := a.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(a.bucket),
@@ -394,15 +436,33 @@ func (a *S3Adapter) InspectIndexedFolder(ctx context.Context, folderName string,
 	if err != nil {
 		return 0, err
 	}
+	if err := a.inspectIndexedFolder(ctx, folderName, accumulator); err != nil {
+		return 0, err
+	}
+	return accumulator.result()
+}
+
+func (a *S3Adapter) InspectIndexedFolderSizes(ctx context.Context, folderName string, expectedObjects int) ([]int64, error) {
+	accumulator, err := newIndexedFolderSizeAccumulator(expectedObjects)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.inspectIndexedFolder(ctx, folderName, accumulator); err != nil {
+		return nil, err
+	}
+	return accumulator.resultSizes()
+}
+
+func (a *S3Adapter) inspectIndexedFolder(ctx context.Context, folderName string, accumulator *indexedFolderAccumulator) error {
 	prefix := a.key(folderName) + "/"
-	err = a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
+	err := a.walkObjects(ctx, prefix, "", func(object ObjectMetadata) error {
 		relativeName := strings.TrimPrefix(object.Name, prefix)
 		return accumulator.add(relativeName, object.SizeBytes)
 	})
 	if err != nil {
-		return 0, err
+		return err
 	}
-	return accumulator.result()
+	return nil
 }
 
 func (a *S3Adapter) WalkTopLevelFolders(ctx context.Context, visit func(folderName string) error) error {

@@ -67,6 +67,15 @@ type ReaderLease struct {
 	RenewAfter time.Duration
 }
 
+// ReaderSnapshot is the authoritative, lease-free view used by metadata-only
+// requests. It deliberately shares representation availability rules with
+// AcquireReader while leaving payload protection to callers that acquire a
+// real ReaderLease.
+type ReaderSnapshot struct {
+	Location *ent.StorageLocation
+	Scope    storagereaderlease.Scope
+}
+
 type AcquireReaderOptions struct {
 	Direct bool
 }
@@ -145,6 +154,31 @@ func (s *Service) AcquireReader(ctx context.Context, cacheEntryID string, option
 	return nil, ErrLocationUnavailable
 }
 
+func (s *Service) InspectReader(ctx context.Context, cacheEntryID string, options AcquireReaderOptions) (*ReaderSnapshot, error) {
+	entry, err := s.db.CacheEntry.Query().
+		Where(cacheentry.ID(cacheEntryID)).
+		WithLocation().
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ErrLocationUnavailable
+		}
+		return nil, fmt.Errorf("query cache entry for reader snapshot: %w", err)
+	}
+	location, err := entry.Edges.LocationOrErr()
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ErrLocationUnavailable
+		}
+		return nil, fmt.Errorf("query storage location for reader snapshot: %w", err)
+	}
+	scope, err := classifyReaderLocation(location, options)
+	if err != nil {
+		return nil, err
+	}
+	return &ReaderSnapshot{Location: location, Scope: scope}, nil
+}
+
 func (s *Service) acquireReaderOnce(ctx context.Context, cacheEntryID string, options AcquireReaderOptions) (*ReaderLease, bool, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
@@ -177,29 +211,29 @@ func (s *Service) acquireReaderOnce(ctx context.Context, cacheEntryID string, op
 		return nil, false, fmt.Errorf("query storage location for reader lease: %w", err)
 	}
 
-	// A set deletionRequestedAt never clears, so this snapshot check is final.
-	if location.DeletionRequestedAt != nil {
-		if err := tx.Rollback(); err != nil {
-			return nil, false, fmt.Errorf("rollback fenced reader lease: %w", err)
-		}
-		committed = true
-		return nil, true, nil
-	}
-
-	scope := storagereaderlease.ScopeParts
-	if location.MergedAt != nil {
-		scope = storagereaderlease.ScopeStorage
-	} else {
-		if location.PartsDeletedAt != nil {
-			return nil, false, ErrLocationUnavailable
-		}
-		if options.Direct && location.PartCount != 1 {
+	scope, availabilityErr := classifyReaderLocation(location, options)
+	if availabilityErr != nil {
+		switch {
+		case errors.Is(availabilityErr, ErrLocationUnavailable) && location.DeletionRequestedAt != nil:
+			// A fenced location may already have been replaced on the cache entry;
+			// retry the whole snapshot rather than reporting the old row.
+			if err := tx.Rollback(); err != nil {
+				return nil, false, fmt.Errorf("rollback fenced reader lease: %w", err)
+			}
+			committed = true
+			return nil, true, nil
+		case errors.Is(availabilityErr, ErrDirectRepresentation):
 			if err := tx.Commit(); err != nil {
 				return nil, false, fmt.Errorf("commit direct representation check: %w", err)
 			}
 			committed = true
-			return nil, false, ErrDirectRepresentation
+			return nil, false, availabilityErr
+		default:
+			return nil, false, availabilityErr
 		}
+	}
+
+	if scope == storagereaderlease.ScopeParts {
 		// The row lock is only paid while a future merge (and thus parts
 		// deletion, which has no grace period) is still possible; merged,
 		// single-part, unsupported and composer-less locations are covered by
@@ -261,6 +295,22 @@ func (s *Service) acquireReaderOnce(ctx context.Context, cacheEntryID string, op
 		ExpiresAt:  expiresAt,
 		RenewAfter: s.leaseRenewalInterval,
 	}, false, nil
+}
+
+func classifyReaderLocation(location *ent.StorageLocation, options AcquireReaderOptions) (storagereaderlease.Scope, error) {
+	if location == nil || location.DeletionRequestedAt != nil {
+		return "", ErrLocationUnavailable
+	}
+	if location.MergedAt != nil {
+		return storagereaderlease.ScopeStorage, nil
+	}
+	if location.PartsDeletedAt != nil {
+		return "", ErrLocationUnavailable
+	}
+	if options.Direct && location.PartCount != 1 {
+		return "", ErrDirectRepresentation
+	}
+	return storagereaderlease.ScopeParts, nil
 }
 
 func (s *Service) RenewReader(ctx context.Context, leaseID string) error {

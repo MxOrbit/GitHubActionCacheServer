@@ -60,6 +60,7 @@ type FolderSummary struct {
 type indexedFolderAccumulator struct {
 	expected     int
 	seen         []uint64
+	sizes        []int64
 	logicalBytes int64
 }
 
@@ -76,6 +77,15 @@ func newIndexedFolderAccumulator(expected int) (*indexedFolderAccumulator, error
 	}, nil
 }
 
+func newIndexedFolderSizeAccumulator(expected int) (*indexedFolderAccumulator, error) {
+	accumulator, err := newIndexedFolderAccumulator(expected)
+	if err != nil {
+		return nil, err
+	}
+	accumulator.sizes = make([]int64, expected)
+	return accumulator, nil
+}
+
 func (a *indexedFolderAccumulator) add(relativeName string, sizeBytes int64) error {
 	index, err := strconv.Atoi(relativeName)
 	if err != nil || index < 0 || index >= a.expected || strconv.Itoa(index) != relativeName {
@@ -86,6 +96,9 @@ func (a *indexedFolderAccumulator) add(relativeName string, sizeBytes int64) err
 		return nil
 	}
 	a.seen[word] |= mask
+	if a.sizes != nil {
+		a.sizes[index] = sizeBytes
+	}
 	a.logicalBytes, err = addStorageBytes(a.logicalBytes, sizeBytes)
 	return err
 }
@@ -98,6 +111,13 @@ func (a *indexedFolderAccumulator) result() (int64, error) {
 		}
 	}
 	return a.logicalBytes, nil
+}
+
+func (a *indexedFolderAccumulator) resultSizes() ([]int64, error) {
+	if _, err := a.result(); err != nil {
+		return nil, err
+	}
+	return a.sizes, nil
 }
 
 func validateObjectMetadata(object ObjectMetadata) error {
